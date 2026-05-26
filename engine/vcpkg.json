@@ -1,0 +1,9 @@
+{
+    "name": "openreplay-engine",
+    "version-string": "0.1.0",
+    "description": "OpenReplay — High-performance C++20 market replay and backtesting engine",
+    "dependencies": [
+        "crow",
+        "nlohmann-json"
+    ]
+}
