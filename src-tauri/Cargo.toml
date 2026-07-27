@@ -25,6 +25,7 @@ tokio = { version = "1", features = ["net", "time", "fs", "io-util"] }
 reqwest = { version = "0.13", features = ["stream"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 futures-util = "0.3"
+sysinfo = "0.31"
 
 [profile.release]
 panic = "abort"

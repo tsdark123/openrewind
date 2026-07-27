@@ -3,13 +3,24 @@ import { motion } from 'motion/react';
 import { Send, Sparkles } from 'lucide-react';
 import { fetch as tauriFetch } from '@tauri-apps/plugin-http';
 import { cn } from '../../lib/utils';
-import { generateOrionContextPrompt } from '../../lib/orionParser';
-import type { PerformanceLog } from '../../types';
+import { generateOrionContextPrompt, type LiveContext } from '../../lib/orionParser';
+import type { ActiveSessionTrade, ClosedTrade, PerformanceLog, Position } from '../../types';
+
+const ORION_MODEL = 'llama3.2';
 
 interface OrionChatSidepanelProps {
   className?: string;
   performanceLog: PerformanceLog;
   lightMode?: boolean;
+  symbol: string;
+  replayDate: string;
+  sessionActive: boolean;
+  currentPrice: number;
+  balance: number;
+  equity: number;
+  openPositions: Position[];
+  activeSessionTrades: ActiveSessionTrade[];
+  tradeHistory: ClosedTrade[];
 }
 
 interface ChatMessage {
@@ -17,7 +28,20 @@ interface ChatMessage {
   text: string;
 }
 
-export function OrionChatSidepanel({ className, performanceLog, lightMode = false }: OrionChatSidepanelProps) {
+export function OrionChatSidepanel({
+  className,
+  performanceLog,
+  lightMode = false,
+  symbol,
+  replayDate,
+  sessionActive,
+  currentPrice,
+  balance,
+  equity,
+  openPositions,
+  activeSessionTrades,
+  tradeHistory,
+}: OrionChatSidepanelProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
       sender: 'ai',
@@ -44,7 +68,7 @@ export function OrionChatSidepanel({ className, performanceLog, lightMode = fals
 
   const isTauri = typeof window !== 'undefined' && ('__TAURI__' in window || '__TAURI_INTERNALS__' in window);
 
-  // Full Orion boot pipeline: start/download Ollama, then pull llama3.
+  // Full Orion boot pipeline: start/download Ollama, then pull the Orion model.
   useEffect(() => {
     let cancelled = false;
 
@@ -70,7 +94,7 @@ export function OrionChatSidepanel({ className, performanceLog, lightMode = fals
         const response = await tauriFetch('http://localhost:11434/api/pull', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name: 'llama3', stream: true }),
+          body: JSON.stringify({ name: ORION_MODEL, stream: true }),
         });
         if (cancelled) return;
 
@@ -124,7 +148,7 @@ export function OrionChatSidepanel({ className, performanceLog, lightMode = fals
         const response = await tauriFetch('http://localhost:11434/api/show', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ model: 'llama3' }),
+          body: JSON.stringify({ model: ORION_MODEL }),
         });
         if (cancelled) return;
 
@@ -227,13 +251,25 @@ export function OrionChatSidepanel({ className, performanceLog, lightMode = fals
     setIsTyping(true);
 
     try {
-      const telemetry = generateOrionContextPrompt(performanceLog);
+      const liveContext: LiveContext = {
+        symbol,
+        replayDate,
+        sessionActive,
+        currentPrice,
+        balance,
+        equity,
+        openPositions,
+        activeSessionTrades,
+        tradeHistory,
+      };
+      const telemetry = generateOrionContextPrompt(performanceLog, liveContext);
       const systemPrompt = [
-        'You are Orion, a private, offline AI trading coach embedded in OpenRewind.',
-        'You analyze the user\'s replay-trading journal. Be concise, risk-focused, and actionable.',
-        'Do not provide regulated investment advice; focus on execution quality, risk management, and journal review.',
+        'You are Orion, an observant, offline AI trading coach embedded in OpenRewind. You watch the user\'s replay unfold in real time.',
+        'Use the telemetry to answer accurately about what is happening right now and what the user just did.',
+        'If the user asks about their last trade, the trade they just did, or why it lost/won, use the exact values from the line that begins with "Latest closed trade overall:". Do not use a different trade or guess.',
+        'Be concise: 2-4 short sentences unless the user asks for detail. Use plain English only. Never use markdown, LaTeX, code blocks, bullet points, or asterisks.',
+        'Do not provide regulated investment advice; focus on execution quality, risk management, and what the user just did on the chart.',
         '',
-        'OpenRewind Trading Journal:',
         telemetry,
       ].join('\n');
 
@@ -246,7 +282,7 @@ export function OrionChatSidepanel({ className, performanceLog, lightMode = fals
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          model: 'llama3',
+          model: ORION_MODEL,
           messages: [{ role: 'system', content: systemPrompt }, ...history],
           stream: false,
         }),
@@ -264,7 +300,7 @@ export function OrionChatSidepanel({ className, performanceLog, lightMode = fals
         ...prev,
         {
           sender: 'ai',
-          text: `Orion is offline — start Ollama locally and ensure \`llama3\` is pulled. (${err instanceof Error ? err.message : String(err)})`,
+          text: `Orion is offline — start Ollama locally and ensure \`${ORION_MODEL}\` is pulled. (${err instanceof Error ? err.message : String(err)})`,
         },
       ]);
     } finally {

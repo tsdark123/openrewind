@@ -6,6 +6,7 @@ use std::time::Duration;
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 use futures_util::StreamExt;
+use sysinfo::{ProcessesToUpdate, System};
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_shell::{process::CommandChild, ShellExt};
 use tokio::io::AsyncWriteExt;
@@ -114,6 +115,54 @@ async fn ollama_port_open() -> bool {
     TcpStream::connect(OLLAMA_HOST).await.is_ok()
 }
 
+async fn ollama_accepts_origin() -> bool {
+    match reqwest::Client::new()
+        .get(format!("http://{OLLAMA_HOST}/api/tags"))
+        .header("Origin", "https://tauri.localhost")
+        .send()
+        .await
+    {
+        Ok(resp) => resp.status().as_u16() != 403,
+        Err(_) => false,
+    }
+}
+
+fn kill_ollama_by_path(target: &Path) -> Result<bool, String> {
+    let mut sys = System::new_all();
+    sys.refresh_processes(ProcessesToUpdate::All);
+    for (pid, process) in sys.processes() {
+        if let Some(exe) = process.exe() {
+            if exe == target {
+                if process.kill() {
+                    return Ok(true);
+                }
+                return Err(format!(
+                    "Found existing Ollama process ({pid}) but could not terminate it"
+                ));
+            }
+        }
+    }
+    Ok(false)
+}
+
+async fn wait_for_ollama_port_closed(timeout_secs: u64) -> Result<(), String> {
+    let result = timeout(Duration::from_secs(timeout_secs), async {
+        while ollama_port_open().await {
+            sleep(Duration::from_millis(500)).await;
+        }
+        true
+    })
+    .await;
+
+    if result == Ok(true) {
+        Ok(())
+    } else {
+        Err(format!(
+            "Ollama port {OLLAMA_HOST} did not close within {timeout_secs}s"
+        ))
+    }
+}
+
 async fn is_ollama_in_path() -> bool {
     tokio::task::spawn_blocking(|| {
         StdCommand::new("ollama")
@@ -149,10 +198,19 @@ async fn wait_for_ollama_port(timeout_secs: u64) -> Result<(), String> {
 }
 
 fn spawn_ollama(exe: &Path, cwd: Option<&Path>) -> Result<(), String> {
+    let threads = std::thread::available_parallelism()
+        .map(|n| (n.get() / 2).clamp(2, 8))
+        .unwrap_or(4)
+        .to_string();
+
     let mut cmd = StdCommand::new(exe);
     cmd.arg("serve")
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(Stdio::null())
+        .env("OLLAMA_ORIGINS", "*")
+        .env("OLLAMA_HOST", OLLAMA_HOST)
+        .env("OLLAMA_NUM_THREADS", &threads)
+        .env("OLLAMA_NUM_PARALLEL", "1");
 
     if let Some(cwd) = cwd {
         cmd.current_dir(cwd);
@@ -173,8 +231,29 @@ fn spawn_ollama(exe: &Path, cwd: Option<&Path>) -> Result<(), String> {
 
 #[tauri::command]
 async fn ensure_ollama_running(app: AppHandle) -> Result<String, String> {
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?;
+    let data_dir = app_data.join("data");
+    let local_exe = data_dir.join("ollama.exe");
+
     if ollama_port_open().await {
-        return Ok("RUNNING".into());
+        if ollama_accepts_origin().await {
+            return Ok("RUNNING".into());
+        }
+
+        // Port is up but rejects our app's Origin. If it's our local binary, restart it
+        // with OLLAMA_ORIGINS=* so the webview/plugin can reach it.
+        if local_exe.exists() && kill_ollama_by_path(&local_exe).unwrap_or(false) {
+            wait_for_ollama_port_closed(10).await?;
+        } else {
+            return Err(
+                "Ollama is already running and is blocking requests from this app. \
+                 Stop the existing Ollama process or set OLLAMA_ORIGINS=* for it."
+                    .into(),
+            );
+        }
     }
 
     // Prefer a globally-installed Ollama binary (PATH).
@@ -185,12 +264,6 @@ async fn ensure_ollama_running(app: AppHandle) -> Result<String, String> {
     }
 
     // Fall back to a locally-downloaded copy under AppData/<app>/data/ollama.exe.
-    let app_data = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| e.to_string())?;
-    let data_dir = app_data.join("data");
-    let local_exe = data_dir.join("ollama.exe");
     if local_exe.exists() {
         spawn_ollama(&local_exe, Some(&data_dir))?;
         wait_for_ollama_port(60).await?;

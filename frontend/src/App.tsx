@@ -114,6 +114,7 @@ function appReducer(state: AppState, action: AppAction): AppState {
         openPositions: [],
         pendingOrders: [],
         tradeHistory: [],
+        activeSessionTrades: [],
       };
 
     case 'SESSION_STOPPED':
@@ -916,6 +917,15 @@ export default function App() {
           <OrionChatSidepanel
             performanceLog={state.performanceLog}
             lightMode={lightMode}
+            symbol={state.symbol}
+            replayDate={state.replayDate}
+            sessionActive={state.sessionActive}
+            currentPrice={state.currentPrice}
+            balance={state.balance}
+            equity={state.equity}
+            openPositions={state.openPositions}
+            activeSessionTrades={state.activeSessionTrades}
+            tradeHistory={state.tradeHistory}
           />
         )}
       </div>
