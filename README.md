@@ -10,6 +10,20 @@ A free, open-source market replay and backtesting desktop app. Pick a symbol, pi
 
 ---
 
+## Download & install (Windows)
+
+For normal users who just want to run OpenRewind, grab the latest installer from the [GitHub Releases](https://github.com/tsdark123/openrewind/releases) page.
+
+1. Download the latest `.msi` or `.exe` installer.
+2. Run the installer and follow the prompts.
+3. Launch **OpenRewind** from the Start Menu or desktop shortcut.
+
+The installer bundles the C++ engine, the Tauri shell, and the Python data-fetch dependencies, so no manual setup is required. On first launch the app will automatically download the latest 30 days of 1-minute market data.
+
+> **Note:** The project currently publishes an **NSIS-based Windows installer** (`pnpm tauri build`). macOS and Linux builds can be produced from the same command but are not pre-built yet.
+
+---
+
 ## What it does
 
 - **Market replay** — load real 1-minute historical data and step through it candle-by-candle.
@@ -62,7 +76,7 @@ A free, open-source market replay and backtesting desktop app. Pick a symbol, pi
 
 ---
 
-## Quick start
+## Developer quick start
 
 ### 1. Install frontend dependencies
 
@@ -208,6 +222,25 @@ pnpm build            # pnpm tauri build
 pnpm frontend:dev     # cd frontend && pnpm dev
 pnpm frontend:build   # cd frontend && pnpm build
 ```
+
+---
+
+## Build the consumer installer
+
+To produce the same one-click installer that is uploaded to GitHub Releases:
+
+```bash
+# 1. Make sure the engine sidecar is built (see Developer quick start step 3).
+# 2. Build the Tauri app + NSIS installer.
+pnpm build
+```
+
+Output:
+
+- `src-tauri/target/release/openrewind.exe`
+- `src-tauri/target/release/bundle/nsis/OpenRewind_0.1.0_x64-setup.exe`
+
+Upload the `OpenRewind_*-setup.exe` (or the `.msi` if you switch the bundle target) to a new GitHub Release.
 
 ---
 
