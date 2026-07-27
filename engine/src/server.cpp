@@ -394,6 +394,112 @@ void OpenRewindServer::setup_rest_routes() {
     // Response: { "ok": true }
     // =========================================================================
 
+    // =========================================================================
+    // GET /api/candles
+    //
+    // Read-only lookup of historical candles that does NOT touch the active
+    // session. Powers Orion's cross-symbol analysis tools: the agent can ask
+    // "what did TSLA do on 2026-07-13?" or preview candles for a strategy
+    // warm-up without perturbing whatever the user is currently replaying.
+    //
+    // Query params:
+    //   symbol     (required)  — e.g. "AAPL"
+    //   date       (optional)  — "YYYY-MM-DD" filter (matches CsvLoader).
+    //                            Passing this restricts the load to that one
+    //                            trading day and is the fast path.
+    //   timeframe  (optional, default 1)  — minutes per bar (1/5/15/60/240/1440)
+    //   limit      (optional, default 500, hard cap 5000) — max bars returned
+    //   data_dir   (optional)  — override the engine's default data directory
+    //
+    // Response: { "symbol": "AAPL", "timeframe": 1, "candles":
+    //             [ { timestamp, open, high, low, close, volume }, ... ] }
+    // =========================================================================
+
+    CROW_ROUTE(app_, "/api/candles").methods(crow::HTTPMethod::GET)
+    ([this](const crow::request& req) {
+        const char* sym_param = req.url_params.get("symbol");
+        if (!sym_param || std::string(sym_param).empty()) {
+            return crow::response(400, "application/json",
+                json{{"error", "Missing required query param: symbol"}}.dump());
+        }
+        std::string symbol = sym_param;
+
+        const char* date_param = req.url_params.get("date");
+        std::string date = date_param ? date_param : "";
+
+        const char* tf_param = req.url_params.get("timeframe");
+        int timeframe = 1;
+        if (tf_param) {
+            try { timeframe = std::max(1, std::stoi(tf_param)); } catch (...) {}
+        }
+
+        const char* limit_param = req.url_params.get("limit");
+        std::size_t limit = 500;
+        if (limit_param) {
+            try { limit = static_cast<std::size_t>(std::stoul(limit_param)); } catch (...) {}
+        }
+        limit = std::min<std::size_t>(limit, 5000);
+
+        const char* dir_param = req.url_params.get("data_dir");
+        std::string data_dir = dir_param ? dir_param : data_dir_;
+
+        std::vector<Candle> base;
+        try {
+            base = CsvLoader::load_symbol(symbol, data_dir, date);
+        } catch (const std::exception& e) {
+            // Missing/unreadable data — return an empty result rather than
+            // 500 so Orion can gracefully suggest running the sync script.
+            return crow::response(200, "application/json",
+                json{
+                    {"symbol",    symbol},
+                    {"date",      date},
+                    {"timeframe", timeframe},
+                    {"candles",   json::array()},
+                    {"missing",   true},
+                    {"reason",    e.what()}
+                }.dump());
+        }
+
+        // Aggregate to the requested timeframe by reusing CandleBuffer, which
+        // owns the tested aggregation logic. This keeps the endpoint stateless
+        // and completely isolated from the live session_ instance.
+        std::vector<Candle> aggregated;
+        if (timeframe <= 1 || base.empty()) {
+            aggregated = std::move(base);
+        } else {
+            CandleBuffer tmp;
+            tmp.set_candles(std::move(base));
+            tmp.advance(tmp.raw_candles().size()); // make full history visible
+            aggregated = tmp.aggregate(timeframe);
+        }
+
+        if (aggregated.size() > limit) {
+            aggregated.erase(aggregated.begin(),
+                             aggregated.end() - static_cast<std::ptrdiff_t>(limit));
+        }
+
+        json arr = json::array();
+        for (const auto& c : aggregated) {
+            arr.push_back({
+                {"timestamp", c.timestamp},
+                {"open",      c.open},
+                {"high",      c.high},
+                {"low",       c.low},
+                {"close",     c.close},
+                {"volume",    c.volume}
+            });
+        }
+
+        return crow::response(200, "application/json",
+            json{
+                {"symbol",    symbol},
+                {"date",      date},
+                {"timeframe", timeframe},
+                {"candles",   arr},
+                {"missing",   false}
+            }.dump());
+    });
+
     CROW_ROUTE(app_, "/api/data_refreshed").methods(crow::HTTPMethod::POST)
     ([this](const crow::request& req) {
         json body;

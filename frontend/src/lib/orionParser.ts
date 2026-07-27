@@ -13,8 +13,13 @@ export interface LiveContext {
   tradeHistory: ClosedTrade[];
 }
 
+// Never coerce a foreign trade to the currently-loaded ticker. If a trade
+// record does not carry its own symbol, mark it explicitly as unknown so
+// Orion cannot silently mislabel it as the active symbol during context
+// prompt generation (this was the root cause of cross-symbol answers).
 function tradeSymbol(t: TradeLog | ClosedTrade, fallback: string): string {
-  return 'symbol' in t && t.symbol ? t.symbol : fallback;
+  if ('symbol' in t && t.symbol) return t.symbol;
+  return fallback || '?';
 }
 
 function exitTimestamp(t: TradeLog | ClosedTrade): number {

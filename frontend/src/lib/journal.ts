@@ -131,9 +131,15 @@ export async function endSession(activeSessionTrades: ActiveSessionTrade[]): Pro
   const log = await loadPerformanceLog();
   const now = Date.now();
 
-  // Group trades by symbol + date bucket.
+  // Group trades by symbol + date bucket. Orion-driven automated trades are
+  // dropped here so the persisted journal only reflects the user's real
+  // decisions. Automated fills still appeared on the chart during the run
+  // and were reported through the Orion result card — they simply never
+  // enter the long-term performance log.
+  const humanTrades = activeSessionTrades.filter((t) => t.is_automated !== true);
+
   const buckets: Record<string, { symbol: string; date: string; trades: ActiveSessionTrade[] }> = {};
-  for (const t of activeSessionTrades) {
+  for (const t of humanTrades) {
     const key = makeSessionKey(t.symbol, t.date);
     if (!buckets[key]) {
       buckets[key] = { symbol: t.symbol, date: t.date, trades: [] };

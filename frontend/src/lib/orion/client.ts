@@ -1,0 +1,223 @@
+// =============================================================================
+// client — Unified Ollama /api/chat wrapper with two-tier model support.
+//
+// Chat mode: uses `llama3.2:3b`, no tool schema, no keep-alive override.
+//            Snappy responses for "what did I just do?" style questions.
+//
+// Agent mode: uses `llama3.1:8b` with the Orion tool schema attached and
+//             a 10-minute `keep_alive` so subsequent agent calls in the same
+//             session don't pay the reload cost. When the model is idle we
+//             let Ollama unload it (default 5m TTL) — we don't pin it in RAM
+//             indefinitely because that murders low-VRAM laptops.
+//
+// The client is deliberately transport-agnostic: in Tauri we call Ollama's
+// HTTP endpoint through `@tauri-apps/plugin-http` (bypasses CORS + webview
+// networking quirks); in browser dev mode we fall back to the standard
+// fetch API. `orionChat` picks the right one automatically.
+// =============================================================================
+
+import { fetch as tauriFetch } from '@tauri-apps/plugin-http';
+
+export type OrionModelTier = 'chat' | 'agent';
+
+export const ORION_CHAT_MODEL = 'llama3.2';
+export const ORION_AGENT_MODEL = 'llama3.1:8b';
+
+// 10 minutes as a duration string — Ollama's keep_alive accepts either a
+// duration ("10m", "1h") or a seconds integer. We use the string form so
+// intent is obvious in logs.
+export const AGENT_KEEP_ALIVE = '10m';
+// 0 == unload immediately. Used when the agent finishes a task and we want
+// to free VRAM/RAM on modest hardware.
+export const AGENT_KEEP_ALIVE_IDLE = '0s';
+
+export interface OrionChatMessage {
+  role: 'system' | 'user' | 'assistant' | 'tool';
+  content: string;
+  // Ollama surfaces requested tool calls under this field on assistant turns.
+  tool_calls?: OrionToolCall[];
+  // For tool-response messages, echo the tool name so the model can match
+  // it to the originating call. `name` is the Ollama-native field; `tool_name`
+  // is kept for our own debugging.
+  name?: string;
+  tool_name?: string;
+}
+
+export interface OrionToolCall {
+  function: {
+    name: string;
+    arguments: Record<string, unknown> | string;
+  };
+}
+
+export interface OrionChatOptions {
+  tier: OrionModelTier;
+  messages: OrionChatMessage[];
+  tools?: Array<Record<string, unknown>>;
+  keepAlive?: string;
+  stream?: false; // streaming lands with the automation driver in PR-4
+}
+
+export interface OrionChatResponse {
+  content: string;
+  toolCalls: OrionToolCall[];
+  raw: unknown;
+}
+
+function isTauri(): boolean {
+  return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+}
+
+async function ollamaFetch(path: string, init: RequestInit): Promise<Response> {
+  const url = `http://localhost:11434${path}`;
+  return isTauri()
+    ? tauriFetch(url, init as any)
+    : fetch(url, init);
+}
+
+/**
+ * Model resolution.
+ *
+ * `llama3.1:8b` in particular is expensive to load; we don't want the app
+ * to trigger a multi-GB download during a snappy chat message. So the
+ * agent tier lazily ensures the model exists before the first call and
+ * caches that determination for the process lifetime.
+ */
+const ensuredModels = new Set<string>();
+
+async function ensureModel(model: string): Promise<{ ready: boolean; error?: string }> {
+  if (ensuredModels.has(model)) return { ready: true };
+
+  // /api/show is cheap: it 200s when the model exists, 404s otherwise.
+  try {
+    const res = await ollamaFetch('/api/show', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: model }),
+    });
+    if (res.ok) {
+      ensuredModels.add(model);
+      return { ready: true };
+    }
+    if (res.status !== 404) {
+      return { ready: false, error: `Ollama /api/show ${res.status}` };
+    }
+  } catch (e) {
+    return { ready: false, error: e instanceof Error ? e.message : String(e) };
+  }
+
+  return { ready: false, error: 'model-missing' };
+}
+
+/**
+ * Pull the given model from Ollama. Blocks until completion. Progress is
+ * reported through the optional callback so the UI can render a status
+ * chip (the agent-mode boot indicator).
+ */
+export async function pullOrionModel(
+  model: string,
+  onProgress?: (percent: number, status: string) => void
+): Promise<void> {
+  const res = await ollamaFetch('/api/pull', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: model, stream: true }),
+  });
+  if (!res.ok || !res.body) {
+    throw new Error(`Ollama /api/pull ${res.status}`);
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let idx: number;
+    while ((idx = buffer.indexOf('\n')) >= 0) {
+      const line = buffer.slice(0, idx).trim();
+      buffer = buffer.slice(idx + 1);
+      if (!line) continue;
+      try {
+        const update = JSON.parse(line) as { status?: string; completed?: number; total?: number };
+        if (onProgress && update.status) {
+          const pct =
+            typeof update.completed === 'number' && typeof update.total === 'number' && update.total > 0
+              ? Math.min(100, Math.round((update.completed / update.total) * 100))
+              : -1;
+          onProgress(pct, update.status);
+        }
+      } catch {
+        // Ignore malformed chunks; the pull may still succeed.
+      }
+    }
+  }
+  ensuredModels.add(model);
+}
+
+/**
+ * Public entry point. Handles model resolution, tool-schema attachment,
+ * and keep-alive selection. Returns the assistant content + any requested
+ * tool calls. Never throws for expected offline states — surfaces them via
+ * the `content` field so the sidepanel can show a normal chat bubble.
+ */
+export async function orionChat(opts: OrionChatOptions): Promise<OrionChatResponse> {
+  const model = opts.tier === 'agent' ? ORION_AGENT_MODEL : ORION_CHAT_MODEL;
+
+  const ensured = await ensureModel(model);
+  if (!ensured.ready) {
+    // The agent model may not be installed yet. Let the caller decide
+    // whether to trigger `pullOrionModel` (progress UI) or fall back.
+    throw Object.assign(new Error(ensured.error ?? 'model-missing'), {
+      code: 'MODEL_MISSING',
+      model,
+    });
+  }
+
+  const body: Record<string, unknown> = {
+    model,
+    messages: opts.messages,
+    stream: false,
+    keep_alive: opts.keepAlive ?? (opts.tier === 'agent' ? AGENT_KEEP_ALIVE : undefined),
+  };
+  if (opts.tools && opts.tools.length > 0) {
+    body.tools = opts.tools;
+  }
+
+  const res = await ollamaFetch('/api/chat', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    throw new Error(`Ollama /api/chat ${res.status}`);
+  }
+  const data = await res.json();
+  const content = typeof data?.message?.content === 'string' ? data.message.content : '';
+  const toolCalls: OrionToolCall[] = Array.isArray(data?.message?.tool_calls)
+    ? (data.message.tool_calls as OrionToolCall[])
+    : [];
+  return { content, toolCalls, raw: data };
+}
+
+/**
+ * Fire-and-forget hint to Ollama telling it to unload the agent model.
+ * Called by the automation driver when a task completes so idle laptops
+ * aren't stuck holding 8B parameters in memory.
+ */
+export async function releaseAgentModel(): Promise<void> {
+  try {
+    await ollamaFetch('/api/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: ORION_AGENT_MODEL,
+        keep_alive: AGENT_KEEP_ALIVE_IDLE,
+        prompt: '',
+      }),
+    });
+  } catch {
+    // Best-effort — Ollama will unload on its own eventually.
+  }
+}

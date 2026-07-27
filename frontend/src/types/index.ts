@@ -50,6 +50,7 @@ export interface Order {
   created_at: number;
   filled_at?: number;
   fill_price?: number;
+  is_automated?: boolean;
 }
 
 // --- Position ---
@@ -62,6 +63,7 @@ export interface Position {
   stop_loss: number;
   take_profit: number;
   opened_at: number;
+  is_automated?: boolean;
 }
 
 // --- Closed Trade ---
@@ -78,6 +80,11 @@ export interface ClosedTrade {
   reason: CloseReason;
   opened_at: number;
   closed_at: number;
+  // True when the trade was placed by Orion running an autonomous task.
+  // Automated trades are visible on the chart during the run but are
+  // filtered out of the persisted journal at end-of-session so they do
+  // not contaminate the user's real performance history.
+  is_automated?: boolean;
 }
 
 // --- Account Snapshot ---
@@ -124,6 +131,7 @@ export interface OrderFilledPayload {
   fill_price: number;
   quantity: number;
   timestamp: number;
+  is_automated?: boolean;
 }
 
 export interface PositionClosedPayload {
@@ -138,6 +146,7 @@ export interface PositionClosedPayload {
   opened_at: number;
   reason: CloseReason;
   timestamp: number;
+  is_automated?: boolean;
 }
 
 export interface SessionStartedPayload {

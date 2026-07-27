@@ -10,8 +10,11 @@ import { OrderPanel } from './components/layout/OrderPanel';
 import { TradeHistoryDrawer } from './components/layout/TradeHistoryDrawer';
 import { TradingCalendar } from './components/calendar/TradingCalendar';
 import { OrionChatSidepanel } from './components/ui/ai-chat';
+import { OrionDrivingOverlay } from './components/ui/OrionDrivingOverlay';
 import { useWebSocket } from './hooks/useWebSocket';
 import { endSession, loadPerformanceLog } from './lib/journal';
+import { orionController } from './lib/orion/controller';
+import { threadKeyForContext, appendMessage, loadOrionThreads, writeOrionThreads } from './lib/orionThreads';
 import type {
   AppState,
   AppAction,
@@ -183,6 +186,10 @@ function appReducer(state: AppState, action: AppAction): AppState {
         reason: action.payload.reason,
         opened_at: action.payload.opened_at ?? action.payload.timestamp,
         closed_at: action.payload.timestamp,
+        // Preserve the automation flag end-to-end so downstream filters
+        // (journal write, calendar aggregation, chart marker style) can
+        // distinguish agent-driven fills from user-driven ones.
+        is_automated: action.payload.is_automated === true,
       };
       const activeTrade = { ...trade, symbol: state.symbol, date: state.replayDate };
       return {
@@ -368,6 +375,61 @@ export default function App() {
     onDataSynced,
   });
 
+  // --- Orion Automation Driver wiring ---------------------------------------
+  // Keep the current app state accessible to the controller without turning
+  // it into a React re-render dependency (the controller runs outside the
+  // render tree). A ref that we keep pointed at the latest `state` on every
+  // render is the simplest correct pattern.
+  const stateRef = useRef<AppState>(state);
+  stateRef.current = state;
+
+  // Local mirror of the controller's status/activity so we can re-render
+  // when it transitions between idle → planning → driving → finalizing.
+  const [orionStatus, setOrionStatus] = useState(orionController.status);
+  const [orionActivity, setOrionActivity] = useState(orionController.activity);
+
+  // Bridge binding. Runs once — `orionController.bind` overwrites the
+  // previous bridge on every call so if any dependency changes we just
+  // re-bind idempotently.
+  useEffect(() => {
+    orionController.bind({
+      getState: () => stateRef.current,
+      getChartHandle: () => chartRef.current,
+      send,
+      dispatch,
+      apiBase: API_BASE,
+      postChatMessage: async (text: string) => {
+        // Append into whichever Orion thread is currently active for the
+        // user's context. Loading here keeps the ai-chat sidepanel a
+        // pure view — the controller can post messages even when the
+        // panel is closed.
+        try {
+          const threads = await loadOrionThreads();
+          const key = threadKeyForContext(
+            stateRef.current.symbol,
+            stateRef.current.replayDate,
+            stateRef.current.sessionActive
+          );
+          await writeOrionThreads(appendMessage(threads, key, { sender: 'ai', text }));
+        } catch (e) {
+          console.warn('[Orion] postChatMessage failed:', e);
+        }
+      },
+    });
+    const unsub = orionController.subscribe(() => {
+      setOrionStatus(orionController.status);
+      setOrionActivity(orionController.activity);
+    });
+    return () => {
+      unsub();
+    };
+    // API_BASE is a module constant; send/dispatch are stable identity.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [send]);
+
+  const isOrionDriving = orionStatus === 'driving' || orionStatus === 'finalizing';
+  const lastActivityLine = orionActivity[orionActivity.length - 1]?.message;
+
   // --- Fetch the list of tradable tickers from the C++ engine on mount.
   // Used by both the Start Session form and the in-app Toolbar autocomplete.
   useEffect(() => {
@@ -416,6 +478,9 @@ export default function App() {
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (!state.sessionActive) return;
+      // Freeze user hotkeys while Orion is autonomously driving the
+      // workspace so a stray Alt+1 doesn't pause the automation mid-run.
+      if (isOrionDriving) return;
 
       // Ctrl+Space → Next Candle
       if (e.ctrlKey && e.code === 'Space') {
@@ -432,7 +497,7 @@ export default function App() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [state.sessionActive, state.isPlaying, send]);
+  }, [state.sessionActive, state.isPlaying, send, isOrionDriving]);
 
   // --- Auto-pull fresh market data once the intro splash finishes ---
   useEffect(() => {
@@ -763,8 +828,6 @@ export default function App() {
         sessionActive={state.sessionActive}
         lightMode={lightMode}
         onEndSession={handleEndSession}
-        orionOpen={isOrionOpen}
-        onToggleOrion={() => setIsOrionOpen((v) => !v)}
       />
 
       {/* Main content area */}
@@ -800,6 +863,8 @@ export default function App() {
             onToggleIndicator={(indicator) => dispatch({ type: 'TOGGLE_INDICATOR', indicator })}
             onReset={handleReset}
             onOpenCalendar={() => setShowCalendar(true)}
+            orionOpen={isOrionOpen}
+            onToggleOrion={() => setIsOrionOpen((v) => !v)}
           />
 
           {/* Chart area with drawing tools */}
@@ -917,15 +982,8 @@ export default function App() {
           <OrionChatSidepanel
             performanceLog={state.performanceLog}
             lightMode={lightMode}
-            symbol={state.symbol}
-            replayDate={state.replayDate}
-            sessionActive={state.sessionActive}
-            currentPrice={state.currentPrice}
-            balance={state.balance}
-            equity={state.equity}
-            openPositions={state.openPositions}
-            activeSessionTrades={state.activeSessionTrades}
-            tradeHistory={state.tradeHistory}
+            appState={state}
+            chartRef={chartRef}
           />
         )}
       </div>
@@ -936,6 +994,12 @@ export default function App() {
         log={state.performanceLog}
         lightMode={lightMode}
       />
+
+      {/* Orion foreground-takeover overlay. Non-destructive: chart and
+          workspace remain visible; only user input is blocked while the
+          controller runs the queued plan. Esc cancels via
+          OrionController.cancel(). */}
+      <OrionDrivingOverlay visible={isOrionDriving} activityLine={lastActivityLine} />
     </div>
   );
 }

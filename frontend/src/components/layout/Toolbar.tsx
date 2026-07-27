@@ -1,4 +1,4 @@
-import { RotateCcw, Settings, Lock, Unlock, Eye, EyeOff, Sun, Moon, CalendarDays, Calendar } from 'lucide-react';
+import { RotateCcw, Settings, Lock, Unlock, Eye, EyeOff, Sun, Moon, CalendarDays, Calendar, Bot } from 'lucide-react';
 import { IndicatorsDropdown } from '../IndicatorsDropdown';
 import { TickerSearchInput } from '../TickerSearchInput';
 import { useState, useMemo } from 'react';
@@ -39,9 +39,11 @@ interface ToolbarProps {
   onToggleIndicator: (indicator: 'ema20' | 'sma50' | 'bollinger' | 'rsi' | 'macd' | 'atr' | 'stochastic') => void;
   onReset?: () => void;
   onOpenCalendar?: () => void;
+  orionOpen?: boolean;
+  onToggleOrion?: () => void;
 }
 
-export function Toolbar({ symbol, availableTickers, onSymbolChange, replayDate, onDateChange, timeframe, lockToEdge, showMarkers, lightMode, indicators, onSetTimeframe, onToggleLock, onToggleMarkers, onToggleLightMode, onToggleIndicator, onReset, onOpenCalendar }: ToolbarProps) {
+export function Toolbar({ symbol, availableTickers, onSymbolChange, replayDate, onDateChange, timeframe, lockToEdge, showMarkers, lightMode, indicators, onSetTimeframe, onToggleLock, onToggleMarkers, onToggleLightMode, onToggleIndicator, onReset, onOpenCalendar, orionOpen, onToggleOrion }: ToolbarProps) {
   const [indicatorsDropdownOpen, setIndicatorsDropdownOpen] = useState(false);
   const [calendarOpen, setCalendarOpen] = useState(false);
 
@@ -166,6 +168,20 @@ export function Toolbar({ symbol, availableTickers, onSymbolChange, replayDate, 
       </div>
 
       <div className="flex items-center gap-2">
+        {/* Orion toggle */}
+        {onToggleOrion && (
+          <button
+            type="button"
+            onClick={onToggleOrion}
+            title="Toggle Orion AI coach"
+            className={`flex h-6 w-6 items-center justify-center rounded transition-colors ${
+              orionOpen ? 'text-[#ff3700]' : (lightMode ? 'text-gray-600 hover:text-gray-900' : 'text-[#787b86] hover:text-[#d1d4dc]')
+            }`}
+          >
+            <Bot className="h-4 w-4" />
+          </button>
+        )}
+
         {/* Markers toggle */}
         <button
           onClick={onToggleMarkers}

@@ -94,6 +94,10 @@ export interface ChartHandle {
   updateCandle: (payload: CandleUpdatePayload) => void;
   setHistory: (candles: CandleData[]) => void;
   resetChart: () => void;
+  // Returns up to `n` most recent visible candles in chronological order.
+  // Used by Orion tools (WorldState builder, strategy warm-up) to sample
+  // the chart context without going back to the engine.
+  getRecentCandles: (n: number) => CandleData[];
 }
 
 export const Chart = forwardRef<ChartHandle, ChartProps>(function Chart({
@@ -482,6 +486,16 @@ export const Chart = forwardRef<ChartHandle, ChartProps>(function Chart({
       }
       setHistoryVersion((v) => v + 1);
       setMarkerVersion((v) => v + 1);
+    },
+
+    // Snapshot slice of the chart's internal history buffer. Never returns
+    // the live ref array — always a copy — so callers can safely mutate the
+    // result. Returns [] when no history is loaded yet.
+    getRecentCandles(n: number) {
+      const history = candleHistoryRef.current;
+      if (!history || history.length === 0) return [];
+      const count = Math.min(Math.max(0, n | 0), history.length);
+      return history.slice(history.length - count);
     },
 
     updateCandle(payload: CandleUpdatePayload) {
@@ -1319,13 +1333,15 @@ export const Chart = forwardRef<ChartHandle, ChartProps>(function Chart({
       });
     }
 
+    const autoColor = '#ff3700';
+
     // Open positions — small entry arrow + price only
     for (const pos of positions) {
       if ((pos.opened_at as number) > cutoff) continue;
       raw.push({
         time: pos.opened_at as UTCTimestamp,
         position: pos.side === 'buy' ? 'belowBar' : 'aboveBar',
-        color: pos.side === 'buy' ? '#089981' : '#f23645',
+        color: pos.is_automated ? autoColor : pos.side === 'buy' ? '#089981' : '#f23645',
         shape: pos.side === 'buy' ? 'arrowUp' : 'arrowDown',
         text: pos.entry_price.toFixed(2),
         size: 1,
@@ -1338,7 +1354,7 @@ export const Chart = forwardRef<ChartHandle, ChartProps>(function Chart({
       raw.push({
         time: trade.opened_at as UTCTimestamp,
         position: trade.side === 'buy' ? 'belowBar' : 'aboveBar',
-        color: trade.side === 'buy' ? '#089981' : '#f23645',
+        color: trade.is_automated ? autoColor : trade.side === 'buy' ? '#089981' : '#f23645',
         shape: trade.side === 'buy' ? 'arrowUp' : 'arrowDown',
         text: trade.entry_price.toFixed(2),
         size: 1,
@@ -1348,7 +1364,7 @@ export const Chart = forwardRef<ChartHandle, ChartProps>(function Chart({
       raw.push({
         time: trade.closed_at as UTCTimestamp,
         position: trade.side === 'buy' ? 'aboveBar' : 'belowBar',
-        color: trade.realized_pnl >= 0 ? '#089981' : '#f23645',
+        color: trade.is_automated ? autoColor : trade.realized_pnl >= 0 ? '#089981' : '#f23645',
         shape: 'circle',
         text: (pnl >= 0 ? '+' : '') + pnl,
         size: 1,

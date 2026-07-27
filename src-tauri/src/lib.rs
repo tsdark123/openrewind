@@ -16,7 +16,7 @@ use tokio::time::{sleep, timeout};
 #[allow(dead_code)]
 struct EngineProcess(CommandChild);
 
-fn journal_path(app: &AppHandle) -> Result<PathBuf, String> {
+fn data_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = app
         .path()
         .app_data_dir()
@@ -25,7 +25,15 @@ fn journal_path(app: &AppHandle) -> Result<PathBuf, String> {
     if !data_dir.exists() {
         fs::create_dir_all(&data_dir).map_err(|e| format!("Failed to create data dir: {e}"))?;
     }
-    Ok(data_dir.join("journal.json"))
+    Ok(data_dir)
+}
+
+fn journal_path(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(data_dir(app)?.join("journal.json"))
+}
+
+fn orion_threads_path(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(data_dir(app)?.join("orion_threads.json"))
 }
 
 #[tauri::command]
@@ -43,6 +51,30 @@ fn write_journal(app: AppHandle, contents: String) -> Result<(), String> {
     let mut file = fs::File::create(&path).map_err(|e| format!("Failed to create journal file: {e}"))?;
     file.write_all(contents.as_bytes())
         .map_err(|e| format!("Failed to write journal: {e}"))?;
+    Ok(())
+}
+
+// -----------------------------------------------------------------------------
+// Orion threaded chat history — stored alongside the journal so it survives
+// app restarts and stays scoped per (symbol, date) session.
+// -----------------------------------------------------------------------------
+
+#[tauri::command]
+fn read_orion_threads(app: AppHandle) -> Result<String, String> {
+    let path = orion_threads_path(&app)?;
+    if !path.exists() {
+        return Ok("{}".to_string());
+    }
+    fs::read_to_string(&path).map_err(|e| format!("Failed to read Orion threads: {e}"))
+}
+
+#[tauri::command]
+fn write_orion_threads(app: AppHandle, contents: String) -> Result<(), String> {
+    let path = orion_threads_path(&app)?;
+    let mut file = fs::File::create(&path)
+        .map_err(|e| format!("Failed to create Orion threads file: {e}"))?;
+    file.write_all(contents.as_bytes())
+        .map_err(|e| format!("Failed to write Orion threads: {e}"))?;
     Ok(())
 }
 
@@ -392,7 +424,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_http::init())
-        .invoke_handler(tauri::generate_handler![fetch_market_data, read_journal, write_journal, ensure_ollama_running, download_ollama])
+        .invoke_handler(tauri::generate_handler![fetch_market_data, read_journal, write_journal, read_orion_threads, write_orion_threads, ensure_ollama_running, download_ollama])
         .setup(|app| {
             // Resolve the directory where Tauri unpacks bundled resources.
             // In production this is the install prefix (e.g. C:\Program Files\OpenRewind\).

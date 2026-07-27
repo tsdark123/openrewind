@@ -9,7 +9,14 @@ import type {
   SessionStatePayload,
   SessionStartedPayload,
   AppAction,
+  Position,
+  Order,
 } from '../types';
+import {
+  isOrderAutomated,
+  isPositionAutomated,
+  markPositionAutomated,
+} from '../lib/orion/automatedIds';
 
 // =============================================================================
 // useWebSocket — Custom React hook for bidirectional WebSocket communication
@@ -119,12 +126,24 @@ export function useWebSocket({
 
         case 'order_filled': {
           const p = payload as OrderFilledPayload;
+          // If Orion placed this order (or any order during an active run),
+          // stamp the flag before dispatch so the reducer and any downstream
+          // consumer see it. Also pin the position id (== order id in this
+          // engine) so the corresponding position_closed event carries the
+          // same flag.
+          if (isOrderAutomated(p.order_id)) {
+            (p as OrderFilledPayload).is_automated = true;
+            markPositionAutomated(p.order_id);
+          }
           dispatch({ type: 'ORDER_FILLED', payload: p });
           break;
         }
 
         case 'position_closed': {
           const p = payload as PositionClosedPayload;
+          if (isPositionAutomated(p.position_id)) {
+            (p as PositionClosedPayload).is_automated = true;
+          }
           dispatch({ type: 'POSITION_CLOSED', payload: p });
           // Don't clear pending SL/TP - let user manage order panel independently
           break;
@@ -144,6 +163,18 @@ export function useWebSocket({
           // chart so it redraws the whole past timeline via setData().
           if (Array.isArray(p.candles)) {
             onSessionHistoryRef.current?.(p.candles);
+          }
+          // Preserve the automation flag across state refreshes so chart
+          // markers and journal filtering stay consistent.
+          if (Array.isArray(p.open_positions)) {
+            for (const pos of p.open_positions) {
+              (pos as Position).is_automated = isPositionAutomated(pos.id);
+            }
+          }
+          if (Array.isArray(p.pending_orders)) {
+            for (const ord of p.pending_orders) {
+              (ord as Order).is_automated = isOrderAutomated(ord.id);
+            }
           }
           dispatch({ type: 'SESSION_STATE', payload: p });
           break;

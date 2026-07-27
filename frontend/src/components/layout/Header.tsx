@@ -1,5 +1,4 @@
-import { Bot, Menu } from 'lucide-react';
-import { cn } from '../../lib/utils';
+import { Menu } from 'lucide-react';
 
 interface HeaderProps {
   connected: boolean;
@@ -8,11 +7,9 @@ interface HeaderProps {
   sessionActive: boolean;
   lightMode: boolean;
   onEndSession?: () => void;
-  orionOpen?: boolean;
-  onToggleOrion?: () => void;
 }
 
-export function Header({ connected, reconnecting, symbol, sessionActive, lightMode, onEndSession, orionOpen, onToggleOrion }: HeaderProps) {
+export function Header({ connected, reconnecting, symbol, sessionActive, lightMode, onEndSession }: HeaderProps) {
   const dotColor = connected
     ? 'bg-[#2e9461]'
     : reconnecting
@@ -39,23 +36,6 @@ export function Header({ connected, reconnecting, symbol, sessionActive, lightMo
 
       {/* Subtle connection status dot — top-right */}
       <div className="flex items-center gap-3">
-        {onToggleOrion && (
-          <button
-            type="button"
-            onClick={onToggleOrion}
-            title="Toggle Orion AI coach"
-            className={cn(
-              'transition-colors',
-              orionOpen
-                ? 'text-[#2962ff]'
-                : lightMode
-                  ? 'text-gray-600 hover:text-gray-900'
-                  : 'text-[#787b86] hover:text-[#d1d4dc]'
-            )}
-          >
-            <Bot className="h-4 w-4" />
-          </button>
-        )}
         {sessionActive && onEndSession && (
           <button
             type="button"
