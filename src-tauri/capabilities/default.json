@@ -5,8 +5,16 @@
   "windows": ["main"],
   "permissions": [
     "core:default",
+    "core:event:default",
     "shell:allow-execute",
     "shell:allow-kill",
-    "shell:default"
+    "shell:default",
+    {
+      "identifier": "http:default",
+      "allow": [
+        { "url": "http://127.0.0.1:11434/*" },
+        { "url": "http://localhost:11434/*" }
+      ]
+    }
   ]
 }

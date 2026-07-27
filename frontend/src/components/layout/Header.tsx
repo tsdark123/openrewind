@@ -1,4 +1,5 @@
-import { Menu } from 'lucide-react';
+import { Bot, Menu } from 'lucide-react';
+import { cn } from '../../lib/utils';
 
 interface HeaderProps {
   connected: boolean;
@@ -6,9 +7,12 @@ interface HeaderProps {
   symbol: string;
   sessionActive: boolean;
   lightMode: boolean;
+  onEndSession?: () => void;
+  orionOpen?: boolean;
+  onToggleOrion?: () => void;
 }
 
-export function Header({ connected, reconnecting, symbol, sessionActive, lightMode }: HeaderProps) {
+export function Header({ connected, reconnecting, symbol, sessionActive, lightMode, onEndSession, orionOpen, onToggleOrion }: HeaderProps) {
   const dotColor = connected
     ? 'bg-[#2e9461]'
     : reconnecting
@@ -34,7 +38,35 @@ export function Header({ connected, reconnecting, symbol, sessionActive, lightMo
       </div>
 
       {/* Subtle connection status dot — top-right */}
-      <div className="flex items-center">
+      <div className="flex items-center gap-3">
+        {onToggleOrion && (
+          <button
+            type="button"
+            onClick={onToggleOrion}
+            title="Toggle Orion AI coach"
+            className={cn(
+              'transition-colors',
+              orionOpen
+                ? 'text-[#2962ff]'
+                : lightMode
+                  ? 'text-gray-600 hover:text-gray-900'
+                  : 'text-[#787b86] hover:text-[#d1d4dc]'
+            )}
+          >
+            <Bot className="h-4 w-4" />
+          </button>
+        )}
+        {sessionActive && onEndSession && (
+          <button
+            type="button"
+            onClick={onEndSession}
+            className={`text-[11px] font-semibold transition-colors ${
+              lightMode ? 'text-red-600 hover:text-red-700' : 'text-[#ef5350] hover:text-red-400'
+            }`}
+          >
+            End Session
+          </button>
+        )}
         <div
           title={connected ? 'Connected' : reconnecting ? 'Reconnecting' : 'Disconnected'}
           className={`h-2.5 w-2.5 rounded-full ${dotColor} ${connected || reconnecting ? 'animate-pulse' : ''} ${

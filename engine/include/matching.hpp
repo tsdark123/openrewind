@@ -119,6 +119,8 @@ struct ClosedTrade {
     double      exit_price;
     double      quantity;
     double      realized_pnl;   // Signed P&L: positive = profit, negative = loss
+    double      stop_loss;      // Protective stop at entry (0 = none)
+    double      take_profit;    // Profit target at entry (0 = none)
     CloseReason reason;
     int64_t     opened_at;
     int64_t     closed_at;
@@ -143,6 +145,9 @@ struct PositionClosedEvent {
     double      exit_price;
     double      quantity;
     double      realized_pnl;
+    double      stop_loss;
+    double      take_profit;
+    int64_t     opened_at;
     CloseReason reason;
     int64_t     timestamp;
 };

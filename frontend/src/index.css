@@ -15,13 +15,48 @@
   --scrollbar-track: #121416;
   --scrollbar-thumb: #2a2e39;
   --scrollbar-thumb-hover: #363a45;
+
+  /* Trading calendar tokens — matched to the chart dark theme */
+  --calendar-background: #121416;
+  --calendar-foreground: #d1d4dc;
+  --calendar-panel: #121416;
+  --calendar-border: #2a2e39;
+  --calendar-cell: #1e222d;
+  --calendar-cell-outside: #0d0f12;
+  --calendar-popover: #1e222d;
+  --calendar-muted: #2a2e39;
+  --calendar-muted-foreground: #787b86;
+  --calendar-grid-line: #2a2e39;
+  --calendar-profit: #2e9461;
+  --calendar-profit-strong: #22c55e;
+  --calendar-loss: #ef5350;
+  --calendar-loss-strong: #f23645;
+  --calendar-gold: #f59e0b;
+  --calendar-tint-fg: #ffffff;
 }
 
-/* Light mode scrollbar colors */
 .light-mode {
   --scrollbar-track: #ffffff;
   --scrollbar-thumb: #d1d5db;
   --scrollbar-thumb-hover: #9ca3af;
+
+  /* Trading calendar tokens (light) */
+  --calendar-background: #f3f4f6;
+  --calendar-foreground: #111827;
+  --calendar-panel: #ffffff;
+  --calendar-border: #e5e7eb;
+  --calendar-cell: #f9fafb;
+  --calendar-cell-outside: #f3f4f6;
+  --calendar-popover: #ffffff;
+  --calendar-muted: #f3f4f6;
+  --calendar-muted-foreground: #6b7280;
+  --calendar-grid-line: #e5e7eb;
+  --calendar-profit: #86efac;
+  --calendar-profit-strong: #22c55e;
+  --calendar-loss: #fca5a5;
+  --calendar-loss-strong: #ef4444;
+  --calendar-gold: #fde68a;
+  --calendar-tint-fg: #111827;
 }
 
 /* Remove all focus outlines from buttons */

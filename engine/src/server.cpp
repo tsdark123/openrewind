@@ -504,6 +504,9 @@ void OpenRewindServer::wire_event_callbacks() {
                 {"exit_price",    event.exit_price},
                 {"quantity",      event.quantity},
                 {"realized_pnl",  event.realized_pnl},
+                {"stop_loss",     event.stop_loss},
+                {"take_profit",   event.take_profit},
+                {"opened_at",     event.opened_at},
                 {"reason",        to_string(event.reason)},
                 {"timestamp",     event.timestamp}
             };
@@ -847,6 +850,8 @@ json OpenRewindServer::closed_trade_to_json(const ClosedTrade& t) {
         {"exit_price",    t.exit_price},
         {"quantity",      t.quantity},
         {"realized_pnl",  t.realized_pnl},
+        {"stop_loss",     t.stop_loss},
+        {"take_profit",   t.take_profit},
         {"reason",        to_string(t.reason)},
         {"opened_at",     t.opened_at},
         {"closed_at",     t.closed_at}

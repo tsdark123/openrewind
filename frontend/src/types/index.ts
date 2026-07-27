@@ -73,6 +73,8 @@ export interface ClosedTrade {
   exit_price: number;
   quantity: number;
   realized_pnl: number;
+  stop_loss?: number;
+  take_profit?: number;
   reason: CloseReason;
   opened_at: number;
   closed_at: number;
@@ -131,6 +133,9 @@ export interface PositionClosedPayload {
   exit_price: number;
   quantity: number;
   realized_pnl: number;
+  stop_loss: number;
+  take_profit: number;
+  opened_at: number;
   reason: CloseReason;
   timestamp: number;
 }
@@ -158,12 +163,50 @@ export interface SessionStatePayload {
   trade_history: ClosedTrade[];
 }
 
+// --- Calendar / Journal Types ---
+
+export interface ActiveSessionTrade extends ClosedTrade {
+  symbol: string;
+  date: string; // YYYY-MM-DD
+}
+
+export interface TradeLog {
+  id: string;
+  symbol: string;
+  date: string; // YYYY-MM-DD
+  action: 'BUY' | 'SELL';
+  entryTime: number; // Unix epoch seconds
+  exitTime: number; // Unix epoch seconds
+  entryPrice: number;
+  exitPrice: number;
+  quantity: number;
+  realizedPnl: number;
+  stopLoss?: number;
+  takeProfit?: number;
+  rMultiple: number;
+}
+
+export interface SessionRecord {
+  id: string;
+  symbol: string;
+  date: string; // YYYY-MM-DD
+  startedAt: number;
+  endedAt: number;
+  startingBalance: number;
+  endingBalance: number;
+  trades?: TradeLog[]; // canonical granular log; new records always set this
+  closedTrades?: ClosedTrade[]; // legacy: only present in pre-Orion journal records
+}
+
+export type PerformanceLog = Record<string, SessionRecord[]>; // key = `${symbol}:${date}`
+
 // --- Application State ---
 
 export interface AppState {
   connected: boolean;
   sessionActive: boolean;
   symbol: string;
+  replayDate: string; // YYYY-MM-DD
 
   cursor: number;
   totalCandles: number;
@@ -190,6 +233,10 @@ export interface AppState {
   openPositions: Position[];
   pendingOrders: Order[];
   tradeHistory: ClosedTrade[];
+
+  // Calendar/session tracking
+  activeSessionTrades: ActiveSessionTrade[];
+  performanceLog: PerformanceLog;
 }
 
 // --- Reducer Actions ---
@@ -213,4 +260,10 @@ export type AppAction =
   | { type: 'ADD_TRADE'; trade: ClosedTrade }
   | { type: 'CLEAR_TRADE_HISTORY' }
   | { type: 'TOGGLE_INDICATOR'; indicator: keyof AppState['indicators'] }
-  | { type: 'CLEAR_PENDING_SLTP' };
+  | { type: 'CLEAR_PENDING_SLTP' }
+  | { type: 'SET_REPLAY_DATE'; date: string }
+  | { type: 'ADD_ACTIVE_SESSION_TRADE'; trade: ActiveSessionTrade }
+  | { type: 'CLEAR_ACTIVE_SESSION_TRADES_FOR_DATE'; symbol: string; date: string }
+  | { type: 'CLEAR_ACTIVE_SESSION_TRADES' }
+  | { type: 'SET_PERFORMANCE_LOG'; log: PerformanceLog }
+  | { type: 'END_SESSION' };

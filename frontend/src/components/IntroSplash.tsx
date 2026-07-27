@@ -10,7 +10,7 @@ export function IntroSplash({ onFinished, lightMode = false }: IntroSplashProps)
   const [fadeOut, setFadeOut] = useState(false);
 
   const handleComplete = () => {
-    // Hold the final decoded 'OpenReplay' text for a moment before fading.
+    // Hold the final decoded 'OpenRewind' text for a moment before fading.
     setTimeout(() => {
       setFadeOut(true);
       setTimeout(onFinished, 600);
@@ -22,7 +22,7 @@ export function IntroSplash({ onFinished, lightMode = false }: IntroSplashProps)
       className={`fixed inset-0 z-[100] flex items-center justify-center transition-opacity duration-[600ms] ease-in-out ${
         fadeOut ? 'opacity-0 pointer-events-none' : 'opacity-100'
       } ${lightMode ? 'bg-white' : 'bg-[#121416]'}`}
-      aria-label="OpenReplay intro"
+      aria-label="OpenRewind intro"
     >
       <div className="flex items-center">
         <SpecialText
@@ -32,7 +32,7 @@ export function IntroSplash({ onFinished, lightMode = false }: IntroSplashProps)
           }`}
           onComplete={handleComplete}
         >
-          OpenReplay
+          OpenRewind
         </SpecialText>
       </div>
     </div>

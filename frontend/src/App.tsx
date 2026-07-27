@@ -8,7 +8,10 @@ import { BottomPanel } from './components/layout/BottomPanel';
 import { PlaybackControls } from './components/layout/PlaybackControls';
 import { OrderPanel } from './components/layout/OrderPanel';
 import { TradeHistoryDrawer } from './components/layout/TradeHistoryDrawer';
+import { TradingCalendar } from './components/calendar/TradingCalendar';
+import { OrionChatSidepanel } from './components/ui/ai-chat';
 import { useWebSocket } from './hooks/useWebSocket';
+import { endSession, loadPerformanceLog } from './lib/journal';
 import type {
   AppState,
   AppAction,
@@ -30,6 +33,21 @@ const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 const API_BASE = isTauri ? 'http://127.0.0.1:9000' : '';
 
 
+// Return the most recent past trading weekday (YYYY-MM-DD). If today is a
+// weekday we still step back one calendar day because the local market data
+// is only fully available after the previous close.
+function getLastTradingDate(): string {
+  const d = new Date();
+  d.setDate(d.getDate() - 1);
+  while (d.getDay() === 0 || d.getDay() === 6) {
+    d.setDate(d.getDate() - 1);
+  }
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
 // =============================================================================
 // App State Reducer
 // =============================================================================
@@ -38,6 +56,7 @@ const initialState: AppState = {
   connected: false,
   sessionActive: false,
   symbol: '',
+  replayDate: getLastTradingDate(),
 
   cursor: 0,
   totalCandles: 0,
@@ -64,6 +83,9 @@ const initialState: AppState = {
   openPositions: [],
   pendingOrders: [],
   tradeHistory: [],
+
+  activeSessionTrades: [],
+  performanceLog: {},
 };
 
 function appReducer(state: AppState, action: AppAction): AppState {
@@ -148,23 +170,25 @@ function appReducer(state: AppState, action: AppAction): AppState {
 
     case 'POSITION_CLOSED': {
       const closedId = action.payload.position_id;
+      const trade = {
+        id: action.payload.position_id,
+        side: action.payload.side,
+        entry_price: action.payload.entry_price,
+        exit_price: action.payload.exit_price,
+        quantity: action.payload.quantity,
+        realized_pnl: action.payload.realized_pnl,
+        stop_loss: action.payload.stop_loss,
+        take_profit: action.payload.take_profit,
+        reason: action.payload.reason,
+        opened_at: action.payload.opened_at ?? action.payload.timestamp,
+        closed_at: action.payload.timestamp,
+      };
+      const activeTrade = { ...trade, symbol: state.symbol, date: state.replayDate };
       return {
         ...state,
         openPositions: state.openPositions.filter((p) => p.id !== closedId),
-        tradeHistory: [
-          ...state.tradeHistory,
-          {
-            id: action.payload.position_id,
-            side: action.payload.side,
-            entry_price: action.payload.entry_price,
-            exit_price: action.payload.exit_price,
-            quantity: action.payload.quantity,
-            realized_pnl: action.payload.realized_pnl,
-            reason: action.payload.reason,
-            opened_at: action.payload.timestamp,
-            closed_at: action.payload.timestamp,
-          },
-        ],
+        tradeHistory: [...state.tradeHistory, trade],
+        activeSessionTrades: [...state.activeSessionTrades, activeTrade],
       };
     }
 
@@ -207,6 +231,45 @@ function appReducer(state: AppState, action: AppAction): AppState {
         },
       };
 
+    case 'SET_REPLAY_DATE':
+      return { ...state, replayDate: action.date };
+
+    case 'ADD_ACTIVE_SESSION_TRADE':
+      return {
+        ...state,
+        activeSessionTrades: [...state.activeSessionTrades, action.trade],
+      };
+
+    case 'CLEAR_ACTIVE_SESSION_TRADES_FOR_DATE':
+      return {
+        ...state,
+        activeSessionTrades: state.activeSessionTrades.filter(
+          (t) => !(t.symbol === action.symbol && t.date === action.date)
+        ),
+      };
+
+    case 'CLEAR_ACTIVE_SESSION_TRADES':
+      return { ...state, activeSessionTrades: [] };
+
+    case 'SET_PERFORMANCE_LOG':
+      return { ...state, performanceLog: action.log };
+
+    case 'END_SESSION':
+      return {
+        ...state,
+        sessionActive: false,
+        isPlaying: false,
+        symbol: '',
+        replayDate: '',
+        currentPrice: 0,
+        cursor: 0,
+        totalCandles: 0,
+        openPositions: [],
+        pendingOrders: [],
+        tradeHistory: [],
+        activeSessionTrades: [],
+      };
+
     default:
       return state;
   }
@@ -215,21 +278,6 @@ function appReducer(state: AppState, action: AppAction): AppState {
 // =============================================================================
 // Helpers
 // =============================================================================
-
-// Return the most recent past trading weekday (YYYY-MM-DD). If today is a
-// weekday we still step back one calendar day because the local market data
-// is only fully available after the previous close.
-function getLastTradingDate(): string {
-  const d = new Date();
-  d.setDate(d.getDate() - 1);
-  while (d.getDay() === 0 || d.getDay() === 6) {
-    d.setDate(d.getDate() - 1);
-  }
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${y}-${m}-${day}`;
-}
 
 // =============================================================================
 // Reusable alert banner for date-selection / data-sync errors.
@@ -257,19 +305,24 @@ export default function App() {
   const [state, dispatch] = useReducer(appReducer, initialState);
   const chartRef = useRef<ChartHandle>(null);
 
-  // Date-driven replay state.
-  // replayDate   — the YYYY-MM-DD the user has selected in the toolbar.
-  //                Defaults to the most recent past trading weekday.
   // dateConfirmed — true only after a session has been successfully started with
   //                 that date; controls stay locked until this is true.
-  const [replayDate, setReplayDate] = useState(getLastTradingDate());
   const [dateConfirmed, setDateConfirmed] = useState(false);
   const [dateError, setDateError] = useState<string | null>(null);
+
+  // Calendar / session flow state.
+  const [showCalendar, setShowCalendar] = useState(false);
+  const [isEndingSession, setIsEndingSession] = useState(false);
+
+  // Orion AI coach side-panel visibility.
+  const [isOrionOpen, setIsOrionOpen] = useState(false);
 
   // Intro splash control.
   const [showIntro, setShowIntro] = useState(true);
   const [introFinished, setIntroFinished] = useState(false);
   const [dataSynced, setDataSynced] = useState(false);
+
+  const replayDate = state.replayDate;
 
   const showDateError = useCallback(() => {
     setDateError('Please select a valid past trading weekday where market data has been synced.');
@@ -318,9 +371,45 @@ export default function App() {
   // Used by both the Start Session form and the in-app Toolbar autocomplete.
   useEffect(() => {
     fetchTickers();
+    loadPerformanceLog().then((log) => dispatch({ type: 'SET_PERFORMANCE_LOG', log }));
+
+    // Boot the local Ollama service automatically when running as a Tauri app.
+    if (isTauri) {
+      const tauri = (window as any).__TAURI_INTERNALS__;
+      tauri
+        ?.invoke?.('ensure_ollama_running')
+        .catch((err: unknown) => {
+          console.warn('[Orion] Could not auto-start Ollama:', err);
+        });
+    }
     return () => {}; // no cleanup needed — fetchTickers is idempotent
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);  // run once on mount; onDataSynced handles subsequent refreshes
+
+  // --- End Session: once all open positions are closed, persist the active
+  // session trades to the journal, reset the workspace, and clear the sandbox.
+  useEffect(() => {
+    if (!isEndingSession) return;
+    if (state.openPositions.length > 0) return;
+
+    (async () => {
+      try {
+        const log = await endSession(state.activeSessionTrades);
+        dispatch({ type: 'SET_PERFORMANCE_LOG', log });
+        dispatch({ type: 'CLEAR_ACTIVE_SESSION_TRADES' });
+      } catch (err) {
+        console.error('[OpenRewind] Failed to end session:', err);
+      } finally {
+        send({ cmd: 'pause' });
+        chartRef.current?.resetChart();
+        dispatch({ type: 'END_SESSION' });
+        setDateConfirmed(false);
+        setChartKey((k) => k + 1);
+        setIsEndingSession(false);
+      }
+    })();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isEndingSession, state.openPositions.length]);
 
   // --- Keyboard shortcuts ---
   useEffect(() => {
@@ -385,7 +474,7 @@ export default function App() {
         showDateError();
         return;
       }
-      setReplayDate(newDate);
+      dispatch({ type: 'SET_REPLAY_DATE', date: newDate });
       setDateConfirmed(false);
       try {
         const balance = state.balance > 0 ? state.balance : 100000;
@@ -579,9 +668,19 @@ export default function App() {
   const [clearHandler, setClearHandler] = useState<(() => void) | null>(null);
 
   const handleReset = useCallback(() => {
+    // Discard any sandbox trades for the current symbol/date before restarting.
+    dispatch({ type: 'CLEAR_ACTIVE_SESSION_TRADES_FOR_DATE', symbol: state.symbol, date: state.replayDate });
     send({ cmd: 'reset_session' });
     setChartKey((k) => k + 1);
-  }, [send]);
+  }, [send, dispatch, state.symbol, state.replayDate]);
+
+  const handleEndSession = useCallback(() => {
+    setIsEndingSession(true);
+    if (state.openPositions.length === 0) return;
+    for (const pos of state.openPositions) {
+      send({ cmd: 'close_position', position_id: pos.id });
+    }
+  }, [send, state.openPositions]);
 
   // --- Switch the active symbol mid-session.
   // Reuses POST /api/session/start, which:
@@ -662,6 +761,9 @@ export default function App() {
         symbol={state.symbol}
         sessionActive={state.sessionActive}
         lightMode={lightMode}
+        onEndSession={handleEndSession}
+        orionOpen={isOrionOpen}
+        onToggleOrion={() => setIsOrionOpen((v) => !v)}
       />
 
       {/* Main content area */}
@@ -696,6 +798,7 @@ export default function App() {
             onToggleMarkers={() => setShowMarkers((v) => !v)}
             onToggleIndicator={(indicator) => dispatch({ type: 'TOGGLE_INDICATOR', indicator })}
             onReset={handleReset}
+            onOpenCalendar={() => setShowCalendar(true)}
           />
 
           {/* Chart area with drawing tools */}
@@ -807,7 +910,22 @@ export default function App() {
             lightMode={lightMode}
           />
         </div>
+
+        {/* Orion AI coach side-panel */}
+        {isOrionOpen && (
+          <OrionChatSidepanel
+            performanceLog={state.performanceLog}
+            lightMode={lightMode}
+          />
+        )}
       </div>
+
+      <TradingCalendar
+        isOpen={showCalendar}
+        onClose={() => setShowCalendar(false)}
+        log={state.performanceLog}
+        lightMode={lightMode}
+      />
     </div>
   );
 }

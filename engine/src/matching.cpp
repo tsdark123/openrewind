@@ -481,6 +481,8 @@ void MatchingEngine::close_position_internal(std::vector<Position>::iterator it,
     closed.exit_price   = exit_price;
     closed.quantity     = pos.quantity;
     closed.realized_pnl = realized_pnl;
+    closed.stop_loss    = pos.stop_loss;
+    closed.take_profit  = pos.take_profit;
     closed.reason       = reason;
     closed.opened_at    = pos.opened_at;
     closed.closed_at    = timestamp;
@@ -508,6 +510,9 @@ void MatchingEngine::close_position_internal(std::vector<Position>::iterator it,
         event.exit_price   = exit_price;
         event.quantity     = pos.quantity;
         event.realized_pnl = realized_pnl;
+        event.stop_loss    = pos.stop_loss;
+        event.take_profit  = pos.take_profit;
+        event.opened_at    = pos.opened_at;
         event.reason       = reason;
         event.timestamp    = timestamp;
 

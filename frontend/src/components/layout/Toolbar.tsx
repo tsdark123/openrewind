@@ -1,4 +1,4 @@
-import { RotateCcw, Settings, Lock, Unlock, Eye, EyeOff, Sun, Moon, CalendarDays } from 'lucide-react';
+import { RotateCcw, Settings, Lock, Unlock, Eye, EyeOff, Sun, Moon, CalendarDays, Calendar } from 'lucide-react';
 import { IndicatorsDropdown } from '../IndicatorsDropdown';
 import { TickerSearchInput } from '../TickerSearchInput';
 import { useState, useMemo } from 'react';
@@ -38,9 +38,10 @@ interface ToolbarProps {
   onToggleLightMode: () => void;
   onToggleIndicator: (indicator: 'ema20' | 'sma50' | 'bollinger' | 'rsi' | 'macd' | 'atr' | 'stochastic') => void;
   onReset?: () => void;
+  onOpenCalendar?: () => void;
 }
 
-export function Toolbar({ symbol, availableTickers, onSymbolChange, replayDate, onDateChange, timeframe, lockToEdge, showMarkers, lightMode, indicators, onSetTimeframe, onToggleLock, onToggleMarkers, onToggleLightMode, onToggleIndicator, onReset }: ToolbarProps) {
+export function Toolbar({ symbol, availableTickers, onSymbolChange, replayDate, onDateChange, timeframe, lockToEdge, showMarkers, lightMode, indicators, onSetTimeframe, onToggleLock, onToggleMarkers, onToggleLightMode, onToggleIndicator, onReset, onOpenCalendar }: ToolbarProps) {
   const [indicatorsDropdownOpen, setIndicatorsDropdownOpen] = useState(false);
   const [calendarOpen, setCalendarOpen] = useState(false);
 
@@ -123,13 +124,14 @@ export function Toolbar({ symbol, availableTickers, onSymbolChange, replayDate, 
           ))}
         </div>
 
-        {/* Chart type icon - candlestick */}
-        <button className={lightMode ? 'text-gray-600 hover:text-gray-900' : 'text-[#787b86] hover:text-[#d1d4dc]'}>
-          <svg className="h-4 w-4" viewBox="0 0 24 24" fill="currentColor">
-            <rect x="5" y="4" width="2" height="16" />
-            <rect x="11" y="8" width="2" height="12" />
-            <rect x="17" y="2" width="2" height="18" />
-          </svg>
+        {/* Performance calendar icon */}
+        <button
+          type="button"
+          onClick={() => onOpenCalendar?.()}
+          title="Open performance calendar"
+          className={lightMode ? 'text-gray-600 hover:text-gray-900' : 'text-[#787b86] hover:text-[#d1d4dc]'}
+        >
+          <Calendar className="h-4 w-4" />
         </button>
 
         {/* Indicators */}

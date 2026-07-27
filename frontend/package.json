@@ -12,6 +12,7 @@
     "tauri:build": "cd .. && pnpm tauri build"
   },
   "dependencies": {
+    "@tauri-apps/plugin-http": "^2.5.9",
     "lightweight-charts": "^4.2.1",
     "lightweight-charts-drawing": "^0.1.1",
     "lucide-react": "^0.460.0",
