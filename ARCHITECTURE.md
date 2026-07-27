@@ -1,4 +1,4 @@
-# OpenReplay — System Architecture
+# OpenRewind — System Architecture
 
 > A free, open-source market replay and backtesting engine. Practice trading on any historical date with bar-by-bar playback, realistic order execution, and zero risk — powered by a C++20 core and a React/TypeScript UI.
 
@@ -20,7 +20,7 @@
 
 ## 1. High-Level Overview
 
-OpenReplay is split into two independently deployable halves that communicate over localhost:
+OpenRewind is split into two independently deployable halves that communicate over localhost:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -75,7 +75,7 @@ OpenReplay is split into two independently deployable halves that communicate ov
 ## 2. Repository Layout
 
 ```
-OpenReplay/
+OpenRewind/
 ├── ARCHITECTURE.md          ← you are here
 ├── README.md
 │
@@ -262,7 +262,7 @@ std::vector<Candle> aggregate(std::span<const Candle> base, int minutes) {
 
 ## 4. Order Matching Engine
 
-The matching engine is the financial heart of OpenReplay. It simulates a simplified exchange: no order book depth, no slippage model (V1), no partial fills. But the math must be precise.
+The matching engine is the financial heart of OpenRewind. It simulates a simplified exchange: no order book depth, no slippage model (V1), no partial fills. But the math must be precise.
 
 ### 4.1 Core Types
 
@@ -779,7 +779,7 @@ No Redux, no Zustand — the state is small enough for a single reducer. If V2 c
 `vcpkg.json` manifest:
 ```json
 {
-    "name": "openreplay-engine",
+    "name": "openrewind-engine",
     "version-string": "0.1.0",
     "dependencies": [
         "crow",
@@ -793,7 +793,7 @@ Build commands:
 cd engine
 cmake -B build -S . -DCMAKE_TOOLCHAIN_FILE=[vcpkg root]/scripts/buildsystems/vcpkg.cmake
 cmake --build build --config Release
-./build/openreplay-engine   # starts server on :9000
+./build/openrewind-engine   # starts server on :9000
 ```
 
 ### 8.2 Frontend
@@ -827,7 +827,7 @@ export default defineConfig({
 ### 8.3 Development Workflow
 
 ```
-Terminal 1:  cd engine/build && ./openreplay-engine     (C++ server on :9000)
+Terminal 1:  cd engine/build && ./openrewind-engine     (C++ server on :9000)
 Terminal 2:  cd frontend && pnpm dev                     (React dev on :5173)
 Terminal 3:  python scripts/fetch_data.py --symbol AAPL  (one-time data fetch)
 ```
@@ -875,4 +875,4 @@ Terminal 3:  python scripts/fetch_data.py --symbol AAPL  (one-time data fetch)
 
 ---
 
-*OpenReplay — Built to learn. Built to compete. Built to open-source.*
+*OpenRewind — Built to learn. Built to compete. Built to open-source.*

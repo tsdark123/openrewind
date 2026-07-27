@@ -3,7 +3,8 @@
 # ==============================================================================
 
 # --- CSV Data Cache (downloaded market data) ---
-data/
+data/*
+!data/.gitkeep
 
 # --- C++ Build Artifacts ---
 engine/build/
@@ -45,6 +46,16 @@ frontend/.vite/
 __pycache__/
 *.pyc
 .env
+
+# --- Tauri / Rust ---
+src-tauri/target/
+src-tauri/gen/
+src-tauri/binaries/*.exe
+src-tauri/binaries/openreplay-engine-*
+!src-tauri/binaries/.gitkeep
+
+# --- Root node_modules (Tauri CLI) ---
+node_modules/
 
 # --- OS ---
 .DS_Store

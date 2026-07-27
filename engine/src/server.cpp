@@ -1,26 +1,42 @@
 #include "server.hpp"
+#include "csv_loader.hpp"
 
 #include <iostream>
 #include <optional>
 #include <sstream>
+#include <filesystem>
+#include <algorithm>
+#include <chrono>
+#include <cstdlib>
 
 // =============================================================================
-// OpenReplayServer — Implementation
+// OpenRewindServer — Implementation
 // =============================================================================
 
 // -----------------------------------------------------------------------------
 // Construction / Destruction
 // -----------------------------------------------------------------------------
 
-OpenReplayServer::OpenReplayServer(int port)
-    : port_(port)
+OpenRewindServer::OpenRewindServer(int port, std::string data_dir)
+    : port_(port), data_dir_(std::move(data_dir))
 {
+    // Configure CORS so the Tauri webview (origin: tauri://localhost) and
+    // the Vite dev server (origin: http://localhost:5173) can both reach
+    // the engine without browser CORS blocks.
+    auto& cors = app_.get_middleware<crow::CORSHandler>();
+    cors
+        .global()
+        .origin("*")
+        .methods("GET"_method, "POST"_method, "OPTIONS"_method)
+        .headers("Content-Type");
+
     setup_rest_routes();
     setup_websocket();
     wire_event_callbacks();
+    start_ingest_worker();
 }
 
-OpenReplayServer::~OpenReplayServer() {
+OpenRewindServer::~OpenRewindServer() {
     stop();
 }
 
@@ -28,8 +44,8 @@ OpenReplayServer::~OpenReplayServer() {
 // Server Lifecycle
 // -----------------------------------------------------------------------------
 
-void OpenReplayServer::run() {
-    std::cout << "[OpenReplay] Starting server on http://localhost:"
+void OpenRewindServer::run() {
+    std::cout << "[OpenRewind] Starting server on http://localhost:"
               << port_ << std::endl;
 
     app_.port(static_cast<uint16_t>(port_))
@@ -37,16 +53,132 @@ void OpenReplayServer::run() {
         .run();
 }
 
-void OpenReplayServer::stop() {
+void OpenRewindServer::stop() {
+    stop_ingest_worker();
     app_.stop();
     session_.stop_session();
+}
+
+// -----------------------------------------------------------------------------
+// Auto-ingestion worker
+//
+// Spawns a single background thread that periodically shells out to
+//   python scripts/fetch_data.py --mode append
+// so the engine keeps its data window fresh (last 30 days of 1-min bars)
+// without depending on an external cron / Task Scheduler. The thread is
+// completely off the Crow request path — HTTP/WS handlers never touch it.
+//
+// CWD assumption: the engine must be launched from a directory where
+// `scripts/fetch_data.py` resolves (i.e. the project root). On a hosted
+// deployment this is typically the working dir of the systemd unit / container.
+// -----------------------------------------------------------------------------
+
+void OpenRewindServer::start_ingest_worker() {
+    ingest_stop_.store(false);
+    ingest_thread_ = std::thread([this]() {
+        using namespace std::chrono_literals;
+        constexpr auto INTERVAL = std::chrono::minutes(30);
+
+        std::cout << "[OpenRewind] auto-ingest worker started — kicking off "
+                     "initial fetch_data.py --mode append\n";
+
+        // Initial kickoff so a fresh boot has the latest bars before the
+        // first user lands. Runs synchronously on the worker thread.
+        int rc0 = std::system("python scripts/fetch_data.py --mode append");
+        if (rc0 != 0) {
+            std::cerr << "[OpenRewind] ingest worker: initial fetch_data.py "
+                         "exited with " << rc0 << " (continuing)\n";
+        }
+
+        while (!ingest_stop_.load()) {
+            std::unique_lock<std::mutex> lk(ingest_cv_mutex_);
+            // Sleep for INTERVAL but wake immediately on shutdown.
+            if (ingest_cv_.wait_for(lk, INTERVAL,
+                    [this] { return ingest_stop_.load(); })) {
+                break;
+            }
+            lk.unlock();
+
+            std::cout << "[OpenRewind] auto-ingest tick — running "
+                         "fetch_data.py --mode append\n";
+            int rc = std::system("python scripts/fetch_data.py --mode append");
+            if (rc != 0) {
+                std::cerr << "[OpenRewind] ingest worker: fetch_data.py "
+                             "exited with " << rc << "\n";
+            }
+        }
+
+        std::cout << "[OpenRewind] auto-ingest worker stopped.\n";
+    });
+}
+
+void OpenRewindServer::stop_ingest_worker() {
+    ingest_stop_.store(true);
+    ingest_cv_.notify_all();
+    if (ingest_thread_.joinable()) {
+        ingest_thread_.join();
+    }
 }
 
 // -----------------------------------------------------------------------------
 // REST Route Setup
 // -----------------------------------------------------------------------------
 
-void OpenReplayServer::setup_rest_routes() {
+void OpenRewindServer::setup_rest_routes() {
+
+    // =========================================================================
+    // GET /api/tickers
+    //
+    // Lists every symbol that has loadable data in the configured data
+    // directory. The frontend uses this to populate its TradingView-style
+    // autocomplete dropdown so users can switch between any of the tickers
+    // ingested by scripts/fetch_data.py.
+    //
+    // Query params:
+    //   data_dir (optional, default "data") — same path the frontend already
+    //                                          sends to /api/session/start.
+    //
+    // Response: { "tickers": ["AAPL", "AMZN", "TSLA", ...] }
+    // =========================================================================
+
+    CROW_ROUTE(app_, "/api/tickers").methods(crow::HTTPMethod::GET)
+    ([this](const crow::request& req) {
+        namespace fs = std::filesystem;
+
+        const char* dir_param = req.url_params.get("data_dir");
+        std::string data_dir = dir_param ? dir_param : data_dir_;
+
+        std::vector<std::string> tickers;
+
+        std::error_code ec;
+        if (!fs::exists(data_dir, ec) || !fs::is_directory(data_dir, ec)) {
+            return crow::response(200, "application/json",
+                json{{"tickers", json::array()}}.dump());
+        }
+
+        for (const auto& entry : fs::directory_iterator(data_dir, ec)) {
+            if (ec) break;
+            if (!entry.is_directory()) continue;
+
+            std::string symbol = entry.path().filename().string();
+            if (symbol.empty() || symbol[0] == '.') continue;
+
+            // Only surface symbols that actually have loadable data —
+            // either the new {SYMBOL}_history.csv or any legacy file the
+            // CsvLoader fallback can find.
+            if (!CsvLoader::find_csv_files(symbol, data_dir).empty()) {
+                tickers.push_back(symbol);
+            }
+        }
+
+        std::sort(tickers.begin(), tickers.end());
+
+        json arr = json::array();
+        for (const auto& t : tickers) arr.push_back(t);
+
+        return crow::response(200, "application/json",
+            json{{"tickers", arr}}.dump());
+    });
 
     // =========================================================================
     // POST /api/session/start
@@ -68,21 +200,28 @@ void OpenReplayServer::setup_rest_routes() {
 
         std::string symbol = body["symbol"].get<std::string>();
         double starting_balance = body.value("starting_balance", 100000.0);
-        std::string data_dir = body.value("data_dir", "data");
+        std::string data_dir = body.value("data_dir", data_dir_);
+        std::string start_date = body.value("start_date", "");
 
         try {
-            std::size_t total = session_.start_session(symbol, starting_balance, data_dir);
+            std::size_t total = session_.start_session(
+                symbol, starting_balance, data_dir, start_date);
 
             json response = {
                 {"session_id",     "1"},
                 {"symbol",         symbol},
                 {"total_candles",  total},
                 {"start_ts",       session_.start_timestamp()},
-                {"end_ts",         session_.end_timestamp()}
+                {"end_ts",         session_.end_timestamp()},
+                {"start_date",     start_date},
+                {"start_cursor",   session_.cursor()}
             };
 
-            // Broadcast session_started to all WS clients.
+            // Broadcast session_started to all WS clients, immediately
+            // followed by a full session_state so clients receive the
+            // authoritative candle history for the new session up front.
             broadcast("session_started", response);
+            broadcast("session_state", build_full_state());
 
             return crow::response(200, "application/json", response.dump());
         }
@@ -241,21 +380,54 @@ void OpenReplayServer::setup_rest_routes() {
             json{{"success", success}}.dump());
     });
 
-    // CORS is handled by the Vite dev proxy (/api → localhost:9000).
-    // In production, a reverse proxy (nginx) would add CORS headers.
+    // =========================================================================
+    // POST /api/data_refreshed
+    //
+    // Called by scripts/fetch_data.py after every sync run completes.
+    // Broadcasts a 'data_synced' WebSocket event to every connected client
+    // so the frontend can refresh its ticker list and market-close pricing
+    // without requiring a page reload.
+    //
+    // Request body (optional):
+    //   { "symbols": {"AAPL": {...}, ...}, "ok": 48, "fail": 2,
+    //     "elapsed_s": 42.3 }
+    // Response: { "ok": true }
+    // =========================================================================
+
+    CROW_ROUTE(app_, "/api/data_refreshed").methods(crow::HTTPMethod::POST)
+    ([this](const crow::request& req) {
+        json body;
+        try { body = json::parse(req.body); } catch (...) { body = json::object(); }
+
+        json payload = {
+            {"symbols",   body.value("symbols",   json::object())},
+            {"ok",        body.value("ok",        0)},
+            {"fail",      body.value("fail",      0)},
+            {"elapsed_s", body.value("elapsed_s", 0.0)},
+        };
+
+        broadcast("data_synced", payload);
+
+        std::cout << "[OpenRewind] data_refreshed — broadcasting data_synced to "
+                  << ws_clients_.size() << " client(s)\n";
+
+        return crow::response(200, "application/json",
+            json{{"ok", true}}.dump());
+    });
+
 }
 
 // -----------------------------------------------------------------------------
 // WebSocket Setup
 // -----------------------------------------------------------------------------
 
-void OpenReplayServer::setup_websocket() {
+void OpenRewindServer::setup_websocket() {
 
     CROW_WEBSOCKET_ROUTE(app_, "/ws")
         .onopen([this](crow::websocket::connection& conn) {
             std::lock_guard<std::mutex> lock(ws_mutex_);
             ws_clients_.insert(&conn);
-            std::cout << "[OpenReplay] WebSocket client connected ("
+            std::cout << "[OpenRewind] WebSocket client connected ("
                       << ws_clients_.size() << " total)" << std::endl;
 
             // If a session is active, send the current state as an initial sync.
@@ -267,7 +439,7 @@ void OpenReplayServer::setup_websocket() {
         .onclose([this](crow::websocket::connection& conn, const std::string& reason, uint16_t /*code*/) {
             std::lock_guard<std::mutex> lock(ws_mutex_);
             ws_clients_.erase(&conn);
-            std::cout << "[OpenReplay] WebSocket client disconnected: "
+            std::cout << "[OpenRewind] WebSocket client disconnected: "
                       << reason << " (" << ws_clients_.size() << " remaining)"
                       << std::endl;
         })
@@ -287,7 +459,7 @@ void OpenReplayServer::setup_websocket() {
 // to the matching engine when a session starts.
 // -----------------------------------------------------------------------------
 
-void OpenReplayServer::wire_event_callbacks() {
+void OpenRewindServer::wire_event_callbacks() {
 
     // On candle advance (manual or auto-play): broadcast candle_update.
     session_.set_on_candle_advanced(
@@ -349,7 +521,7 @@ void OpenReplayServer::wire_event_callbacks() {
 //   place_order, cancel_order, close_position
 // -----------------------------------------------------------------------------
 
-void OpenReplayServer::handle_ws_command(crow::websocket::connection& conn,
+void OpenRewindServer::handle_ws_command(crow::websocket::connection& conn,
                                           const std::string& msg) {
     json cmd;
     try {
@@ -452,6 +624,10 @@ void OpenReplayServer::handle_ws_command(crow::websocket::connection& conn,
         }
         int minutes = cmd["minutes"].get<int>();
         session_.set_timeframe(minutes);
+
+        // Re-send the full state so the client picks up the newly
+        // aggregated candle history for the selected timeframe.
+        send_to(conn, "session_state", build_full_state());
     }
 
     // --- place_order ---
@@ -572,7 +748,7 @@ void OpenReplayServer::handle_ws_command(crow::websocket::connection& conn,
 // WebSocket Broadcasting
 // -----------------------------------------------------------------------------
 
-void OpenReplayServer::broadcast(const std::string& event_type, const json& payload) {
+void OpenRewindServer::broadcast(const std::string& event_type, const json& payload) {
     uint64_t current_seq = seq_.fetch_add(1, std::memory_order_relaxed);
 
     json envelope = {
@@ -589,13 +765,13 @@ void OpenReplayServer::broadcast(const std::string& event_type, const json& payl
             conn->send_text(message);
         }
         catch (const std::exception& e) {
-            std::cerr << "[OpenReplay] Failed to send to client: "
+            std::cerr << "[OpenRewind] Failed to send to client: "
                       << e.what() << std::endl;
         }
     }
 }
 
-void OpenReplayServer::send_to(crow::websocket::connection& conn,
+void OpenRewindServer::send_to(crow::websocket::connection& conn,
                                 const std::string& event_type,
                                 const json& payload) {
     uint64_t current_seq = seq_.fetch_add(1, std::memory_order_relaxed);
@@ -610,7 +786,7 @@ void OpenReplayServer::send_to(crow::websocket::connection& conn,
         conn.send_text(envelope.dump());
     }
     catch (const std::exception& e) {
-        std::cerr << "[OpenReplay] Failed to send to client: "
+        std::cerr << "[OpenRewind] Failed to send to client: "
                   << e.what() << std::endl;
     }
 }
@@ -619,7 +795,7 @@ void OpenReplayServer::send_to(crow::websocket::connection& conn,
 // JSON Serialization Helpers
 // -----------------------------------------------------------------------------
 
-json OpenReplayServer::candle_to_json(const Candle& c) {
+json OpenRewindServer::candle_to_json(const Candle& c) {
     return {
         {"timestamp", c.timestamp},
         {"open",      c.open},
@@ -630,7 +806,7 @@ json OpenReplayServer::candle_to_json(const Candle& c) {
     };
 }
 
-json OpenReplayServer::position_to_json(const Position& p) {
+json OpenRewindServer::position_to_json(const Position& p) {
     return {
         {"id",           p.id},
         {"side",         to_string(p.side)},
@@ -642,7 +818,7 @@ json OpenReplayServer::position_to_json(const Position& p) {
     };
 }
 
-json OpenReplayServer::order_to_json(const Order& o) {
+json OpenRewindServer::order_to_json(const Order& o) {
     json j = {
         {"id",           o.id},
         {"side",         to_string(o.side)},
@@ -663,7 +839,7 @@ json OpenReplayServer::order_to_json(const Order& o) {
     return j;
 }
 
-json OpenReplayServer::closed_trade_to_json(const ClosedTrade& t) {
+json OpenRewindServer::closed_trade_to_json(const ClosedTrade& t) {
     return {
         {"id",            t.id},
         {"side",          to_string(t.side)},
@@ -677,7 +853,7 @@ json OpenReplayServer::closed_trade_to_json(const ClosedTrade& t) {
     };
 }
 
-json OpenReplayServer::account_snapshot_to_json(const AccountSnapshot& snap) {
+json OpenRewindServer::account_snapshot_to_json(const AccountSnapshot& snap) {
     return {
         {"balance",              snap.balance},
         {"equity",               snap.equity},
@@ -686,7 +862,7 @@ json OpenReplayServer::account_snapshot_to_json(const AccountSnapshot& snap) {
     };
 }
 
-json OpenReplayServer::build_full_state() const {
+json OpenRewindServer::build_full_state() const {
     auto snap = session_.account_snapshot();
     auto positions = session_.open_positions();
     auto pending = session_.pending_orders();
@@ -729,6 +905,27 @@ json OpenReplayServer::build_full_state() const {
         state["candle"] = nullptr;
     }
 
+    // Include the full visible history (every bar up to and including the
+    // cursor, aggregated to the active timeframe). This is the authoritative
+    // timeline the frontend renders via setData() on session start, rewind
+    // and seek — it cannot reconstruct past bars on its own because
+    // candle_update only ever carries a single bar.
+    json candles_arr = json::array();
+    try {
+        auto history = session_.aggregated_visible_history();
+        constexpr std::size_t MAX_HISTORY = 5000;
+        std::size_t begin = history.size() > MAX_HISTORY
+            ? history.size() - MAX_HISTORY
+            : 0;
+        for (std::size_t i = begin; i < history.size(); ++i) {
+            candles_arr.push_back(candle_to_json(history[i]));
+        }
+    }
+    catch (...) {
+        // Leave the array empty on failure — the client keeps its cache.
+    }
+    state["candles"] = candles_arr;
+
     return state;
 }
 
@@ -736,7 +933,7 @@ json OpenReplayServer::build_full_state() const {
 // Utility
 // -----------------------------------------------------------------------------
 
-json OpenReplayServer::parse_body(const crow::request& req) {
+json OpenRewindServer::parse_body(const crow::request& req) {
     try {
         if (req.body.empty()) {
             return {};
@@ -748,13 +945,13 @@ json OpenReplayServer::parse_body(const crow::request& req) {
     }
 }
 
-std::optional<Side> OpenReplayServer::parse_side(const std::string& s) {
+std::optional<Side> OpenRewindServer::parse_side(const std::string& s) {
     if (s == "buy")  return Side::Buy;
     if (s == "sell") return Side::Sell;
     return std::nullopt;
 }
 
-std::optional<OrdType> OpenReplayServer::parse_ord_type(const std::string& s) {
+std::optional<OrdType> OpenRewindServer::parse_ord_type(const std::string& s) {
     if (s == "market") return OrdType::Market;
     if (s == "limit")  return OrdType::Limit;
     if (s == "stop")   return OrdType::Stop;

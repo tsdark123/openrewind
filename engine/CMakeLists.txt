@@ -1,9 +1,9 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(openreplay-engine
+project(openrewind-engine
     VERSION     0.1.0
     LANGUAGES   CXX
-    DESCRIPTION "OpenReplay — High-performance C++20 market replay and backtesting engine"
+    DESCRIPTION "OpenRewind — High-performance C++20 market replay and backtesting engine"
 )
 
 # ==============================================================================
@@ -46,13 +46,13 @@ set(ENGINE_HEADERS
 # Executable Target
 # ==============================================================================
 
-add_executable(openreplay-engine ${ENGINE_SOURCES} ${ENGINE_HEADERS})
+add_executable(openrewind-engine ${ENGINE_SOURCES} ${ENGINE_HEADERS})
 
-target_include_directories(openreplay-engine PRIVATE
+target_include_directories(openrewind-engine PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
-target_link_libraries(openreplay-engine PRIVATE
+target_link_libraries(openrewind-engine PRIVATE
     Crow::Crow
     nlohmann_json::nlohmann_json
 )
@@ -62,7 +62,7 @@ target_link_libraries(openreplay-engine PRIVATE
 # ==============================================================================
 
 if(MSVC)
-    target_compile_options(openreplay-engine PRIVATE
+    target_compile_options(openrewind-engine PRIVATE
         /W4             # High warning level
         /permissive-    # Strict conformance mode
         /utf-8          # Source and execution character set
@@ -70,15 +70,30 @@ if(MSVC)
     )
 
     # Suppress Crow/Asio deprecation warnings on Windows.
-    target_compile_definitions(openreplay-engine PRIVATE
+    target_compile_definitions(openrewind-engine PRIVATE
         _WIN32_WINNT=0x0A00         # Target Windows 10+
         _CRT_SECURE_NO_WARNINGS     # Suppress CRT deprecation warnings
         NOMINMAX                    # Prevent Windows.h min/max macros
     )
+
+    # Static link the MSVC runtime so the binary needs no VC++ redistributable.
+    # Switch /MD (dynamic CRT) → /MT (static CRT) for Release builds.
+    set_property(TARGET openrewind-engine PROPERTY
+        MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
+    )
 else()
-    target_compile_options(openreplay-engine PRIVATE
+    target_compile_options(openrewind-engine PRIVATE
         -Wall -Wextra -Wpedantic
     )
+
+    # Static link libstdc++ and libgcc on GCC/Clang so the binary is
+    # self-contained on Linux/macOS without requiring matching system libs.
+    if(NOT APPLE)
+        target_link_options(openrewind-engine PRIVATE
+            -static-libgcc
+            -static-libstdc++
+        )
+    endif()
 endif()
 
 # ==============================================================================
@@ -86,10 +101,52 @@ endif()
 # ==============================================================================
 
 find_package(Threads REQUIRED)
-target_link_libraries(openreplay-engine PRIVATE Threads::Threads)
+target_link_libraries(openrewind-engine PRIVATE Threads::Threads)
+
+# ==============================================================================
+# Tauri Sidecar — Copy binary into src-tauri/binaries/ after build
+#
+# Tauri requires sidecars to be named:  <name>-<target-triple>[.exe]
+# e.g. openrewind-engine-x86_64-pc-windows-msvc.exe
+#
+# We detect the triple from CMake's system info so CI and local builds
+# both produce the correctly-named file automatically.
+# ==============================================================================
+
+if(WIN32)
+    if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+        set(TAURI_TARGET_TRIPLE "x86_64-pc-windows-msvc")
+    else()
+        set(TAURI_TARGET_TRIPLE "i686-pc-windows-msvc")
+    endif()
+    set(SIDECAR_EXT ".exe")
+elseif(APPLE)
+    execute_process(COMMAND uname -m OUTPUT_VARIABLE HOST_ARCH OUTPUT_STRIP_TRAILING_WHITESPACE)
+    if(HOST_ARCH STREQUAL "arm64")
+        set(TAURI_TARGET_TRIPLE "aarch64-apple-darwin")
+    else()
+        set(TAURI_TARGET_TRIPLE "x86_64-apple-darwin")
+    endif()
+    set(SIDECAR_EXT "")
+else()
+    set(TAURI_TARGET_TRIPLE "x86_64-unknown-linux-gnu")
+    set(SIDECAR_EXT "")
+endif()
+
+set(SIDECAR_NAME "openrewind-engine-${TAURI_TARGET_TRIPLE}${SIDECAR_EXT}")
+set(SIDECAR_DEST "${CMAKE_CURRENT_SOURCE_DIR}/../src-tauri/binaries/${SIDECAR_NAME}")
+
+add_custom_command(TARGET openrewind-engine POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+        "${CMAKE_CURRENT_SOURCE_DIR}/../src-tauri/binaries"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "$<TARGET_FILE:openrewind-engine>"
+        "${SIDECAR_DEST}"
+    COMMENT "Copying engine sidecar → src-tauri/binaries/${SIDECAR_NAME}"
+)
 
 # ==============================================================================
 # Install (optional — for packaging)
 # ==============================================================================
 
-install(TARGETS openreplay-engine DESTINATION bin)
+install(TARGETS openrewind-engine DESTINATION bin)

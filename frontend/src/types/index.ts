@@ -1,5 +1,5 @@
 // =============================================================================
-// OpenReplay Frontend — TypeScript Interfaces
+// OpenRewind Frontend — TypeScript Interfaces
 //
 // Mirrors the C++ structs defined in matching.hpp and the JSON payloads
 // documented in ARCHITECTURE.md §5.3. These types are the single source
@@ -151,6 +151,7 @@ export interface SessionStatePayload {
   speed: number;
   timeframe: number;
   candle: CandleData | null;
+  candles: CandleData[];
   account: AccountSnapshotPayload;
   open_positions: Position[];
   pending_orders: Order[];
@@ -164,10 +165,10 @@ export interface AppState {
   sessionActive: boolean;
   symbol: string;
 
-  candles: CandleData[];
   cursor: number;
   totalCandles: number;
   timeframe: number;
+  currentPrice: number;
 
   isPlaying: boolean;
   speed: number;

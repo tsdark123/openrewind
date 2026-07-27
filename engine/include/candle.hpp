@@ -68,6 +68,12 @@ public:
     // reset the cursor to 0. Useful for loading multiple month files.
     void merge_candles(const std::vector<Candle>& new_candles);
 
+    // Keep only candles whose timestamp falls in the closed interval
+    // [from_ts, to_ts]. All candles outside the range are discarded and
+    // the cursor is reset to 0.  O(log n) bisect + O(k) copy where k is
+    // the number of kept candles.
+    void filter_to_range(int64_t from_ts, int64_t to_ts);
+
     // -------------------------------------------------------------------------
     // Time-Travel Interface
     // -------------------------------------------------------------------------

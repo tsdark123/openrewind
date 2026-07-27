@@ -1,5 +1,5 @@
 """
-OpenReplay — Yahoo Finance Data Ingestion (yfinance)
+OpenRewind — Yahoo Finance Data Ingestion (yfinance)
 ====================================================
 Downloads free 1-minute intraday data (last 7 days) for a given symbol.
 No API key required.
@@ -32,7 +32,7 @@ def main():
     symbol = args.symbol.upper()
     period = args.period
 
-    print("OpenReplay — Yahoo Finance Ingestion")
+    print("OpenRewind — Yahoo Finance Ingestion")
     print("=" * 40)
     print(f"  Symbol:   {symbol}")
     print(f"  Period:   {period}")
@@ -135,7 +135,7 @@ def main():
     print(f"  Size:     {size_str}")
     print(f"  Range:    {df['timestamp'].iloc[0]} → {df['timestamp'].iloc[-1]}")
     print()
-    print("  Ready for OpenReplay engine.")
+    print("  Ready for OpenRewind engine.")
 
 
 if __name__ == "__main__":

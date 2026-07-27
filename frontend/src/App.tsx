@@ -1,8 +1,8 @@
-import { useReducer, useCallback, useEffect, useState, useMemo } from 'react';
-import { Loader2, PlayCircle, Search } from 'lucide-react';
-import { Chart } from './components/Chart';
+import { useReducer, useCallback, useEffect, useState, useRef } from 'react';
+import { Chart, type ChartHandle } from './components/Chart';
+import { IntroSplash } from './components/IntroSplash';
 import { Header } from './components/layout/Header';
-import { LeftSidebar } from './components/layout/LeftSidebar';
+import { TradingToolbar } from './components/drawing/TradingToolbar';
 import { Toolbar } from './components/layout/Toolbar';
 import { BottomPanel } from './components/layout/BottomPanel';
 import { PlaybackControls } from './components/layout/PlaybackControls';
@@ -13,10 +13,22 @@ import type {
   AppState,
   AppAction,
   CandleData,
+  CandleUpdatePayload,
   Side,
   OrdType,
 } from './types';
-import { aggregateCandles } from './utils/aggregateCandles';
+import type { ActiveTool } from './components/drawing/drawingTools';
+
+// =============================================================================
+// Constants
+// =============================================================================
+
+// In Tauri's webview the Vite proxy is not running, so REST calls must go
+// directly to the engine. In browser dev mode an empty base lets Vite proxy
+// /api/* → http://localhost:9000.
+const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+const API_BASE = isTauri ? 'http://127.0.0.1:9000' : '';
+
 
 // =============================================================================
 // App State Reducer
@@ -27,10 +39,10 @@ const initialState: AppState = {
   sessionActive: false,
   symbol: '',
 
-  candles: [],
   cursor: 0,
   totalCandles: 0,
   timeframe: 1,
+  currentPrice: 0,
 
   isPlaying: false,
   speed: 1,
@@ -65,8 +77,8 @@ function appReducer(state: AppState, action: AppAction): AppState {
         sessionActive: true,
         symbol: action.payload.symbol,
         totalCandles: action.payload.total_candles,
-        candles: [],
         cursor: 0,
+        currentPrice: 0,
         isPlaying: false,
         indicators: {
           ema20: false,
@@ -91,22 +103,12 @@ function appReducer(state: AppState, action: AppAction): AppState {
 
     case 'SESSION_STATE': {
       const p = action.payload;
-      let candles: CandleData[];
-      if (state.candles.length === 0) {
-        // Initial load — seed with current candle if provided
-        candles = p.candle ? [p.candle] : [];
-      } else if (p.cursor < state.cursor && state.candles.length > 0) {
-        // Rewind: cursor moved backwards — truncate candle array to match
-        candles = state.candles.slice(0, p.cursor + 1);
-      } else {
-        // Normal state refresh (order placement, TF change, etc.)
-        candles = state.candles;
-      }
+      // Candle history is applied directly to the chart via onSessionHistory.
       return {
         ...state,
         sessionActive: true,
         symbol: p.symbol,
-        candles,
+        currentPrice: p.candle ? p.candle.close : state.currentPrice,
         cursor: p.cursor,
         totalCandles: p.total_candles,
         isPlaying: p.is_playing,
@@ -122,47 +124,13 @@ function appReducer(state: AppState, action: AppAction): AppState {
 
     case 'CANDLE_UPDATE': {
       const c = action.payload;
-      const newCandle: CandleData = {
-        timestamp: c.timestamp,
-        open: c.open,
-        high: c.high,
-        low: c.low,
-        close: c.close,
-        volume: c.volume,
-      };
-
-      // Detect backward step: if cursor decreased, truncate instead of append
-      if (c.cursor < state.cursor) {
-        // Backward step: truncate to new cursor + 1
-        const truncated = state.candles.slice(0, c.cursor + 1);
-        return {
-          ...state,
-          candles: truncated,
-          cursor: c.cursor,
-          totalCandles: c.total,
-        };
-      }
-
-      // Forward step: append new candle (or update if same timestamp)
-      const existingIndex = state.candles.findIndex(candle => candle.timestamp === c.timestamp);
-      if (existingIndex >= 0) {
-        // Update existing candle (in case of refresh)
-        const updated = [...state.candles];
-        updated[existingIndex] = newCandle;
-        return {
-          ...state,
-          candles: updated,
-          cursor: c.cursor,
-          totalCandles: c.total,
-        };
-      }
-
-      // Append new candle
+      // Candle data is managed imperatively by Chart via onCandleUpdate callback.
+      // Only update cursor/total here for the playback counter display.
       return {
         ...state,
-        candles: [...state.candles, newCandle],
         cursor: c.cursor,
         totalCandles: c.total,
+        currentPrice: c.close,
       };
     }
 
@@ -245,96 +213,38 @@ function appReducer(state: AppState, action: AppAction): AppState {
 }
 
 // =============================================================================
-// Start Session Dialog — Dark FXReplay-style
+// Helpers
 // =============================================================================
 
-function StartSessionForm({
-  onStart,
-  connected,
-}: {
-  onStart: (symbol: string, balance: number) => void;
-  connected: boolean;
-}) {
-  const [symbol, setSymbol] = useState('AAPL');
-  const [balance, setBalance] = useState('100000');
+// Return the most recent past trading weekday (YYYY-MM-DD). If today is a
+// weekday we still step back one calendar day because the local market data
+// is only fully available after the previous close.
+function getLastTradingDate(): string {
+  const d = new Date();
+  d.setDate(d.getDate() - 1);
+  while (d.getDay() === 0 || d.getDay() === 6) {
+    d.setDate(d.getDate() - 1);
+  }
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
 
-  const handleSubmit = () => {
-    const bal = parseFloat(balance);
-    if (!symbol.trim() || isNaN(bal) || bal <= 0) return;
-    onStart(symbol.trim().toUpperCase(), bal);
-  };
-
+// =============================================================================
+// Reusable alert banner for date-selection / data-sync errors.
+// =============================================================================
+function ErrorAlert({ message, onClose, lightMode }: { message: string; onClose: () => void; lightMode: boolean }) {
   return (
-    <div className="flex flex-col items-center justify-center h-full gap-6 bg-[#121416]">
-      <div className="flex flex-col items-center gap-2">
-        <PlayCircle size={48} className="text-[#2962ff]" />
-        <div className="flex items-center">
-          <span className="text-2xl font-bold text-[#2962ff]">Open</span>
-          <span className="text-2xl font-bold text-white">Replay</span>
-        </div>
-        <p className="text-sm text-[#787b86] max-w-sm text-center">
-          Market replay and backtesting engine. Load historical data and
-          practice trading under real market conditions.
-        </p>
-      </div>
-
-      <div className="flex flex-col gap-3 w-72">
-        <div>
-          <label className="block text-[10px] text-[#787b86] uppercase tracking-wider mb-1">
-            Symbol
-          </label>
-          <div className="relative">
-            <input
-              type="text"
-              value={symbol}
-              onChange={(e) => setSymbol(e.target.value.toUpperCase())}
-              placeholder="AAPL"
-              className="w-full pl-9 pr-3 py-2.5 bg-[#1e222d] border border-[#363a45] rounded-lg text-sm font-mono text-[#d1d4dc] placeholder-[#787b86] focus:border-[#2962ff] focus:outline-none transition-colors"
-            />
-            <Search
-              size={14}
-              className="absolute left-3 top-1/2 -translate-y-1/2 text-[#787b86]"
-            />
-          </div>
-        </div>
-
-        <div>
-          <label className="block text-[10px] text-[#787b86] uppercase tracking-wider mb-1">
-            Starting Balance
-          </label>
-          <input
-            type="number"
-            value={balance}
-            onChange={(e) => setBalance(e.target.value)}
-            placeholder="100000"
-            className="w-full px-3 py-2.5 bg-[#1e222d] border border-[#363a45] rounded-lg text-sm font-mono text-[#d1d4dc] placeholder-[#787b86] focus:border-[#2962ff] focus:outline-none transition-colors"
-          />
-        </div>
-
-        <button
-          onClick={handleSubmit}
-          disabled={!connected}
-          className="flex items-center justify-center gap-2 w-full py-3 mt-1 bg-[#2962ff] hover:bg-[#2962ff]/90 text-white font-semibold rounded-lg transition-all disabled:opacity-40 disabled:cursor-not-allowed"
-        >
-          {!connected ? (
-            <>
-              <Loader2 size={16} className="animate-spin" />
-              Connecting to engine...
-            </>
-          ) : (
-            <>
-              <PlayCircle size={16} />
-              Start Session
-            </>
-          )}
-        </button>
-
-        {!connected && (
-          <p className="text-[10px] text-center text-[#787b86]">
-            Make sure the C++ engine is running on localhost:9000
-          </p>
-        )}
-      </div>
+    <div className={`px-4 py-2 flex items-center justify-between text-sm border-b ${lightMode ? 'bg-amber-50 border-amber-200 text-amber-800' : 'bg-[#f59e0b]/10 border-[#f59e0b]/20 text-[#f59e0b]'}`}>
+      <span>{message}</span>
+      <button
+        onClick={onClose}
+        className={`ml-4 px-2 py-0.5 rounded text-xs font-medium ${lightMode ? 'hover:bg-amber-100' : 'hover:bg-[#f59e0b]/20'}`}
+        aria-label="Dismiss alert"
+      >
+        Dismiss
+      </button>
     </div>
   );
 }
@@ -345,7 +255,72 @@ function StartSessionForm({
 
 export default function App() {
   const [state, dispatch] = useReducer(appReducer, initialState);
-  const { send, connected, reconnecting } = useWebSocket({ dispatch });
+  const chartRef = useRef<ChartHandle>(null);
+
+  // Date-driven replay state.
+  // replayDate   — the YYYY-MM-DD the user has selected in the toolbar.
+  //                Defaults to the most recent past trading weekday.
+  // dateConfirmed — true only after a session has been successfully started with
+  //                 that date; controls stay locked until this is true.
+  const [replayDate, setReplayDate] = useState(getLastTradingDate());
+  const [dateConfirmed, setDateConfirmed] = useState(false);
+  const [dateError, setDateError] = useState<string | null>(null);
+
+  // Intro splash control.
+  const [showIntro, setShowIntro] = useState(true);
+  const [introFinished, setIntroFinished] = useState(false);
+  const [dataSynced, setDataSynced] = useState(false);
+
+  const showDateError = useCallback(() => {
+    setDateError('Please select a valid past trading weekday where market data has been synced.');
+  }, []);
+
+  const clearDateError = useCallback(() => setDateError(null), []);
+
+  const onCandleUpdate = useCallback((payload: CandleUpdatePayload) => {
+    chartRef.current?.updateCandle(payload);
+  }, []);
+
+  const onSessionReset = useCallback(() => {
+    chartRef.current?.resetChart();
+  }, []);
+
+  const onSessionHistory = useCallback((candles: CandleData[]) => {
+    chartRef.current?.setHistory(candles);
+  }, []);
+
+  const [availableTickers, setAvailableTickers] = useState<string[]>([]);
+
+  const fetchTickers = useCallback(() => {
+    fetch(`${API_BASE}/api/tickers`)
+      .then((r) => r.json())
+      .then((d: { tickers?: string[] }) => {
+        if (Array.isArray(d.tickers)) setAvailableTickers(d.tickers);
+      })
+      .catch((err) => {
+        console.warn('[OpenRewind] Failed to fetch ticker list:', err);
+      });
+  }, []);
+
+  const onDataSynced = useCallback(() => {
+    fetchTickers();
+  }, [fetchTickers]);
+
+  const { send, connected, reconnecting } = useWebSocket({
+    dispatch,
+    onCandleUpdate,
+    onSessionReset,
+    onSessionHistory,
+    onDataSynced,
+  });
+
+  // --- Fetch the list of tradable tickers from the C++ engine on mount.
+  // Used by both the Start Session form and the in-app Toolbar autocomplete.
+  useEffect(() => {
+    fetchTickers();
+    return () => {}; // no cleanup needed — fetchTickers is idempotent
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);  // run once on mount; onDataSynced handles subsequent refreshes
 
   // --- Keyboard shortcuts ---
   useEffect(() => {
@@ -369,28 +344,76 @@ export default function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [state.sessionActive, state.isPlaying, send]);
 
-  // --- Session start ---
-  const handleStartSession = useCallback(
-    async (symbol: string, balance: number) => {
+  // --- Auto-pull fresh market data once the intro splash finishes ---
+  useEffect(() => {
+    if (!introFinished || dataSynced) return;
+
+    const syncData = async () => {
       try {
-        const res = await fetch('/api/session/start', {
+        const tauri = (window as any).__TAURI_INTERNALS__;
+        if (tauri?.invoke) {
+          await tauri.invoke('fetch_market_data');
+          console.log('[OpenRewind] Market data refreshed');
+        }
+      } catch (err) {
+        console.warn('[OpenRewind] Auto-fetch failed or not in Tauri:', err);
+      }
+      setDataSynced(true);
+      // Tell the engine to rescan the data directory and refresh the ticker list.
+      // The script itself also POSTs /api/data_refreshed; this is a fallback.
+      try {
+        await fetch(`${API_BASE}/api/data_refreshed`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({}),
+        });
+        fetchTickers();
+      } catch (e) {
+        console.warn('[OpenRewind] Engine refresh failed:', e);
+      }
+    };
+
+    syncData();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [introFinished, dataSynced]);
+
+  // --- Change replay date from the Toolbar date picker ---
+  const handleDateChange = useCallback(
+    async (newDate: string) => {
+      if (!newDate || !state.sessionActive) return;
+      if (newDate.length !== 10) {
+        showDateError();
+        return;
+      }
+      setReplayDate(newDate);
+      setDateConfirmed(false);
+      try {
+        const balance = state.balance > 0 ? state.balance : 100000;
+        const res = await fetch(`${API_BASE}/api/session/start`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            symbol,
+            symbol: state.symbol,
             starting_balance: balance,
-            data_dir: 'C:/Users/logja/CascadeProjects/2048/data',
+            start_date: newDate,
           }),
         });
         const data = await res.json();
         if (data.error) {
-          console.error('[OpenReplay] Session start failed:', data.error);
+          console.error('[OpenRewind] Date change failed:', data.error);
+          setDateConfirmed(false);
+          showDateError();
+          return;
         }
+        clearDateError();
+        setChartKey((k) => k + 1);
+        setDateConfirmed(true);
       } catch (err) {
-        console.error('[OpenReplay] Failed to start session:', err);
+        console.error('[OpenRewind] Failed to change date:', err);
+        showDateError();
       }
     },
-    []
+    [state.sessionActive, state.symbol, state.balance, clearDateError, showDateError]
   );
 
   // --- WS command helpers ---
@@ -418,7 +441,9 @@ export default function App() {
   }, [send, state.isPlaying]);
 
   const handleRewind = useCallback(() => {
-    // Set direction to backward, pause if currently playing (key fix for "rewind is dead")
+    // Guard: already at the first bar — rewind would underflow.
+    if (state.cursor === 0) return;
+
     if (state.isPlaying) {
       send({ cmd: 'pause' });
       dispatch({ type: 'SET_PLAYING', isPlaying: false });
@@ -426,7 +451,7 @@ export default function App() {
     dispatch({ type: 'SET_DIRECTION', playbackDirection: 'backward' });
     send({ cmd: 'set_direction', direction: 'backward' });
     send({ cmd: 'rewind' });
-  }, [send, state.isPlaying]);
+  }, [send, state.isPlaying, state.cursor]);
 
   const handleSetSpeed = useCallback(
     (speed: number) => {
@@ -548,20 +573,59 @@ export default function App() {
   const [positionTPUnlocked, setPositionTPUnlocked] = useState(false);
   const [draggedPositionSL, setDraggedPositionSL] = useState(0);
   const [draggedPositionTP, setDraggedPositionTP] = useState(0);
-  const [drawingManager, setDrawingManager] = useState<any>(null);
-  const [activeTool, setActiveTool] = useState<'NONE' | 'FIB' | 'RECTANGLE' | 'TEXT' | 'BRUSH' | 'LINE'>('NONE');
+  const [activeTool, setActiveTool] = useState<ActiveTool>('NONE');
   const [chartLocked, setChartLocked] = useState(false);
   const [lightMode, setLightMode] = useState(false);
+  const [clearHandler, setClearHandler] = useState<(() => void) | null>(null);
 
   const handleReset = useCallback(() => {
     send({ cmd: 'reset_session' });
     setChartKey((k) => k + 1);
   }, [send]);
 
-  // Aggregate candles to the selected timeframe for display
-  const displayCandles = useMemo(
-    () => aggregateCandles(state.candles, state.timeframe),
-    [state.candles, state.timeframe]
+  // --- Switch the active symbol mid-session.
+  // Reuses POST /api/session/start, which:
+  //   1. Reloads the candle buffer for the new symbol on the C++ side.
+  //   2. Resets the matching engine to the (current) starting balance.
+  //   3. Broadcasts session_started -> reducer's SESSION_STARTED case wipes
+  //      candles/positions/orders so the chart cleanly shows the new ticker.
+  // We bump chartKey for the same reason set_timeframe does: forces
+  // lightweight-charts to remount and avoid stale time-scale state.
+  const handleSymbolChange = useCallback(
+    async (newSymbol: string) => {
+      if (!newSymbol || newSymbol === state.symbol) return;
+      try {
+        const balance = state.balance > 0 ? state.balance : 100000;
+        // Carry the current replay date so the new symbol starts on the same
+        // day. If no date has been chosen yet, the C++ engine loads the full
+        // 30-day buffer and playback stays locked until the user picks one.
+        const body: Record<string, unknown> = {
+          symbol: newSymbol,
+          starting_balance: balance,
+        };
+        if (replayDate) body.start_date = replayDate;
+        const res = await fetch(`${API_BASE}/api/session/start`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const data = await res.json();
+        if (data.error) {
+          console.error('[OpenRewind] Symbol switch failed:', data.error);
+          showDateError();
+          return;
+        }
+        clearDateError();
+        setChartKey((k) => k + 1);
+        // Keep dateConfirmed only if we sent a date; otherwise playback locks
+        // until the user explicitly picks one via the Toolbar date picker.
+        setDateConfirmed(!!replayDate);
+      } catch (err) {
+        console.error('[OpenRewind] Failed to switch symbol:', err);
+        showDateError();
+      }
+    },
+    [state.symbol, state.balance, replayDate, clearDateError, showDateError]
   );
 
   // Reset unlock states when no open positions
@@ -574,34 +638,24 @@ export default function App() {
     }
   }, [state.openPositions.length]);
 
-  const currentPrice =
-    state.candles.length > 0
-      ? state.candles[state.candles.length - 1].close
-      : 0;
-
-  // --- Render: Start Screen (no active session) ---
-  if (!state.sessionActive) {
-    return (
-      <div className={`flex flex-col h-screen w-screen overflow-hidden ${lightMode ? 'bg-gray-100 light-mode' : 'bg-[#121416]'}`}>
-        <Header
-          connected={connected}
-          reconnecting={reconnecting}
-          symbol=""
-          sessionActive={false}
-          lightMode={lightMode}
-        />
-        <StartSessionForm
-          onStart={handleStartSession}
-          connected={connected}
-        />
-      </div>
-    );
-  }
+  const currentPrice = state.currentPrice;
 
   // --- Render: Trading Workspace (FXReplay layout) ---
   return (
     <div className={`flex h-screen w-screen flex-col overflow-hidden ${lightMode ? 'bg-gray-100 light-mode' : 'bg-[#121416]'}`}>
+      {showIntro && (
+        <IntroSplash
+          lightMode={lightMode}
+          onFinished={() => {
+            setShowIntro(false);
+            setIntroFinished(true);
+          }}
+        />
+      )}
       {/* Top header */}
+      {dateError && (
+        <ErrorAlert message={dateError} onClose={clearDateError} lightMode={lightMode} />
+      )}
       <Header
         connected={connected}
         reconnecting={reconnecting}
@@ -612,13 +666,13 @@ export default function App() {
 
       {/* Main content area */}
       <div className="flex flex-1 overflow-hidden">
-        {/* Left sidebar with icons */}
-        <LeftSidebar
-          drawingManager={drawingManager}
+        {/* Drawing toolbar (TradingView-style sidebar) */}
+        <TradingToolbar
           activeTool={activeTool}
           onActiveToolChange={setActiveTool}
           chartLocked={chartLocked}
           onChartLockedChange={setChartLocked}
+          onClearAll={clearHandler || (() => {})}
           lightMode={lightMode}
         />
 
@@ -627,6 +681,10 @@ export default function App() {
           {/* Toolbar with symbol + timeframe */}
           <Toolbar
             symbol={state.symbol}
+            availableTickers={availableTickers}
+            onSymbolChange={handleSymbolChange}
+            replayDate={replayDate}
+            onDateChange={handleDateChange}
             timeframe={state.timeframe}
             lockToEdge={lockToEdge}
             showMarkers={showMarkers}
@@ -651,6 +709,7 @@ export default function App() {
                 cursor={state.cursor}
                 totalCandles={state.totalCandles}
                 sessionActive={state.sessionActive}
+                locked={!dateConfirmed}
                 playbackDirection={state.playbackDirection}
                 onPlay={handlePlay}
                 onPause={handlePause}
@@ -662,8 +721,8 @@ export default function App() {
 
               {/* TradingView Lightweight Charts */}
               <Chart
+                ref={chartRef}
                 key={chartKey}
-                candles={displayCandles}
                 positions={state.openPositions}
                 trades={state.tradeHistory}
                 currentPrice={currentPrice}
@@ -679,11 +738,10 @@ export default function App() {
                 onPositionSLTPDrag={handlePositionSLTPDrag}
                 positionSLUnlocked={positionSLUnlocked}
                 positionTPUnlocked={positionTPUnlocked}
-                onDrawingManagerReady={setDrawingManager}
                 activeTool={activeTool}
                 onActiveToolChange={setActiveTool}
                 chartLocked={chartLocked}
-                onChartLockedChange={setChartLocked}
+                onClearAll={setClearHandler}
                 lightMode={lightMode}
               />
             </div>

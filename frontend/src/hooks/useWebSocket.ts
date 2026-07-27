@@ -1,6 +1,7 @@
 import { useEffect, useRef, useCallback, useState } from 'react';
 import type {
   WSEnvelope,
+  CandleData,
   CandleUpdatePayload,
   AccountSnapshotPayload,
   OrderFilledPayload,
@@ -12,10 +13,10 @@ import type {
 
 // =============================================================================
 // useWebSocket — Custom React hook for bidirectional WebSocket communication
-// with the OpenReplay C++ engine.
+// with the OpenRewind C++ engine.
 //
 // Features:
-//   - Connects to ws://localhost:9000/ws on mount (via Vite proxy at /ws)
+//   - Connects to ws://127.0.0.1:9000/ws in Tauri, or via Vite proxy at /ws in browser
 //   - Exponential backoff reconnection (1s → 2s → 4s → 8s → 16s cap)
 //   - Parses incoming JSON envelopes by `type` field
 //   - Dispatches typed actions to the app reducer
@@ -23,7 +24,13 @@ import type {
 //   - Tracks connection status for UI indicator
 // =============================================================================
 
-const WS_URL = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws`;
+// In Tauri's webview the Vite proxy is not running, so we must connect
+// directly to the engine on 127.0.0.1. In browser dev mode we use the
+// Vite proxy URL so the /ws path is forwarded correctly.
+const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+const WS_URL = isTauri
+  ? 'ws://127.0.0.1:9000/ws'
+  : `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws`;
 
 const INITIAL_RECONNECT_DELAY = 1000;
 const MAX_RECONNECT_DELAY = 16000;
@@ -32,6 +39,10 @@ const RECONNECT_MULTIPLIER = 2;
 interface UseWebSocketOptions {
   dispatch: React.Dispatch<AppAction>;
   enabled?: boolean;
+  onCandleUpdate?: (payload: CandleUpdatePayload) => void;
+  onSessionReset?: () => void;
+  onSessionHistory?: (candles: CandleData[]) => void;
+  onDataSynced?: () => void;
 }
 
 interface UseWebSocketReturn {
@@ -43,12 +54,25 @@ interface UseWebSocketReturn {
 export function useWebSocket({
   dispatch,
   enabled = true,
+  onCandleUpdate,
+  onSessionReset,
+  onSessionHistory,
+  onDataSynced,
 }: UseWebSocketOptions): UseWebSocketReturn {
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectDelayRef = useRef(INITIAL_RECONNECT_DELAY);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mountedRef = useRef(true);
   const lastSeqRef = useRef(-1);
+  // Keep latest callbacks in refs so handleMessage never goes stale.
+  const onCandleUpdateRef = useRef(onCandleUpdate);
+  const onSessionResetRef = useRef(onSessionReset);
+  const onSessionHistoryRef = useRef(onSessionHistory);
+  const onDataSyncedRef = useRef(onDataSynced);
+  onCandleUpdateRef.current = onCandleUpdate;
+  onSessionResetRef.current = onSessionReset;
+  onSessionHistoryRef.current = onSessionHistory;
+  onDataSyncedRef.current = onDataSynced;
 
   const [connected, setConnected] = useState(false);
   const [reconnecting, setReconnecting] = useState(false);
@@ -79,6 +103,10 @@ export function useWebSocket({
       switch (type) {
         case 'candle_update': {
           const p = payload as CandleUpdatePayload;
+          // Fire direct callback first (bypasses React render cycle) so the
+          // chart series.update() / setData() runs synchronously on the WS
+          // message event before any React re-render can batch/delay it.
+          onCandleUpdateRef.current?.(p);
           dispatch({ type: 'CANDLE_UPDATE', payload: p });
           break;
         }
@@ -104,19 +132,31 @@ export function useWebSocket({
 
         case 'session_started': {
           const p = payload as SessionStartedPayload;
+          onSessionResetRef.current?.();
           dispatch({ type: 'SESSION_STARTED', payload: p });
           break;
         }
 
         case 'session_state': {
           const p = payload as SessionStatePayload;
+          // The engine sends the authoritative bar history here (session
+          // start, rewind, seek, timeframe change). Push it straight to the
+          // chart so it redraws the whole past timeline via setData().
+          if (Array.isArray(p.candles)) {
+            onSessionHistoryRef.current?.(p.candles);
+          }
           dispatch({ type: 'SESSION_STATE', payload: p });
+          break;
+        }
+
+        case 'data_synced': {
+          onDataSyncedRef.current?.();
           break;
         }
 
         case 'error': {
           const p = payload as { message: string };
-          console.warn('[OpenReplay WS] Server error:', p.message);
+          console.warn('[OpenRewind WS] Server error:', p.message);
           break;
         }
 

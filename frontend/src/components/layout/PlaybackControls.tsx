@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { Play, Pause, SkipForward, SkipBack, GripVertical, ChevronUp } from 'lucide-react';
+import { Play, Pause, SkipForward, SkipBack, GripVertical, ChevronUp, Lock } from 'lucide-react';
 
 const SPEED_OPTIONS = [1, 2, 5, 10, 25, 50];
 
@@ -9,6 +9,7 @@ interface PlaybackControlsProps {
   cursor: number;
   totalCandles: number;
   sessionActive: boolean;
+  locked?: boolean;
   playbackDirection: 'forward' | 'backward';
   onPlay: () => void;
   onPause: () => void;
@@ -24,6 +25,7 @@ export function PlaybackControls({
   cursor,
   totalCandles,
   sessionActive,
+  locked = false,
   playbackDirection,
   onPlay,
   onPause,
@@ -40,7 +42,7 @@ export function PlaybackControls({
   const containerRef = useRef<HTMLDivElement>(null);
 
   const progressPercent = totalCandles > 0 ? ((cursor + 1) / totalCandles) * 100 : 0;
-  const disabled = !sessionActive;
+  const disabled = !sessionActive || locked;
 
   const onGripMouseDown = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -88,7 +90,16 @@ export function PlaybackControls({
 
   return (
     <div ref={containerRef} className="absolute z-20" style={style}>
-      <div className={`flex items-center gap-2 rounded-md px-3 py-2 shadow-lg backdrop-blur-sm border ${lightMode ? 'bg-gray-200/95 border-gray-300' : 'bg-[#2a2e39]/95 border-[#363a45]/60'}`}>
+      <div className={`relative flex items-center gap-2 rounded-md px-3 py-2 shadow-lg backdrop-blur-sm border ${lightMode ? 'bg-gray-200/95 border-gray-300' : 'bg-[#2a2e39]/95 border-[#363a45]/60'}`}>
+        {/* Lock badge — visible when session is active but no date is confirmed */}
+        {sessionActive && locked && (
+          <div
+            title="Select a replay date in the toolbar to enable playback"
+            className="absolute -top-2 -right-2 flex h-4 w-4 items-center justify-center rounded-full bg-[#f59e0b] text-[#121416] shadow"
+          >
+            <Lock className="h-2.5 w-2.5" />
+          </div>
+        )}
         {/* Grip handle — drag to move */}
         <div
           onMouseDown={onGripMouseDown}

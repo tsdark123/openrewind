@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document describes the new state snapshot-based rewind system implemented for the OpenReplay trading platform. The new system dramatically improves rewind performance by eliminating the expensive "replay from 0" operation that was previously required on every rewind.
+This document describes the new state snapshot-based rewind system implemented for the OpenRewind trading platform. The new system dramatically improves rewind performance by eliminating the expensive "replay from 0" operation that was previously required on every rewind.
 
 ## Problem with Previous System
 

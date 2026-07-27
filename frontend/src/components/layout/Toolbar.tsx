@@ -1,6 +1,8 @@
-import { Search, Plus, RotateCcw, Settings, Lock, Unlock, Eye, EyeOff, Sun, Moon } from 'lucide-react';
+import { RotateCcw, Settings, Lock, Unlock, Eye, EyeOff, Sun, Moon, CalendarDays } from 'lucide-react';
 import { IndicatorsDropdown } from '../IndicatorsDropdown';
-import { useState } from 'react';
+import { TickerSearchInput } from '../TickerSearchInput';
+import { useState, useMemo } from 'react';
+import { CalendarPicker } from './CalendarPicker';
 
 const TIMEFRAME_OPTIONS = [
   { label: '1m', value: 1 },
@@ -13,6 +15,10 @@ const TIMEFRAME_OPTIONS = [
 
 interface ToolbarProps {
   symbol: string;
+  availableTickers: string[];
+  onSymbolChange: (symbol: string) => void;
+  replayDate: string;
+  onDateChange: (date: string) => void;
   timeframe: number;
   lockToEdge: boolean;
   showMarkers: boolean;
@@ -34,20 +40,71 @@ interface ToolbarProps {
   onReset?: () => void;
 }
 
-export function Toolbar({ symbol, timeframe, lockToEdge, showMarkers, lightMode, indicators, onSetTimeframe, onToggleLock, onToggleMarkers, onToggleLightMode, onToggleIndicator, onReset }: ToolbarProps) {
+export function Toolbar({ symbol, availableTickers, onSymbolChange, replayDate, onDateChange, timeframe, lockToEdge, showMarkers, lightMode, indicators, onSetTimeframe, onToggleLock, onToggleMarkers, onToggleLightMode, onToggleIndicator, onReset }: ToolbarProps) {
   const [indicatorsDropdownOpen, setIndicatorsDropdownOpen] = useState(false);
+  const [calendarOpen, setCalendarOpen] = useState(false);
+
+  // Rolling 30-day window — matches the yfinance data retention in fetch_data.py.
+  const { todayStr, minDateStr } = useMemo(() => {
+    const now = new Date();
+    const todayStr = now.toISOString().slice(0, 10);
+    const min = new Date(now);
+    min.setDate(now.getDate() - 30);
+    return { todayStr, minDateStr: min.toISOString().slice(0, 10) };
+  }, []);
 
   return (
     <div className={`flex h-9 items-center justify-between border-b px-3 ${lightMode ? 'bg-white border-gray-200' : 'bg-[#121416] border-[#2a2e39]'}`}>
       <div className="flex items-center gap-3">
-        {/* Symbol search */}
-        <button className={`flex items-center gap-1.5 text-[13px] ${lightMode ? 'text-gray-600 hover:text-gray-900' : 'text-[#787b86] hover:text-[#d1d4dc]'}`}>
-          <Search className="h-4 w-4" />
-          <span className={`font-medium ${lightMode ? 'text-gray-900' : 'text-[#d1d4dc]'}`}>{symbol || 'SYMBOL'}</span>
-          <span className={`flex h-4 w-4 items-center justify-center rounded-full border text-[10px] ${lightMode ? 'border-gray-300' : 'border-[#363a45]'}`}>
-            <Plus className="h-2.5 w-2.5" />
-          </span>
-        </button>
+        {/* Symbol search — TradingView-style autocomplete. Selecting a
+            ticker triggers a session reload on the C++ engine, so the
+            chart resets to the new symbol's stream. */}
+        <div className="w-32">
+          <TickerSearchInput
+            tickers={availableTickers}
+            value={symbol}
+            onCommit={onSymbolChange}
+            placeholder="SYMBOL"
+            size="sm"
+            lightMode={lightMode}
+          />
+        </div>
+
+        {/* Date picker — selects the backtesting day. Changing this restarts
+            the session filtered to core market hours (09:30–16:00 ET) for
+            that exact calendar date. Controls stay locked until a date is
+            chosen for the current ticker. */}
+        <div className="relative flex items-center gap-1">
+          <CalendarDays className={`h-3.5 w-3.5 flex-shrink-0 ${lightMode ? 'text-gray-400' : 'text-[#4c525e]'}`} />
+          <button
+            type="button"
+            onClick={() => setCalendarOpen((v) => !v)}
+            title="Select backtesting date (09:30–16:00 ET)"
+            className={`h-6 rounded border px-2 text-[11px] font-mono tabular-nums whitespace-nowrap
+              focus:outline-none focus:ring-1 focus:ring-[#2962ff] transition-colors
+              ${
+                lightMode
+                  ? 'bg-white border-gray-300 text-gray-700 hover:bg-gray-50'
+                  : 'bg-[#1e222d] border-[#363a45] text-[#d1d4dc] hover:bg-[#2a2e39]'
+              }
+              ${!replayDate ? (lightMode ? 'border-amber-400' : 'border-[#f59e0b]/60') : ''}
+            `}
+          >
+            {replayDate || '— select date —'}
+          </button>
+          {calendarOpen && (
+            <div className="absolute top-full left-0 mt-1 z-50">
+              <CalendarPicker
+                value={replayDate}
+                onChange={(d) => { onDateChange(d); setCalendarOpen(false); }}
+                minDate={minDateStr}
+                maxDate={todayStr}
+                onClose={() => setCalendarOpen(false)}
+                lightMode={lightMode}
+              />
+            </div>
+          )}
+        </div>
 
         {/* Timeframe buttons */}
         <div className="flex items-center gap-0.5">

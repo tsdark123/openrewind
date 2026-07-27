@@ -1,4 +1,4 @@
-import { useEffect, useRef, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback, forwardRef, useImperativeHandle } from 'react';
 import {
   createChart,
   ColorType,
@@ -10,9 +10,11 @@ import {
   type LineData,
   type UTCTimestamp,
 } from 'lightweight-charts';
-import { DrawingManager, TrendLine, Rectangle, FibRetracement } from 'lightweight-charts-drawing';
-import type { CandleData, Position, ClosedTrade } from '../types';
+import { DrawingManager } from 'lightweight-charts-drawing';
+import type { CandleData, CandleUpdatePayload, Position, ClosedTrade } from '../types';
 import { calculateEMA, calculateSMA, calculateBollingerBands, calculateRSI, calculateMACD, calculateATR, calculateStochastic } from '../utils/indicators';
+import { DrawingFsm } from './drawing/drawingFsm';
+import type { ActiveTool } from './drawing/drawingTools';
 
 // ============================================================
 // Theme Configs — TradingView institutional palette
@@ -45,7 +47,7 @@ const CHART_THEME: ChartTheme = {
 };
 
 // =============================================================================
-// Chart — TradingView Lightweight Charts wrapper for OpenReplay.
+// Chart — TradingView Lightweight Charts wrapper for OpenRewind.
 //
 // Renders a professional dark-themed candlestick chart with:
 //   - Bulk setData() on session load
@@ -56,10 +58,7 @@ const CHART_THEME: ChartTheme = {
 //   - Volume histogram overlay
 // =============================================================================
 
-type ActiveTool = 'NONE' | 'FIB' | 'RECTANGLE' | 'TEXT' | 'BRUSH' | 'LINE';
-
 interface ChartProps {
-  candles: CandleData[];
   positions: Position[];
   trades: ClosedTrade[];
   currentPrice: number;
@@ -87,12 +86,17 @@ interface ChartProps {
   activeTool?: ActiveTool;
   onActiveToolChange?: (tool: ActiveTool) => void;
   chartLocked?: boolean;
-  onChartLockedChange?: (locked: boolean) => void;
+  onClearAll?: (clearHandler: () => void) => void;
   lightMode?: boolean;
 }
 
-export function Chart({
-  candles,
+export interface ChartHandle {
+  updateCandle: (payload: CandleUpdatePayload) => void;
+  setHistory: (candles: CandleData[]) => void;
+  resetChart: () => void;
+}
+
+export const Chart = forwardRef<ChartHandle, ChartProps>(function Chart({
   positions,
   trades,
   showMarkers = true,
@@ -111,9 +115,9 @@ export function Chart({
   activeTool = 'NONE',
   onActiveToolChange,
   chartLocked = false,
-  onChartLockedChange,
+  onClearAll,
   lightMode = false,
-}: ChartProps) {
+}, ref) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
@@ -132,14 +136,10 @@ export function Chart({
   const draggedSLTPRef = useRef<'sl' | 'tp' | null>(null);
   const drawingManagerRef = useRef<DrawingManager | null>(null);
 
-  // Drawing tool state
-  const isDrawingRef = useRef(false);
-  const drawingStartPointRef = useRef<{ time: number; price: number } | null>(null);
-  const drawingEndPointRef = useRef<{ time: number; price: number } | null>(null);
-  const tempDrawingIdRef = useRef<string | null>(null);
-  const activeToolRef = useRef<'NONE' | 'FIB' | 'RECTANGLE' | 'TEXT' | 'BRUSH' | 'LINE'>('NONE');
+  // Drawing tool state — owned by the FSM. We track committed-drawing ids
+  // separately so Backspace can pop the most-recent drawing.
+  const fsmRef = useRef<DrawingFsm | null>(null);
   const drawingIdsRef = useRef<string[]>([]);
-  const hasDraggedRef = useRef(false);
 
   // Indicator series refs
   const emaSeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
@@ -153,6 +153,47 @@ export function Chart({
   const atrSeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
   const stochKRef = useRef<ISeriesApi<'Line'> | null>(null);
   const stochDRef = useRef<ISeriesApi<'Line'> | null>(null);
+
+  // Internal candle history owned by Chart — never stored in React state.
+  const candleHistoryRef = useRef<CandleData[]>([]);
+  // Whether the time scale has been fitted at least once this session.
+  const hasFittedRef = useRef(false);
+  // Bumped whenever the history changes so the indicator effect recomputes.
+  const [historyVersion, setHistoryVersion] = useState(0);
+  // Cutoff timestamp for filtering "future" ghost markers on rewind.
+  // Starts at Infinity so all markers are visible on a fresh session.
+  const markerCutoffRef = useRef(Infinity);
+  // Bumped whenever the cutoff changes so the markers effect re-runs.
+  const [markerVersion, setMarkerVersion] = useState(0);
+  // Timestamp of the very first bar in the loaded history (bar index 0).
+  // Used for the "Max History Limit" boundary marker and scroll lock.
+  const historyStartRef = useRef<number | null>(null);
+
+  // --- Prop refs for stable event-handler closures ---
+  // Updated synchronously on every render; allows the interaction
+  // useEffect to register listeners ONCE (dep array []) without going stale.
+  const positionsRef = useRef(positions);
+  const positionSLUnlockedRef = useRef(positionSLUnlocked);
+  const positionTPUnlockedRef = useRef(positionTPUnlocked);
+  const pendingOrderSLRef = useRef(pendingOrderSL);
+  const pendingOrderTPRef = useRef(pendingOrderTP);
+  const chartLockedRef = useRef(chartLocked);
+  const onPendingOrderSLChangeRef = useRef(onPendingOrderSLChange);
+  const onPendingOrderTPChangeRef = useRef(onPendingOrderTPChange);
+  const onPositionSLTPChangeRef = useRef(onPositionSLTPChange);
+  const onPositionSLTPDragRef = useRef(onPositionSLTPDrag);
+  const onActiveToolChangeRef = useRef(onActiveToolChange);
+  positionsRef.current = positions;
+  positionSLUnlockedRef.current = positionSLUnlocked;
+  positionTPUnlockedRef.current = positionTPUnlocked;
+  pendingOrderSLRef.current = pendingOrderSL;
+  pendingOrderTPRef.current = pendingOrderTP;
+  chartLockedRef.current = chartLocked;
+  onPendingOrderSLChangeRef.current = onPendingOrderSLChange;
+  onPendingOrderTPChangeRef.current = onPendingOrderTPChange;
+  onPositionSLTPChangeRef.current = onPositionSLTPChange;
+  onPositionSLTPDragRef.current = onPositionSLTPDrag;
+  onActiveToolChangeRef.current = onActiveToolChange;
 
   // Playback buffering cache
   const indicatorCacheRef = useRef<Map<string, {
@@ -222,6 +263,36 @@ export function Chart({
         secondsVisible: false,
         rightOffset: 5,
         barSpacing: 8,
+        tickMarkFormatter: (time: number | { timestamp: number }) => {
+          // X-axis tick labels: UTC epoch → 12-hour ET via Intl API.
+          const ts = typeof time === 'number' ? time : time.timestamp;
+          const date = new Date(ts * 1000);
+          return date.toLocaleTimeString('en-US', {
+            timeZone: 'America/New_York',
+            hour: 'numeric',
+            minute: '2-digit',
+            hour12: true,
+          });
+        },
+      },
+      localization: {
+        locale: 'en-US',
+        timeFormatter: (timestamp: number) => {
+          // Crosshair tooltip: show "9:30 AM · Jun 2" in ET.
+          const date = new Date(timestamp * 1000);
+          const timePart = date.toLocaleTimeString('en-US', {
+            timeZone: 'America/New_York',
+            hour: 'numeric',
+            minute: '2-digit',
+            hour12: true,
+          });
+          const datePart = date.toLocaleDateString('en-US', {
+            timeZone: 'America/New_York',
+            month: 'short',
+            day: 'numeric',
+          });
+          return `${timePart} · ${datePart}`;
+        },
       },
       width: containerRef.current.clientWidth,
       height: containerRef.current.clientHeight,
@@ -294,6 +365,19 @@ export function Chart({
     drawingManager.attach(chart, candleSeries, containerRef.current);
     drawingManagerRef.current = drawingManager;
 
+    // Initialize the placement FSM
+    const fsm = new DrawingFsm(drawingManager, {
+      onCommitted: (drawingId) => {
+        drawingIdsRef.current.push(drawingId);
+      },
+      onFinalize: () => {
+        // Drawing tools are sticky: after a placement we keep the same tool
+        // selected so the user can keep drawing. The toolbar category icon
+        // therefore stays blue and the chart stays in drawing/locked mode.
+      },
+    });
+    fsmRef.current = fsm;
+
     // Notify parent that DrawingManager is ready
     if (onDrawingManagerReady) {
       onDrawingManagerReady(drawingManager);
@@ -306,8 +390,24 @@ export function Chart({
     });
     resizeObserver.observe(containerRef.current);
 
+    // Soft scroll lock: when the chart is explicitly locked, prevent the user
+    // from panning more than one bar before the first data bar so the chart
+    // never shows a fully blank canvas. When unlocked, scaling/panning is free.
+    let isClampingScroll = false;
+    const handleRangeChange = (range: { from: number; to: number } | null) => {
+      if (!chartLockedRef.current || !range || isClampingScroll || range.from >= -1) return;
+      isClampingScroll = true;
+      requestAnimationFrame(() => {
+        chart.timeScale().setVisibleLogicalRange({ from: -1, to: range.to });
+        isClampingScroll = false;
+      });
+    };
+    chart.timeScale().subscribeVisibleLogicalRangeChange(handleRangeChange);
+
     return () => {
+      chart.timeScale().unsubscribeVisibleLogicalRangeChange(handleRangeChange);
       resizeObserver.disconnect();
+      fsm.destroy();
       drawingManager.detach();
       chart.remove();
       chartRef.current = null;
@@ -317,65 +417,165 @@ export function Chart({
       priceLinesRef.current = [];
       tradeLinksRef.current = [];
       drawingManagerRef.current = null;
+      fsmRef.current = null;
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // --- Update candle data (new simple approach - always setData, no view preservation) ---
-  useEffect(() => {
+  // --- Internal helper: push history array into the LWC series ---
+  const applyHistory = useCallback((history: CandleData[]) => {
     const series = candleSeriesRef.current;
     const volSeries = volumeSeriesRef.current;
     if (!series || !volSeries) return;
-
     const t = lightMode ? {
-      bg: '#ffffff',
-      text: '#6b7280',
-      grid: '#e5e7eb',
-      crosshair: '#6b7280',
-      crosshairLabel: '#f3f4f6',
-      border: '#d1d5db',
-      upColor: '#2e9461',
-      downColor: '#ef5350',
-      volUp: 'rgba(46,148,97,0.3)',
-      volDown: 'rgba(239,83,80,0.3)',
+      volUp: 'rgba(46,148,97,0.3)', volDown: 'rgba(239,83,80,0.3)',
+      upColor: '#2e9461', downColor: '#ef5350',
     } : CHART_THEME;
-
-    // If candles array is empty, clear the chart
-    if (candles.length === 0) {
-      series.setData([]);
-      volSeries.setData([]);
-      lastChartTimeRef.current = null;
-      prevCandleLengthRef.current = 0;
-      return;
-    }
-
-    // Helper: deduplicate and sort candles
-    const prepareCandles = (candleData: CandleData[]) => {
-      const uniqueCandles = candleData.filter((c, idx, self) =>
-        self.findIndex((item) => item.timestamp === c.timestamp) === idx
-      );
-      uniqueCandles.sort((a, b) => a.timestamp - b.timestamp);
-      return uniqueCandles;
-    };
-
-    const cleanHistory = prepareCandles(candles);
-
-    // Always use setData - let chart auto-fit to content
-    series.setData(cleanHistory.map(toLWC));
-    volSeries.setData(cleanHistory.map((c) => ({
+    series.setData(history.map(toLWC));
+    volSeries.setData(history.map((c) => ({
       time: c.timestamp as UTCTimestamp,
       value: c.volume,
       color: c.close >= c.open ? t.volUp : t.volDown,
     })));
+    lastChartTimeRef.current = history[history.length - 1]?.timestamp ?? null;
+    if (lockToEdge) chartRef.current?.timeScale().scrollToPosition(2, false);
+  }, [lightMode, toLWC, lockToEdge]);
 
-    lastChartTimeRef.current = cleanHistory[cleanHistory.length - 1]?.timestamp ?? null;
-    prevCandleLengthRef.current = candles.length;
+  // --- Expose imperative handle for direct chart updates from WS callback ---
+  useImperativeHandle(ref, () => ({
+    resetChart() {
+      candleHistoryRef.current = [];
+      lastChartTimeRef.current = null;
+      prevCandleLengthRef.current = 0;
+      hasFittedRef.current = false;
+      markerCutoffRef.current = Infinity;
+      historyStartRef.current = null;
+      indicatorCacheRef.current.clear();
+      candleSeriesRef.current?.setData([]);
+      volumeSeriesRef.current?.setData([]);
+      setHistoryVersion((v) => v + 1);
+      setMarkerVersion((v) => v + 1);
+    },
 
-    // Auto-scroll to right edge only when lockToEdge is enabled
-    // When unlocked, users can freely pan/zoom during playback
-    if (lockToEdge) {
-      chartRef.current?.timeScale().scrollToPosition(2, false);
-    }
-  }, [candles, toLWC, lockToEdge]);
+    // Authoritative history from the engine (session start, rewind, seek,
+    // timeframe change). Always a full redraw via setData().
+    setHistory(incoming: CandleData[]) {
+      // Guarantee strictly-ascending, unique timestamps — lightweight-charts
+      // silently misbehaves (overwrites one bar in place) otherwise.
+      const clean = [...incoming]
+        .sort((a, b) => a.timestamp - b.timestamp)
+        .filter((c, i, arr) => i === 0 || c.timestamp !== arr[i - 1].timestamp);
+
+      candleHistoryRef.current = clean;
+      indicatorCacheRef.current.clear();
+      // Track the very first bar for the boundary marker + scroll lock.
+      historyStartRef.current = clean[0]?.timestamp ?? null;
+      // Advance the marker cutoff to the last bar so we see all markers
+      // that fall on or before the new frontier (handles rewind correctly).
+      markerCutoffRef.current = clean[clean.length - 1]?.timestamp ?? Infinity;
+      applyHistory(clean);
+
+      // Only auto-fit the very first time we get data for a session, so
+      // later resyncs (order fills, etc.) don't yank the user's zoom/pan.
+      if (clean.length > 0 && !hasFittedRef.current) {
+        hasFittedRef.current = true;
+        chartRef.current?.timeScale().fitContent();
+      }
+      setHistoryVersion((v) => v + 1);
+      setMarkerVersion((v) => v + 1);
+    },
+
+    updateCandle(payload: CandleUpdatePayload) {
+      const series = candleSeriesRef.current;
+      const volSeries = volumeSeriesRef.current;
+      if (!series || !volSeries) return;
+
+      const t = lightMode
+        ? { volUp: 'rgba(46,148,97,0.3)', volDown: 'rgba(239,83,80,0.3)' }
+        : CHART_THEME;
+
+      // Bucket the incoming 1-minute bar into the active timeframe so
+      // forward ticks merge into the forming bar instead of creating
+      // sub-interval bars the time scale can't lay out.
+      const tfSeconds = Math.max(1, timeframe) * 60;
+      const bucket = Math.floor(payload.timestamp / tfSeconds) * tfSeconds;
+
+      const history = candleHistoryRef.current;
+      const last = history.length > 0 ? history[history.length - 1] : null;
+
+      // --- Rewind: incoming bar predates our last bar -------------------
+      // Never use series.update() here; going backwards with a non-ascending
+      // time key makes lightweight-charts rewrite the same bar in place.
+      // Truncate to everything strictly before the incoming bucket, then
+      // redraw the whole past timeline with setData().
+      if (last && bucket < last.timestamp) {
+        let cut = history.length;
+        while (cut > 0 && history[cut - 1].timestamp >= bucket) cut--;
+        const truncated = history.slice(0, cut);
+        truncated.push({
+          timestamp: bucket,
+          open: payload.open,
+          high: payload.high,
+          low: payload.low,
+          close: payload.close,
+          volume: payload.volume,
+        });
+        candleHistoryRef.current = truncated;
+        indicatorCacheRef.current.clear();
+        markerCutoffRef.current = truncated[truncated.length - 1]?.timestamp ?? Infinity;
+        applyHistory(truncated);
+        setHistoryVersion((v) => v + 1);
+        setMarkerVersion((v) => v + 1);
+        return;
+      }
+
+      // --- Forward: merge into the forming bar or append a new one ------
+      let bar: CandleData;
+      if (last && bucket === last.timestamp) {
+        bar = {
+          timestamp: bucket,
+          open: last.open,
+          high: Math.max(last.high, payload.high),
+          low: Math.min(last.low, payload.low),
+          close: payload.close,
+          // At 1m the engine resends the same bar, so replace rather than sum.
+          volume: tfSeconds === 60 ? payload.volume : last.volume + payload.volume,
+        };
+        history[history.length - 1] = bar;
+      } else {
+        bar = {
+          timestamp: bucket,
+          open: payload.open,
+          high: payload.high,
+          low: payload.low,
+          close: payload.close,
+          volume: payload.volume,
+        };
+        history.push(bar);
+      }
+
+      lastChartTimeRef.current = bucket;
+      // Advance the cutoff so forward playback never hides newly-reached markers.
+      markerCutoffRef.current = bucket;
+      series.update(toLWC(bar));
+      volSeries.update({
+        time: bucket as UTCTimestamp,
+        value: bar.volume,
+        color: bar.close >= bar.open ? t.volUp : t.volDown,
+      });
+
+      // series.update() never adjusts the visible range. On a chart that has
+      // never been fitted the bars land outside the viewport and nothing
+      // appears to happen — fit once so playback is visible immediately.
+      if (!hasFittedRef.current) {
+        hasFittedRef.current = true;
+        chartRef.current?.timeScale().fitContent();
+      } else if (lockToEdge) {
+        chartRef.current?.timeScale().scrollToRealTime();
+      }
+
+      setHistoryVersion((v) => v + 1);
+    },
+  }), [lightMode, toLWC, lockToEdge, applyHistory, timeframe]);
 
   // --- Indicator update effect (separate from locked candle rendering) ---
   useEffect(() => {
@@ -386,21 +586,11 @@ export function Chart({
     const bollingerLower = bollingerLowerRef.current;
     const bollingerMiddle = bollingerMiddleRef.current;
 
+    // Use the imperative history ref — candles prop is always [] now.
+    const candles = candleHistoryRef.current;
     if (!chart || candles.length === 0) return;
 
-    const lastChartTime = lastChartTimeRef.current;
     const cacheKey = `${candles.length}-${timeframe}-${indicators.ema20}-${indicators.sma50}-${indicators.bollinger}-${indicators.rsi}-${indicators.macd}-${indicators.atr}-${indicators.stochastic}`;
-
-    // Timestamp guard: detect rewind and clear cache (but don't skip calculation)
-    if (lastChartTime !== null && candles.length > 0) {
-      const currentLastTime = candles[candles.length - 1].timestamp;
-      if (currentLastTime < lastChartTime) {
-        // Rewind detected: clear cache so indicators recalculate for new candle array
-        indicatorCacheRef.current.clear();
-        lastChartTimeRef.current = currentLastTime;
-        // Continue to recalculate indicators for the shorter array
-      }
-    }
 
     // Check cache first for playback buffering
     if (indicatorCacheRef.current.has(cacheKey)) {
@@ -501,7 +691,7 @@ export function Chart({
 
     // Update last chart time
     lastChartTimeRef.current = candles[candles.length - 1]?.timestamp ?? null;
-  }, [candles, indicators]);
+  }, [indicators, historyVersion]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // --- RSI sub-pane lifecycle ---
   useEffect(() => {
@@ -677,42 +867,46 @@ export function Chart({
   // --- RSI data update effect ---
   useEffect(() => {
     const rsiSeries = rsiSeriesRef.current;
+    const candles = candleHistoryRef.current;
     if (!rsiSeries || !indicators.rsi || candles.length === 0) return;
 
     const rsiData = calculateRSI(candles, 14);
     rsiSeries.setData(rsiData);
-  }, [candles, indicators.rsi]);
+  }, [historyVersion, indicators.rsi]);
 
   // --- MACD data update effect ---
   useEffect(() => {
     const macdSeries = macdSeriesRef.current;
     const macdSignalSeries = macdSignalRef.current;
+    const candles = candleHistoryRef.current;
     if (!macdSeries || !macdSignalSeries || !indicators.macd || candles.length === 0) return;
 
     const macdData = calculateMACD(candles);
     macdSeries.setData(macdData.macd);
     macdSignalSeries.setData(macdData.signal);
-  }, [candles, indicators.macd]);
+  }, [historyVersion, indicators.macd]);
 
   // --- ATR data update effect ---
   useEffect(() => {
     const atrSeries = atrSeriesRef.current;
+    const candles = candleHistoryRef.current;
     if (!atrSeries || !indicators.atr || candles.length === 0) return;
 
     const atrData = calculateATR(candles);
     atrSeries.setData(atrData);
-  }, [candles, indicators.atr]);
+  }, [historyVersion, indicators.atr]);
 
   // --- Stochastic data update effect ---
   useEffect(() => {
     const stochKSeries = stochKRef.current;
     const stochDSeries = stochDRef.current;
+    const candles = candleHistoryRef.current;
     if (!stochKSeries || !stochDSeries || !indicators.stochastic || candles.length === 0) return;
 
     const stochData = calculateStochastic(candles);
     stochKSeries.setData(stochData.k);
     stochDSeries.setData(stochData.d);
-  }, [candles, indicators.stochastic]);
+  }, [historyVersion, indicators.stochastic]);
 
   // --- SL/TP price lines for open positions ---
   useEffect(() => {
@@ -790,43 +984,38 @@ export function Chart({
     }
   }, [pendingOrderSL, pendingOrderTP]);
 
-  // --- Draggable SL/TP lines handling ---
+  // --- Draggable SL/TP lines handling + FSM drawing placement ---
   useEffect(() => {
     const chart = chartRef.current;
     const series = candleSeriesRef.current;
     const container = containerRef.current;
-    if (!chart || !series || !container) return;
+    const fsm = fsmRef.current;
+    if (!chart || !series || !container || !fsm) return;
 
     const handleMouseDown = (e: MouseEvent) => {
       const rect = container.getBoundingClientRect();
       const x = e.clientX - rect.left;
       const y = e.clientY - rect.top;
 
-      // Drawing tool mode - intercept clicks when active tool is selected
-      if (activeToolRef.current !== 'NONE') {
+      // Drawing tool mode - FSM handles placement
+      if (fsm.isActive()) {
         const timeScale = chart.timeScale();
         const time = timeScale.coordinateToTime(x);
         const price = series.coordinateToPrice(y);
 
         if (time !== null && price !== null) {
-          isDrawingRef.current = true;
-          drawingStartPointRef.current = { time: time as any, price };
-          hasDraggedRef.current = false; // Reset drag flag
-          e.preventDefault();
-          e.stopPropagation();
-          return;
+          const outcome = fsm.onMouseDown({ time: time as any, price });
+          if (outcome.consumed) {
+            e.preventDefault();
+            e.stopPropagation();
+            return;
+          }
         }
       }
 
-      // Only allow drag if clicking near the right edge (label area)
-      // Labels are typically on the right side of the chart
-      const labelAreaWidth = 80; // pixels from right edge
-      const isInLabelArea = x > rect.width - labelAreaWidth;
-
-      // Check if click is near open position SL/TP lines (allow anywhere on chart for position lines)
-      // Only allow drag if the specific line is unlocked
-      for (const pos of positions) {
-        if (pos.stop_loss > 0 && positionSLUnlocked) {
+      // SL/TP line drag logic (unchanged)
+      for (const pos of positionsRef.current) {
+        if (pos.stop_loss > 0 && positionSLUnlockedRef.current) {
           const slY = series.priceToCoordinate(pos.stop_loss);
           if (slY !== null && Math.abs(y - slY) < 30) {
             isDraggingSLRef.current = true;
@@ -839,7 +1028,7 @@ export function Chart({
             return;
           }
         }
-        if (pos.take_profit > 0 && positionTPUnlocked) {
+        if (pos.take_profit > 0 && positionTPUnlockedRef.current) {
           const tpY = series.priceToCoordinate(pos.take_profit);
           if (tpY !== null && Math.abs(y - tpY) < 30) {
             isDraggingTPRef.current = true;
@@ -854,11 +1043,8 @@ export function Chart({
         }
       }
 
-      if (!isInLabelArea) return;
-
-      // Check if click is near pending order SL line
-      if (pendingOrderSL && pendingOrderSL > 0) {
-        const slPrice = pendingOrderSL;
+      if (pendingOrderSLRef.current && pendingOrderSLRef.current > 0) {
+        const slPrice = pendingOrderSLRef.current;
         const slY = series.priceToCoordinate(slPrice);
         if (slY !== null && Math.abs(y - slY) < 20) {
           isDraggingSLRef.current = true;
@@ -872,9 +1058,8 @@ export function Chart({
         }
       }
 
-      // Check if click is near pending order TP line
-      if (pendingOrderTP && pendingOrderTP > 0) {
-        const tpPrice = pendingOrderTP;
+      if (pendingOrderTPRef.current && pendingOrderTPRef.current > 0) {
+        const tpPrice = pendingOrderTPRef.current;
         const tpY = series.priceToCoordinate(tpPrice);
         if (tpY !== null && Math.abs(y - tpY) < 20) {
           isDraggingTPRef.current = true;
@@ -890,8 +1075,8 @@ export function Chart({
     };
 
     const handleMouseMove = (e: MouseEvent) => {
-      // Drawing tool mode - update drawing while dragging
-      if (isDrawingRef.current && drawingStartPointRef.current) {
+      // Drawing tool mode - FSM updates preview
+      if (fsm.isPlacing()) {
         const rect = container.getBoundingClientRect();
         const x = e.clientX - rect.left;
         const y = e.clientY - rect.top;
@@ -901,66 +1086,17 @@ export function Chart({
         const price = series.coordinateToPrice(y);
 
         if (time !== null && price !== null) {
-          // Mark that user has dragged
-          hasDraggedRef.current = true;
-
-          // Update end point for final drawing creation
-          drawingEndPointRef.current = { time: time as any, price };
-
-          // Update live preview with unique ID to avoid conflicts
-          const manager = drawingManagerRef.current;
-          if (manager && drawingStartPointRef.current) {
-            const start = drawingStartPointRef.current;
-            const tempId = `temp-drawing-${Date.now()}`;
-
-            // Remove previous temp drawing if it exists
-            if (tempDrawingIdRef.current) {
-              try {
-                manager.removeDrawing(tempDrawingIdRef.current);
-              } catch (e) {
-                // Drawing might not exist yet, ignore
-              }
-            }
-
-            // Create new temp drawing with unique ID
-            tempDrawingIdRef.current = tempId;
-
-            if (activeToolRef.current === 'LINE') {
-              const tempLine = new TrendLine(tempId, [
-                { time: start.time as any, price: start.price },
-                { time: time as any, price },
-              ], {
-                lineColor: '#2962FF',
-                lineWidth: 2,
-              });
-              manager.addDrawing(tempLine);
-            } else if (activeToolRef.current === 'RECTANGLE') {
-              const tempRect = new Rectangle(tempId, [
-                { time: start.time as any, price: start.price },
-                { time: time as any, price },
-              ], {
-                lineColor: '#2962FF',
-                lineWidth: 2,
-              });
-              manager.addDrawing(tempRect);
-            } else if (activeToolRef.current === 'FIB') {
-              const tempFib = new FibRetracement(tempId, [
-                { time: start.time as any, price: start.price },
-                { time: time as any, price },
-              ]);
-              manager.addDrawing(tempFib);
-            }
-          }
+          fsm.onMouseMove({ time: time as any, price });
         }
         return;
       }
 
+      // SL/TP drag logic (unchanged)
       if (!isDraggingSLRef.current && !isDraggingTPRef.current) return;
 
       const rect = container.getBoundingClientRect();
       const y = e.clientY - rect.top;
 
-      // Convert pixel delta to price delta using the series
       const priceAtStart = series.coordinateToPrice(dragStartYRef.current);
       const priceAtCurrent = series.coordinateToPrice(y);
 
@@ -968,118 +1104,34 @@ export function Chart({
         const priceDelta = priceAtCurrent - priceAtStart;
         const newPrice = Math.round((dragStartPriceRef.current + priceDelta) * 100) / 100;
 
-        if (draggedPositionIdRef.current !== null && onPositionSLTPChange) {
-          // Dragging open position SL/TP - send to backend immediately
-          // Also call onPositionSLTPDrag to update order panel state for confirmation
-          const pos = positions.find(p => p.id === draggedPositionIdRef.current);
+        if (draggedPositionIdRef.current !== null && onPositionSLTPChangeRef.current) {
+          const pos = positionsRef.current.find(p => p.id === draggedPositionIdRef.current);
           if (pos) {
             const sl = draggedSLTPRef.current === 'sl' ? newPrice : pos.stop_loss;
             const tp = draggedSLTPRef.current === 'tp' ? newPrice : pos.take_profit;
-            onPositionSLTPChange(pos.id, sl, tp);
-            if (onPositionSLTPDrag) {
-              onPositionSLTPDrag(sl, tp, draggedSLTPRef.current || 'sl');
+            onPositionSLTPChangeRef.current(pos.id, sl, tp);
+            if (onPositionSLTPDragRef.current) {
+              onPositionSLTPDragRef.current(sl, tp, draggedSLTPRef.current || 'sl');
             }
           }
         } else {
-          // Dragging pending order SL/TP
-          if (isDraggingSLRef.current && onPendingOrderSLChange) {
-            onPendingOrderSLChange(Math.max(0, newPrice));
-          } else if (isDraggingTPRef.current && onPendingOrderTPChange) {
-            onPendingOrderTPChange(Math.max(0, newPrice));
+          if (isDraggingSLRef.current && onPendingOrderSLChangeRef.current) {
+            onPendingOrderSLChangeRef.current(Math.max(0, newPrice));
+          } else if (isDraggingTPRef.current && onPendingOrderTPChangeRef.current) {
+            onPendingOrderTPChangeRef.current(Math.max(0, newPrice));
           }
         }
       }
     };
 
     const handleMouseUp = () => {
-      // Drawing tool mode - finalize drawing on mouse up
-      if (isDrawingRef.current && drawingStartPointRef.current && drawingEndPointRef.current) {
-        // Only create drawing if user actually dragged (not just click-click)
-        if (!hasDraggedRef.current) {
-          // User clicked without dragging - just reset state
-          isDrawingRef.current = false;
-          drawingStartPointRef.current = null;
-          drawingEndPointRef.current = null;
-          if (tempDrawingIdRef.current) {
-            const manager = drawingManagerRef.current;
-            if (manager) {
-              try {
-                manager.removeDrawing(tempDrawingIdRef.current);
-              } catch (e) {
-                // Drawing might not exist, ignore
-              }
-            }
-            tempDrawingIdRef.current = null;
-          }
-          return;
-        }
-
-        const manager = drawingManagerRef.current;
-
-        if (manager) {
-          const start = drawingStartPointRef.current;
-          const end = drawingEndPointRef.current;
-          const drawingId = `drawing-${Date.now()}`;
-
-          // Create final drawing first (to prevent blink)
-          if (activeToolRef.current === 'LINE') {
-            const trendLine = new TrendLine(drawingId, [
-              { time: start.time as any, price: start.price },
-              { time: end.time as any, price: end.price },
-            ], {
-              lineColor: '#2962FF',
-              lineWidth: 2,
-            });
-            manager.addDrawing(trendLine);
-            drawingIdsRef.current.push(drawingId);
-          } else if (activeToolRef.current === 'RECTANGLE') {
-            const rect = new Rectangle(drawingId, [
-              { time: start.time as any, price: start.price },
-              { time: end.time as any, price: end.price },
-            ], {
-              lineColor: '#2962FF',
-              lineWidth: 2,
-            });
-            manager.addDrawing(rect);
-            drawingIdsRef.current.push(drawingId);
-          } else if (activeToolRef.current === 'FIB') {
-            const fib = new FibRetracement(drawingId, [
-              { time: start.time as any, price: start.price },
-              { time: end.time as any, price: end.price },
-            ]);
-            manager.addDrawing(fib);
-            drawingIdsRef.current.push(drawingId);
-          }
-
-          // Remove temp drawing after final is created (to prevent blink)
-          // Use requestAnimationFrame to ensure final drawing is rendered first
-          if (tempDrawingIdRef.current) {
-            const tempId = tempDrawingIdRef.current;
-            requestAnimationFrame(() => {
-              try {
-                manager.removeDrawing(tempId);
-              } catch (e) {
-                // Drawing might not exist, ignore
-              }
-              tempDrawingIdRef.current = null;
-            });
-          }
-        }
-
-        // Reset drawing state and revert to NONE mode
-        isDrawingRef.current = false;
-        drawingStartPointRef.current = null;
-        drawingEndPointRef.current = null;
-        if (onActiveToolChange) {
-          onActiveToolChange('NONE');
-        }
-        // Auto-unlock chart after placement
-        if (onChartLockedChange) {
-          onChartLockedChange(false);
-        }
-        return;
+      // Drawing tool mode - FSM finalizes placement
+      if (fsm.isPlacing()) {
+        const outcome = fsm.onMouseUp();
+        if (outcome.consumed) return;
       }
 
+      // SL/TP drag cleanup (unchanged)
       isDraggingSLRef.current = false;
       isDraggingTPRef.current = false;
       draggedPositionIdRef.current = null;
@@ -1090,20 +1142,23 @@ export function Chart({
     document.addEventListener('mousemove', handleMouseMove);
     document.addEventListener('mouseup', handleMouseUp);
 
-    // Keyboard event listener for deleting selected drawings
+    // Keyboard: Backspace/Delete removes last drawing, Escape cancels placement
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Backspace' || e.key === 'Delete') {
         const manager = drawingManagerRef.current;
         if (manager && drawingIdsRef.current.length > 0) {
-          // Delete the most recently created drawing
-          // Since the library doesn't expose selection state, we delete the last one
           const lastDrawingId = drawingIdsRef.current[drawingIdsRef.current.length - 1];
           try {
             manager.removeDrawing(lastDrawingId);
             drawingIdsRef.current = drawingIdsRef.current.filter(id => id !== lastDrawingId);
-          } catch (e) {
-            // Drawing might not exist, ignore
+          } catch {
+            /* ignore */
           }
+        }
+      } else if (e.key === 'Escape') {
+        fsm.cancel();
+        if (onActiveToolChangeRef.current) {
+          onActiveToolChangeRef.current('NONE');
         }
       }
     };
@@ -1116,15 +1171,18 @@ export function Chart({
       document.removeEventListener('mouseup', handleMouseUp);
       document.removeEventListener('keydown', handleKeyDown);
     };
-  }, [pendingOrderSL, pendingOrderTP, onPendingOrderSLChange, onPendingOrderTPChange, onPositionSLTPChange, positions, positionSLUnlocked, positionTPUnlocked, activeTool, onActiveToolChange, candles]);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Lock/unlock chart based on activeTool selection and manual lock
   useEffect(() => {
     const chart = chartRef.current;
-    if (!chart) return;
+    const fsm = fsmRef.current;
+    if (!chart || !fsm) return;
 
-    // Sync ref with prop for immediate access in mouse handlers
-    activeToolRef.current = activeTool;
+    // Sync FSM with prop when tool changes externally (e.g., from toolbar)
+    if (activeTool !== fsm.getTool()) {
+      fsm.setTool(activeTool);
+    }
 
     if (activeTool !== 'NONE' || chartLocked) {
       chart.applyOptions({ handleScroll: false, handleScale: false });
@@ -1173,6 +1231,26 @@ export function Chart({
       },
     });
   }, [lightMode]);
+
+  // Handle clearAll callback from parent (e.g., toolbar trash button)
+  const handleClearAll = useCallback(() => {
+    const manager = drawingManagerRef.current;
+    const fsm = fsmRef.current;
+    if (manager) {
+      manager.clearAll();
+      drawingIdsRef.current = [];
+    }
+    if (fsm) {
+      fsm.cancel();
+    }
+  }, []);
+
+  // Call onClearAll when parent requests it (via callback ref)
+  useEffect(() => {
+    if (onClearAll) {
+      onClearAll(handleClearAll);
+    }
+  }, [onClearAll, handleClearAll]);
 
   // --- Entry-to-exit dashed link lines for closed trades ---
   useEffect(() => {
@@ -1224,10 +1302,26 @@ export function Chart({
       size: number;
     };
 
+    const cutoff = markerCutoffRef.current;
+    const historyStart = historyStartRef.current;
     const raw: Marker[] = [];
+
+    // Always pin a boundary marker at bar 0 so traders know exactly
+    // where the available history begins — regardless of SL/TP changes.
+    if (historyStart !== null) {
+      raw.push({
+        time: historyStart as UTCTimestamp,
+        position: 'belowBar',
+        color: '#4c525e',
+        shape: 'arrowUp',
+        text: '◀ Max History Limit',
+        size: 0,
+      });
+    }
 
     // Open positions — small entry arrow + price only
     for (const pos of positions) {
+      if ((pos.opened_at as number) > cutoff) continue;
       raw.push({
         time: pos.opened_at as UTCTimestamp,
         position: pos.side === 'buy' ? 'belowBar' : 'aboveBar',
@@ -1240,6 +1334,7 @@ export function Chart({
 
     // Closed trades — entry arrow + exit circle with short PnL
     for (const trade of trades) {
+      if ((trade.opened_at as number) > cutoff) continue;
       raw.push({
         time: trade.opened_at as UTCTimestamp,
         position: trade.side === 'buy' ? 'belowBar' : 'aboveBar',
@@ -1248,6 +1343,7 @@ export function Chart({
         text: trade.entry_price.toFixed(2),
         size: 1,
       });
+      if ((trade.closed_at as number) > cutoff) continue;
       const pnl = Math.round(trade.realized_pnl);
       raw.push({
         time: trade.closed_at as UTCTimestamp,
@@ -1276,7 +1372,12 @@ export function Chart({
     }
 
     series.setMarkers(merged);
-  }, [positions, trades, showMarkers]);
+  }, [positions, trades, showMarkers, markerVersion]);
 
-  return <div ref={containerRef} className="w-full h-full min-h-0" />;
-}
+  return (
+    <div className="relative w-full h-full min-h-0">
+      {/* Chart canvas — fills the wrapper completely */}
+      <div ref={containerRef} className="absolute inset-0" />
+    </div>
+  );
+});

@@ -40,14 +40,19 @@ SessionManager::~SessionManager() {
 
 std::size_t SessionManager::start_session(const std::string& symbol,
                                            double starting_balance,
-                                           const std::string& data_dir) {
+                                           const std::string& data_dir,
+                                           const std::string& start_date) {
     std::lock_guard<std::mutex> lock(mutex_);
 
     // Stop any active playback.
     playing_.store(false);
 
     // Load market data from CSV files.
-    CsvLoader::load_into_buffer(buffer_, symbol, data_dir);
+    // If the request is date-sliced (YYYY-MM-DD), pass the date prefix to the
+    // loader so it can reject non-matching rows by raw timestamp prefix —
+    // this avoids strict timestamp equality / timezone-suffix failures.
+    CsvLoader::load_into_buffer(buffer_, symbol, data_dir,
+                                start_date.size() == 10 ? start_date : "");
 
     if (buffer_.empty()) {
         throw std::runtime_error(
@@ -67,7 +72,58 @@ std::size_t SessionManager::start_session(const std::string& symbol,
     speed_.store(1);
     timeframe_.store(1);
 
-    // Clear snapshots and create initial snapshot at cursor 0
+    // ---------------------------------------------------------------------
+    // Position the playback cursor at the requested start date.
+    //
+    // "YYYY-MM-DD" (10 chars) — NEW DATE-SLICE MODE
+    //   Filters the buffer to the CLOSED interval
+    //   [09:30:00 ET, 16:00:00 ET] on that calendar date, discarding all
+    //   other bars.  Cursor lands at index 0 = market open.
+    //   parse_timestamp() adds +5 h (ET→UTC) internally, so "09:30:00"
+    //   becomes the correct UTC epoch for regular session open.
+    //   Throws if the day has no data (weekend, holiday, outside the
+    //   rolling 30-day window).
+    //
+    // "YYYY-MM-DD HH:MM:SS" (≥19 chars) — LEGACY SEEK MODE
+    //   Does NOT slice the buffer.  Just positions the cursor at the
+    //   closest candle ≥ that ET timestamp.  Retained for backward compat.
+    //
+    // Empty string — seek to the very first candle in the full buffer.
+    // ---------------------------------------------------------------------
+    if (start_date.size() == 10) {
+        // Date-slice: keep only core market hours on the requested day.
+        int64_t open_ts  = CsvLoader::parse_timestamp(start_date + " 09:30:00");
+        int64_t close_ts = CsvLoader::parse_timestamp(start_date + " 16:00:00");
+
+        if (open_ts <= 0 || close_ts <= 0) {
+            throw std::runtime_error(
+                "SessionManager::start_session() — invalid date string: '" +
+                start_date + "'");
+        }
+
+        buffer_.filter_to_range(open_ts, close_ts);
+
+        if (buffer_.empty()) {
+            throw std::runtime_error(
+                "No trading data found for '" + symbol + "' on " + start_date +
+                " during core market hours (09:30–16:00 ET). "
+                "Verify the date is a valid trading day within the last 30 days.");
+        }
+        // Cursor is already 0 (market open) — filter_to_range resets it.
+
+    } else if (!start_date.empty()) {
+        // Legacy: full datetime string — seek without slicing.
+        int64_t epoch = CsvLoader::parse_timestamp(start_date);
+        if (epoch > 0) {
+            buffer_.seek(epoch);
+        } else {
+            buffer_.seek(buffer_.start_timestamp());
+        }
+    } else {
+        buffer_.seek(buffer_.start_timestamp());
+    }
+
+    // Clear snapshots and create initial snapshot at the seeked cursor
     state_snapshots_.clear();
     create_snapshot_locked();
 

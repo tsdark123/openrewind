@@ -18,6 +18,23 @@ void CandleBuffer::set_candles(std::vector<Candle> candles) {
     clamp_cursor();
 }
 
+void CandleBuffer::filter_to_range(int64_t from_ts, int64_t to_ts) {
+    if (candles_.empty()) return;
+
+    // Lower bound: first candle with timestamp >= from_ts.
+    auto it_begin = std::lower_bound(candles_.begin(), candles_.end(), from_ts,
+        [](const Candle& c, int64_t ts) { return c.timestamp < ts; });
+
+    // Upper bound: first candle with timestamp > to_ts.
+    auto it_end = std::upper_bound(candles_.begin(), candles_.end(), to_ts,
+        [](int64_t ts, const Candle& c) { return ts < c.timestamp; });
+
+    std::vector<Candle> filtered(it_begin, it_end);
+    candles_ = std::move(filtered);
+    cursor_ = 0;
+    clamp_cursor();
+}
+
 void CandleBuffer::merge_candles(const std::vector<Candle>& new_candles) {
     // Reserve to avoid multiple reallocations during insert.
     candles_.reserve(candles_.size() + new_candles.size());

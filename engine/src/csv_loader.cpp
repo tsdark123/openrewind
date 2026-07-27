@@ -17,8 +17,9 @@
 // -----------------------------------------------------------------------------
 
 int64_t CsvLoader::parse_timestamp(const std::string& ts_str) {
-    // Expected format: "YYYY-MM-DD HH:MM:SS"
-    // Minimum length: 19 characters (e.g., "2024-01-02 09:30:00")
+    // yfinance sometimes writes "YYYY-MM-DD HH:MM:SS+00:00" (with timezone).
+    // We only need the fixed 19-char "YYYY-MM-DD HH:MM:SS" prefix, so clamp
+    // the parse window to the first 19 characters and ignore any suffix.
     if (ts_str.size() < 19) {
         return -1;
     }
@@ -101,12 +102,23 @@ int64_t CsvLoader::parse_timestamp(const std::string& ts_str) {
 // Line Parsing
 // -----------------------------------------------------------------------------
 
-bool CsvLoader::parse_line(const std::string& line, Candle& out) {
+bool CsvLoader::parse_line(const std::string& line, Candle& out,
+                           const std::string& start_date) {
     // Expected: "2024-01-02 09:30:00,185.52,185.63,185.41,185.55,128456"
+    // yfinance may append a timezone suffix: "2024-01-02 09:30:00+00:00,...".
     // We parse by finding comma positions rather than using stringstream,
     // which is measurably faster for high-volume CSV ingestion.
 
     if (line.empty()) {
+        return false;
+    }
+
+    // Optional date filter: accept any CSV line that CONTAINS the requested
+    // "YYYY-MM-DD" string. This is a loose substring match so the loader
+    // tolerates trailing timezone text, variable timestamp length, or minor
+    // formatting differences in the raw CSV rows.
+    if (!start_date.empty() &&
+        line.find(start_date) == std::string::npos) {
         return false;
     }
 
@@ -184,7 +196,18 @@ std::vector<std::filesystem::path> CsvLoader::find_csv_files(
         return {};
     }
 
-    // Build the expected filename prefix: "{SYMBOL}_"
+    // Preferred layout (since the 30d x 1m yfinance migration): a single
+    // continuous "{SYMBOL}_history.csv" per symbol. If present, return only
+    // that file — the bulk fetch script keeps it sorted, deduped, and bounded
+    // to a rolling 30-day window.
+    fs::path history_path = symbol_dir / (symbol + "_history.csv");
+    if (fs::exists(history_path) && fs::is_regular_file(history_path)) {
+        return { history_path };
+    }
+
+    // Fallback: legacy layout where data was sliced into monthly files
+    // ("{SYMBOL}_YYYYMM.csv") or one-off Yahoo dumps ("{SYMBOL}_Yahoo.csv").
+    // Keep this path so cached data from earlier ingestion runs still loads.
     std::string prefix = symbol + "_";
 
     std::vector<fs::path> files;
@@ -197,7 +220,6 @@ std::vector<std::filesystem::path> CsvLoader::find_csv_files(
         const auto& path = entry.path();
         std::string filename = path.filename().string();
 
-        // Match files like "AAPL_202401.csv"
         if (filename.size() > prefix.size() &&
             filename.substr(0, prefix.size()) == prefix &&
             path.extension() == ".csv") {
@@ -205,7 +227,7 @@ std::vector<std::filesystem::path> CsvLoader::find_csv_files(
         }
     }
 
-    // Sort alphabetically — our naming convention (SYMBOL_YYYYMM.csv)
+    // Sort alphabetically — our legacy naming convention (SYMBOL_YYYYMM.csv)
     // ensures this is chronological order.
     std::sort(files.begin(), files.end());
 
@@ -216,7 +238,8 @@ std::vector<std::filesystem::path> CsvLoader::find_csv_files(
 // Core Loading
 // -----------------------------------------------------------------------------
 
-std::vector<Candle> CsvLoader::load_file(const std::string& path) {
+std::vector<Candle> CsvLoader::load_file(const std::string& path,
+                                          const std::string& start_date) {
     std::ifstream file(path, std::ios::in);
 
     if (!file.is_open()) {
@@ -240,7 +263,7 @@ std::vector<Candle> CsvLoader::load_file(const std::string& path) {
     // We do a loose check: if the first line parses as a valid candle, it's data,
     // not a header, so we process it.
     Candle first_candle{};
-    bool header_is_data = parse_line(line, first_candle);
+    bool header_is_data = parse_line(line, first_candle, start_date);
     if (header_is_data) {
         candles.push_back(first_candle);
     }
@@ -257,10 +280,10 @@ std::vector<Candle> CsvLoader::load_file(const std::string& path) {
             continue;
         }
 
-        if (parse_line(line, candle)) {
+        if (parse_line(line, candle, start_date)) {
             candles.push_back(candle);
         }
-        // Silently skip malformed lines — log in V2.
+        // Silently skip malformed or non-matching lines — log in V2.
     }
 
     sort_and_deduplicate(candles);
@@ -268,7 +291,8 @@ std::vector<Candle> CsvLoader::load_file(const std::string& path) {
 }
 
 std::vector<Candle> CsvLoader::load_symbol(const std::string& symbol,
-                                            const std::string& data_dir) {
+                                            const std::string& data_dir,
+                                            const std::string& start_date) {
     auto files = find_csv_files(symbol, data_dir);
 
     if (files.empty()) {
@@ -283,7 +307,7 @@ std::vector<Candle> CsvLoader::load_symbol(const std::string& symbol,
     all_candles.reserve(files.size() * 10000);
 
     for (const auto& file_path : files) {
-        auto file_candles = load_file(file_path.string());
+        auto file_candles = load_file(file_path.string(), start_date);
         all_candles.insert(all_candles.end(),
                            file_candles.begin(), file_candles.end());
     }
@@ -296,8 +320,9 @@ std::vector<Candle> CsvLoader::load_symbol(const std::string& symbol,
 
 void CsvLoader::load_into_buffer(CandleBuffer& buffer,
                                   const std::string& symbol,
-                                  const std::string& data_dir) {
-    auto candles = load_symbol(symbol, data_dir);
+                                  const std::string& data_dir,
+                                  const std::string& start_date) {
+    auto candles = load_symbol(symbol, data_dir, start_date);
     buffer.set_candles(std::move(candles));
 }
 

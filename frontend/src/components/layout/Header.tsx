@@ -1,4 +1,4 @@
-import { Wifi, WifiOff, Loader2, Menu } from 'lucide-react';
+import { Menu } from 'lucide-react';
 
 interface HeaderProps {
   connected: boolean;
@@ -9,15 +9,21 @@ interface HeaderProps {
 }
 
 export function Header({ connected, reconnecting, symbol, sessionActive, lightMode }: HeaderProps) {
+  const dotColor = connected
+    ? 'bg-[#2e9461]'
+    : reconnecting
+    ? 'bg-yellow-500'
+    : 'bg-[#ef5350]';
+
   return (
     <header className={`flex h-11 items-center justify-between border-b px-4 ${lightMode ? 'bg-white border-gray-200' : 'bg-[#121416] border-[#2a2e39]'}`}>
       <div className="flex items-center gap-4">
-        <button className="text-[#787b86] hover:text-[#d1d4dc]">
+        <button className={`${lightMode ? 'text-gray-500 hover:text-gray-900' : 'text-[#787b86] hover:text-[#d1d4dc]'}`}>
           <Menu className="h-5 w-5" />
         </button>
         <div className="flex items-center">
           <span className="text-base font-bold tracking-wide text-[#2962ff]">Open</span>
-          <span className={`text-base font-bold tracking-wide ${lightMode ? 'text-gray-900' : 'text-white'}`}>Replay</span>
+          <span className={`text-base font-bold tracking-wide ${lightMode ? 'text-gray-900' : 'text-white'}`}>Rewind</span>
         </div>
         {sessionActive && symbol && (
           <>
@@ -27,24 +33,14 @@ export function Header({ connected, reconnecting, symbol, sessionActive, lightMo
         )}
       </div>
 
-      <div className="flex items-center gap-3">
-        {/* Connection status */}
-        {connected ? (
-          <div className="flex items-center gap-1.5 rounded-full border border-[#363a45] px-3 py-1 text-[11px] text-[#2e9461]">
-            <Wifi className="h-3 w-3" />
-            <span>Connected</span>
-          </div>
-        ) : reconnecting ? (
-          <div className="flex items-center gap-1.5 rounded-full border border-[#363a45] px-3 py-1 text-[11px] text-yellow-500">
-            <Loader2 className="h-3 w-3 animate-spin" />
-            <span>Reconnecting...</span>
-          </div>
-        ) : (
-          <div className="flex items-center gap-1.5 rounded-full border border-[#363a45] px-3 py-1 text-[11px] text-[#ef5350]">
-            <WifiOff className="h-3 w-3" />
-            <span>Disconnected</span>
-          </div>
-        )}
+      {/* Subtle connection status dot — top-right */}
+      <div className="flex items-center">
+        <div
+          title={connected ? 'Connected' : reconnecting ? 'Reconnecting' : 'Disconnected'}
+          className={`h-2.5 w-2.5 rounded-full ${dotColor} ${connected || reconnecting ? 'animate-pulse' : ''} ${
+            lightMode ? 'ring-2 ring-white' : 'ring-2 ring-[#121416]'
+          }`}
+        />
       </div>
     </header>
   );

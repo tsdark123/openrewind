@@ -3,6 +3,7 @@
 #include "session.hpp"
 
 #include <crow.h>
+#include <crow/middlewares/cors.h>
 #include <nlohmann/json.hpp>
 
 #include <string>
@@ -10,9 +11,11 @@
 #include <unordered_set>
 #include <atomic>
 #include <memory>
+#include <thread>
+#include <condition_variable>
 
 // =============================================================================
-// OpenReplayServer — Crow-based HTTP/WebSocket server for OpenReplay.
+// OpenRewindServer — Crow-based HTTP/WebSocket server for OpenRewind.
 //
 // Binds to localhost:9000 and exposes:
 //   - REST endpoints under /api/* for session and order management
@@ -33,10 +36,10 @@
 
 using json = nlohmann::json;
 
-class OpenReplayServer {
+class OpenRewindServer {
 public:
-    explicit OpenReplayServer(int port = 9000);
-    ~OpenReplayServer();
+    explicit OpenRewindServer(int port = 9000, std::string data_dir = "data");
+    ~OpenRewindServer();
 
     // Start the Crow server (blocking). Call from main().
     void run();
@@ -46,8 +49,9 @@ public:
 
 private:
     // --- Crow App ---
-    crow::SimpleApp app_;
+    crow::App<crow::CORSHandler> app_;
     int port_;
+    std::string data_dir_;
 
     // --- Core Session ---
     SessionManager session_;
@@ -56,6 +60,18 @@ private:
     mutable std::mutex ws_mutex_;
     std::unordered_set<crow::websocket::connection*> ws_clients_;
     std::atomic<uint64_t> seq_{0};
+
+    // --- Auto-ingestion worker ---
+    // Background thread that runs `python scripts/fetch_data.py --mode append`
+    // every 30 minutes so the engine keeps its own data fresh without external
+    // cron. condition_variable + atomic flag lets stop() wake it instantly.
+    std::thread             ingest_thread_;
+    std::atomic<bool>       ingest_stop_{false};
+    std::condition_variable ingest_cv_;
+    std::mutex              ingest_cv_mutex_;
+
+    void start_ingest_worker();
+    void stop_ingest_worker();
 
     // -------------------------------------------------------------------------
     // Route Setup

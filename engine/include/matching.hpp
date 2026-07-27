@@ -155,7 +155,7 @@ struct AccountSnapshot {
 };
 
 // =============================================================================
-// MatchingEngine — The financial core of OpenReplay.
+// MatchingEngine — The financial core of OpenRewind.
 //
 // Simulates a simplified exchange matching engine. Processes one candle at a
 // time via on_candle(), checking pending orders and open positions against

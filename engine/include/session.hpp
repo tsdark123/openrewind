@@ -61,7 +61,8 @@ public:
     // Throws std::runtime_error if data cannot be loaded.
     std::size_t start_session(const std::string& symbol,
                               double starting_balance,
-                              const std::string& data_dir = "data");
+                              const std::string& data_dir = "data",
+                              const std::string& start_date = "");
 
     // Stop the current session: pause playback, return summary stats.
     // Safe to call even if no session is active.
