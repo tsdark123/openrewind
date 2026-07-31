@@ -14,6 +14,7 @@ import { OrionDrivingOverlay } from './components/ui/OrionDrivingOverlay';
 import { useWebSocket } from './hooks/useWebSocket';
 import { endSession, loadPerformanceLog } from './lib/journal';
 import { orionController } from './lib/orion/controller';
+import { fetchCandles } from './lib/orion/tools';
 import { threadKeyForContext, appendMessage, loadOrionThreads, writeOrionThreads } from './lib/orionThreads';
 import type {
   AppState,
@@ -101,8 +102,9 @@ function appReducer(state: AppState, action: AppAction): AppState {
         ...state,
         sessionActive: true,
         symbol: action.payload.symbol,
+        replayDate: action.payload.start_date || state.replayDate,
         totalCandles: action.payload.total_candles,
-        cursor: 0,
+        cursor: action.payload.start_cursor ?? 0,
         currentPrice: 0,
         isPlaying: false,
         indicators: {
@@ -313,10 +315,15 @@ export default function App() {
   const [state, dispatch] = useReducer(appReducer, initialState);
   const chartRef = useRef<ChartHandle>(null);
 
-  // dateConfirmed — true only after a session has been successfully started with
-  //                 that date; controls stay locked until this is true.
-  const [dateConfirmed, setDateConfirmed] = useState(false);
+  // dateConfirmed is kept as internal bookkeeping for session lifecycle;
+  // playback locking is now driven by isOrionDriving.
+  const [, setDateConfirmed] = useState(false);
   const [dateError, setDateError] = useState<string | null>(null);
+
+  // Inline symbol/data error shown under the Toolbar search input instead of
+  // the full-width amber banner.
+  const [symbolError, setSymbolError] = useState<string | null>(null);
+  const clearSymbolError = useCallback(() => setSymbolError(null), []);
 
   // Calendar / session flow state.
   const [showCalendar, setShowCalendar] = useState(false);
@@ -332,10 +339,6 @@ export default function App() {
 
   const replayDate = state.replayDate;
 
-  const showDateError = useCallback(() => {
-    setDateError('Please select a valid past trading weekday where market data has been synced.');
-  }, []);
-
   const clearDateError = useCallback(() => setDateError(null), []);
 
   const onCandleUpdate = useCallback((payload: CandleUpdatePayload) => {
@@ -344,13 +347,17 @@ export default function App() {
 
   const onSessionReset = useCallback(() => {
     chartRef.current?.resetChart();
+    setSessionHistory([]);
   }, []);
 
   const onSessionHistory = useCallback((candles: CandleData[]) => {
+    setSessionHistory(candles);
     chartRef.current?.setHistory(candles);
   }, []);
 
   const [availableTickers, setAvailableTickers] = useState<string[]>([]);
+  const availableTickersRef = useRef<string[]>([]);
+  availableTickersRef.current = availableTickers;
 
   const fetchTickers = useCallback(() => {
     fetch(`${API_BASE}/api/tickers`)
@@ -395,6 +402,7 @@ export default function App() {
     orionController.bind({
       getState: () => stateRef.current,
       getChartHandle: () => chartRef.current,
+      getAvailableTickers: () => availableTickersRef.current,
       send,
       dispatch,
       apiBase: API_BASE,
@@ -447,7 +455,12 @@ export default function App() {
     }
     return () => {}; // no cleanup needed — fetchTickers is idempotent
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);  // run once on mount; onDataSynced handles subsequent refreshes
+  }, []);  // run once on mount; onDataSynced and the connected effect handle subsequent refreshes
+
+  // --- Re-fetch tickers whenever the WebSocket reconnects ---
+  useEffect(() => {
+    if (connected) fetchTickers();
+  }, [connected, fetchTickers]);
 
   // --- End Session: once all open positions are closed, persist the active
   // session trades to the journal, reset the workspace, and clear the sandbox.
@@ -467,7 +480,7 @@ export default function App() {
         chartRef.current?.resetChart();
         dispatch({ type: 'END_SESSION' });
         setDateConfirmed(false);
-        setChartKey((k) => k + 1);
+        setSessionHistory([]);
         setIsEndingSession(false);
       }
     })();
@@ -533,15 +546,53 @@ export default function App() {
   }, [introFinished, dataSynced]);
 
   // --- Change replay date from the Toolbar date picker ---
+  // Probe the requested date; if the local cache has no bars for it, fall
+  // back to the nearest previous weekday. This mirrors setSession's fallback
+  // and prevents the engine from rejecting a manual date pick.
   const handleDateChange = useCallback(
     async (newDate: string) => {
-      if (!newDate || !state.sessionActive) return;
+      if (!newDate) return;
       if (newDate.length !== 10) {
-        showDateError();
+        console.log('[Orion Diagnostic] handleDateError triggered', { reason: 'bad-length', newDate, length: newDate.length });
+        setSymbolError('No local market data found for this date.');
         return;
       }
-      dispatch({ type: 'SET_REPLAY_DATE', date: newDate });
+      if (!state.symbol) {
+        dispatch({ type: 'SET_REPLAY_DATE', date: newDate });
+        clearDateError();
+        clearSymbolError();
+        setDateConfirmed(false);
+        return;
+      }
+
+      let sessionDate = newDate;
+      try {
+        const probe = await fetchCandles(
+          { symbol: state.symbol, date: newDate, timeframe: 1, limit: 1 },
+          API_BASE
+        );
+        if (probe.missing) {
+          console.log('[Orion Diagnostic] handleDateError triggered', { reason: 'no-data', newDate });
+          setSymbolError('No local market data found for this date.');
+          setDateConfirmed(false);
+          return;
+        }
+        sessionDate = probe.fallbackDate ?? newDate;
+      } catch (e) {
+        console.error('[OpenRewind] Failed to probe date:', e);
+        // proceed with the requested date; the engine will surface a real error if it is truly missing
+      }
+
+      dispatch({ type: 'SET_REPLAY_DATE', date: sessionDate });
+      clearDateError();
+      clearSymbolError();
       setDateConfirmed(false);
+
+      if (!state.sessionActive) {
+        // No active session yet — the date will be used when the user picks a ticker.
+        return;
+      }
+
       try {
         const balance = state.balance > 0 ? state.balance : 100000;
         const res = await fetch(`${API_BASE}/api/session/start`, {
@@ -550,25 +601,40 @@ export default function App() {
           body: JSON.stringify({
             symbol: state.symbol,
             starting_balance: balance,
-            start_date: newDate,
+            start_date: sessionDate,
           }),
         });
         const data = await res.json();
         if (data.error) {
           console.error('[OpenRewind] Date change failed:', data.error);
+          console.log('[Orion Diagnostic] handleDateError triggered', { reason: 'engine-error', error: data.error });
           setDateConfirmed(false);
-          showDateError();
+          setSymbolError('No local market data found for this date.');
           return;
         }
         clearDateError();
-        setChartKey((k) => k + 1);
+        clearSymbolError();
+        dispatch({
+          type: 'SESSION_STARTED',
+          payload: {
+            session_id: data.session_id ?? '1',
+            symbol: state.symbol,
+            total_candles: data.total_candles ?? 0,
+            start_ts: data.start_ts ?? 0,
+            end_ts: data.end_ts ?? 0,
+            start_date: data.start_date ?? sessionDate,
+            start_cursor: data.start_cursor ?? 0,
+          },
+        });
+        dispatch({ type: 'SET_REPLAY_DATE', date: data.start_date ?? sessionDate });
         setDateConfirmed(true);
       } catch (err) {
         console.error('[OpenRewind] Failed to change date:', err);
-        showDateError();
+        console.log('[Orion Diagnostic] handleDateError triggered', { reason: 'exception', err });
+        setSymbolError('No local market data found for this date.');
       }
     },
-    [state.sessionActive, state.symbol, state.balance, clearDateError, showDateError]
+    [state.sessionActive, state.symbol, state.balance, clearDateError, setSymbolError, clearSymbolError]
   );
 
   // --- WS command helpers ---
@@ -620,9 +686,6 @@ export default function App() {
     (minutes: number) => {
       send({ cmd: 'set_timeframe', minutes });
       dispatch({ type: 'SET_TIMEFRAME', timeframe: minutes });
-      // Force Chart to remount on TF change — prevents stale LineSeries
-      // timestamp conflicts after setData rebuilds the time scale.
-      setChartKey((k) => k + 1);
     },
     [send]
   );
@@ -719,7 +782,8 @@ export default function App() {
 
   const [lockToEdge, setLockToEdge] = useState(false);
   const [showMarkers, setShowMarkers] = useState(true);
-  const [chartKey, setChartKey] = useState(0);
+  const [chartKey] = useState(0);
+  const [sessionHistory, setSessionHistory] = useState<CandleData[]>([]);
   const [showOrderPanel, setShowOrderPanel] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const [pendingOrderSL, setPendingOrderSL] = useState(0);
@@ -737,7 +801,6 @@ export default function App() {
     // Discard any sandbox trades for the current symbol/date before restarting.
     dispatch({ type: 'CLEAR_ACTIVE_SESSION_TRADES_FOR_DATE', symbol: state.symbol, date: state.replayDate });
     send({ cmd: 'reset_session' });
-    setChartKey((k) => k + 1);
   }, [send, dispatch, state.symbol, state.replayDate]);
 
   const handleEndSession = useCallback(() => {
@@ -754,21 +817,37 @@ export default function App() {
   //   2. Resets the matching engine to the (current) starting balance.
   //   3. Broadcasts session_started -> reducer's SESSION_STARTED case wipes
   //      candles/positions/orders so the chart cleanly shows the new ticker.
-  // We bump chartKey for the same reason set_timeframe does: forces
-  // lightweight-charts to remount and avoid stale time-scale state.
+  // We probe the current replay date for the new ticker and fall back to the
+  // nearest previous weekday with data, keeping manual symbol changes and
+  // Orion's setSession on the same code path.
   const handleSymbolChange = useCallback(
-    async (newSymbol: string) => {
-      if (!newSymbol || newSymbol === state.symbol) return;
+    async (newSymbol: string, targetDate?: string) => {
+      if (!newSymbol || (newSymbol === state.symbol && !targetDate)) return;
       try {
         const balance = state.balance > 0 ? state.balance : 100000;
-        // Carry the current replay date so the new symbol starts on the same
-        // day. If no date has been chosen yet, the C++ engine loads the full
-        // 30-day buffer and playback stays locked until the user picks one.
+        let sessionDate = targetDate ?? replayDate;
+        if (sessionDate) {
+          try {
+            const probe = await fetchCandles(
+              { symbol: newSymbol, date: sessionDate, timeframe: 1, limit: 1 },
+              API_BASE
+            );
+            if (probe.missing) {
+              console.log('[Orion Diagnostic] handleSymbolError triggered', { reason: 'no-data', newSymbol, sessionDate });
+              setSymbolError('No local market data found for this symbol.');
+              return;
+            }
+            sessionDate = probe.fallbackDate ?? sessionDate;
+          } catch (e) {
+            console.error('[OpenRewind] Failed to probe symbol:', e);
+          }
+        }
+
         const body: Record<string, unknown> = {
           symbol: newSymbol,
           starting_balance: balance,
         };
-        if (replayDate) body.start_date = replayDate;
+        if (sessionDate) body.start_date = sessionDate;
         const res = await fetch(`${API_BASE}/api/session/start`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -777,20 +856,35 @@ export default function App() {
         const data = await res.json();
         if (data.error) {
           console.error('[OpenRewind] Symbol switch failed:', data.error);
-          showDateError();
+          console.log('[Orion Diagnostic] handleSymbolError triggered', { reason: 'engine-error', error: data.error });
+          setSymbolError('No local market data found for this symbol.');
           return;
         }
         clearDateError();
-        setChartKey((k) => k + 1);
+        clearSymbolError();
+        dispatch({
+          type: 'SESSION_STARTED',
+          payload: {
+            session_id: data.session_id ?? '1',
+            symbol: newSymbol,
+            total_candles: data.total_candles ?? 0,
+            start_ts: data.start_ts ?? 0,
+            end_ts: data.end_ts ?? 0,
+            start_date: data.start_date ?? sessionDate,
+            start_cursor: data.start_cursor ?? 0,
+          },
+        });
+        dispatch({ type: 'SET_REPLAY_DATE', date: data.start_date ?? sessionDate ?? '' });
         // Keep dateConfirmed only if we sent a date; otherwise playback locks
         // until the user explicitly picks one via the Toolbar date picker.
-        setDateConfirmed(!!replayDate);
+        setDateConfirmed(!!sessionDate);
       } catch (err) {
         console.error('[OpenRewind] Failed to switch symbol:', err);
-        showDateError();
+        console.log('[Orion Diagnostic] handleSymbolError triggered', { reason: 'exception', err });
+        setSymbolError('No local market data found for this symbol.');
       }
     },
-    [state.symbol, state.balance, replayDate, clearDateError, showDateError]
+    [state.symbol, state.balance, replayDate, clearDateError, setSymbolError, clearSymbolError]
   );
 
   // Reset unlock states when no open positions
@@ -849,6 +943,7 @@ export default function App() {
             symbol={state.symbol}
             availableTickers={availableTickers}
             onSymbolChange={handleSymbolChange}
+            error={symbolError ?? undefined}
             replayDate={replayDate}
             onDateChange={handleDateChange}
             timeframe={state.timeframe}
@@ -878,7 +973,7 @@ export default function App() {
                 cursor={state.cursor}
                 totalCandles={state.totalCandles}
                 sessionActive={state.sessionActive}
-                locked={!dateConfirmed}
+                locked={isOrionDriving}
                 playbackDirection={state.playbackDirection}
                 onPlay={handlePlay}
                 onPause={handlePause}
@@ -892,6 +987,7 @@ export default function App() {
               <Chart
                 ref={chartRef}
                 key={chartKey}
+                sessionHistory={sessionHistory}
                 positions={state.openPositions}
                 trades={state.tradeHistory}
                 currentPrice={currentPrice}
@@ -913,6 +1009,10 @@ export default function App() {
                 onClearAll={setClearHandler}
                 lightMode={lightMode}
               />
+
+              {/* Orion chart-area lock. Only blocks the canvas; the toolbar
+                  and symbol input remain usable. */}
+              <OrionDrivingOverlay visible={isOrionDriving} activityLine={lastActivityLine} />
             </div>
 
             {/* Advanced Order Panel (collapsible right sidebar) */}
@@ -984,6 +1084,11 @@ export default function App() {
             lightMode={lightMode}
             appState={state}
             chartRef={chartRef}
+            apiBase={API_BASE}
+            availableTickers={availableTickers}
+            onSwitchSymbol={handleSymbolChange}
+            send={send}
+            dispatch={dispatch}
           />
         )}
       </div>
@@ -994,12 +1099,6 @@ export default function App() {
         log={state.performanceLog}
         lightMode={lightMode}
       />
-
-      {/* Orion foreground-takeover overlay. Non-destructive: chart and
-          workspace remain visible; only user input is blocked while the
-          controller runs the queued plan. Esc cancels via
-          OrionController.cancel(). */}
-      <OrionDrivingOverlay visible={isOrionDriving} activityLine={lastActivityLine} />
     </div>
   );
 }

@@ -65,7 +65,10 @@ export interface OrionChatResponse {
 }
 
 function isTauri(): boolean {
-  return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+  if (typeof window === 'undefined') return false;
+  const win = window as any;
+  const tauri = win.__TAURI__?.core ?? win.__TAURI_INTERNALS__;
+  return typeof tauri?.invoke === 'function';
 }
 
 async function ollamaFetch(path: string, init: RequestInit): Promise<Response> {

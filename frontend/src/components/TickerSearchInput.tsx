@@ -31,18 +31,21 @@ interface TickerSearchInputProps {
   /** Called whenever the user types — useful when caller wants to mirror the
    *  draft into its own state (e.g. start form's controlled symbol). */
   onChangeDraft?: (draft: string) => void;
+  /** Optional inline error message (e.g. "No local market data for this symbol"). */
+  error?: string;
 }
 
 export function TickerSearchInput({
   tickers,
   value,
   onCommit,
-  placeholder = 'Search symbol…',
+  placeholder = 'Search symbols…',
   autoFocus,
   lightMode = false,
   size = 'lg',
   className = '',
   onChangeDraft,
+  error,
 }: TickerSearchInputProps) {
   const [draft, setDraft] = useState(value);
   const [open, setOpen] = useState(false);
@@ -57,6 +60,12 @@ export function TickerSearchInput({
     setDraft(value);
   }, [value]);
 
+  // Diagnostic mount log.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    console.log('[Orion Diagnostic] TickerSearchInput mount', { tickers: tickers.length, value, size, lightMode });
+  }, []);
+
   // Filter suggestions: prefix match (case-insensitive). The dropdown has its
   // own max-height/overflow, so the full list can be scrolled with the wheel.
   const suggestions = useMemo(() => {
@@ -64,6 +73,14 @@ export function TickerSearchInput({
     if (!q) return tickers;
     return tickers.filter((t) => t.toUpperCase().startsWith(q));
   }, [draft, tickers]);
+
+  const emptyMessage = error
+    ? error
+    : tickers.length === 0
+      ? 'No symbols synced yet. Run data sync to load tickers.'
+      : draft.trim()
+        ? 'No local market data found for this symbol.'
+        : 'Type to search available symbols…';
 
   // Reset highlight when suggestions change.
   useEffect(() => {
@@ -87,6 +104,7 @@ export function TickerSearchInput({
 
   const commit = (symbol: string) => {
     const sym = symbol.trim().toUpperCase();
+    console.log('[Orion Diagnostic] TickerSearchInput commit', { sym, tickers: tickers.length });
     if (!sym) return;
     setDraft(sym);
     setOpen(false);
@@ -145,6 +163,7 @@ export function TickerSearchInput({
             setDraft(next);
             setOpen(true);
             onChangeDraft?.(next);
+            console.log('[Orion Diagnostic] TickerSearchInput onChange', { next, suggestions: suggestions.length });
           }}
           onFocus={() => setOpen(true)}
           onKeyDown={handleKeyDown}
@@ -163,7 +182,7 @@ export function TickerSearchInput({
         />
       </div>
 
-      {open && suggestions.length > 0 && (
+      {open && (
         <ul
           className={`absolute left-0 right-0 z-50 mt-1 max-h-60 overflow-y-auto rounded-lg border shadow-lg ${
             lightMode
@@ -171,7 +190,11 @@ export function TickerSearchInput({
               : 'bg-[#1e222d] border-[#363a45]'
           }`}
         >
-          {suggestions.map((sym, idx) => {
+          {suggestions.length === 0 ? (
+            <li className={`px-3 py-2 text-[12px] ${lightMode ? 'text-gray-500' : 'text-[#787b86]'}`}>
+              {emptyMessage}
+            </li>
+          ) : suggestions.map((sym, idx) => {
             const isHighlight = idx === highlight;
             const q = draft.trim().toUpperCase();
             const matchLen = q && sym.toUpperCase().startsWith(q) ? q.length : 0;
@@ -213,6 +236,11 @@ export function TickerSearchInput({
             );
           })}
         </ul>
+      )}
+      {error && !open && (
+        <div className={`absolute left-0 top-[calc(100%+4px)] z-50 w-40 rounded border px-2 py-1 text-[11px] shadow ${lightMode ? 'bg-red-50 border-red-200 text-red-700' : 'bg-[#1e222d] border-[#ef5350]/50 text-[#ef5350]'}`}>
+          {error}
+        </div>
       )}
     </div>
   );

@@ -12,6 +12,55 @@
 // CsvLoader — Implementation
 // =============================================================================
 
+namespace {
+
+// Convert a civil (year, month [1-12], day) date to the number of days since
+// the Unix epoch (1970-01-01).  Uses the same civil_from_days algorithm as
+// parse_timestamp().
+int64_t days_from_civil(int year, int month, int day) {
+    int y = year;
+    int m = month;
+    if (m <= 2) {
+        y -= 1;
+        m += 9;
+    } else {
+        m -= 3;
+    }
+
+    int era = (y >= 0 ? y : y - 399) / 400;
+    unsigned yoe = static_cast<unsigned>(y - era * 400);
+    unsigned doy = (153 * static_cast<unsigned>(m) + 2) / 5 + static_cast<unsigned>(day) - 1;
+    unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return static_cast<int64_t>(era) * 146097 + static_cast<int64_t>(doe) - 719468;
+}
+
+// 0 = Sunday, based on 1970-01-01 being a Thursday.
+int day_of_week(int year, int month, int day) {
+    return static_cast<int>((days_from_civil(year, month, day) + 4) % 7);
+}
+
+// Day-of-month of the Nth Sunday in the given month (n = 1 is first).
+int nth_sunday(int year, int month, int n) {
+    int first_dow = day_of_week(year, month, 1);
+    int first_sunday = 1 + (7 - first_dow) % 7;
+    return first_sunday + (n - 1) * 7;
+}
+
+// US DST begins the second Sunday in March at 02:00 local and ends the first
+// Sunday in November at 02:00 local.  Market hours are well after the 02:00
+// boundary, so the ambiguous/repeated hour is ignored.
+bool is_us_dst(int year, int month, int day) {
+    int dst_start = nth_sunday(year, 3, 2);
+    int dst_end   = nth_sunday(year, 11, 1);
+
+    if (month > 3 && month < 11) return true;
+    if (month == 3) return day >= dst_start;
+    if (month == 11) return day < dst_end;
+    return false;
+}
+
+} // namespace
+
 // -----------------------------------------------------------------------------
 // Timestamp Parsing
 // -----------------------------------------------------------------------------
@@ -90,10 +139,10 @@ int64_t CsvLoader::parse_timestamp(const std::string& ts_str) {
                             static_cast<int64_t>(minute) * 60 +
                             static_cast<int64_t>(second);
 
-    // Alpha Vantage timestamps are in US Eastern Time (UTC-5).
-    // Shift to UTC by adding 5 hours.
-    constexpr int64_t ET_UTC_OFFSET_SECONDS = 5 * 3600;
-    epoch_seconds += ET_UTC_OFFSET_SECONDS;
+    // CSV timestamps are in US Eastern local wall-clock time.
+    // Shift to UTC using the correct EST (-5) / EDT (-4) offset for the date.
+    const int64_t offset_hours = is_us_dst(year, month, day) ? 4 : 5;
+    epoch_seconds += offset_hours * 3600;
 
     return epoch_seconds;
 }

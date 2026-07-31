@@ -31,13 +31,10 @@ import {
 //   - Tracks connection status for UI indicator
 // =============================================================================
 
-// In Tauri's webview the Vite proxy is not running, so we must connect
-// directly to the engine on 127.0.0.1. In browser dev mode we use the
-// Vite proxy URL so the /ws path is forwarded correctly.
-const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
-const WS_URL = isTauri
-  ? 'ws://127.0.0.1:9000/ws'
-  : `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws`;
+// Connect straight to the engine's WebSocket endpoint. We do not go through
+// the Vite proxy because the browser preview may serve the page on a
+// different host/port and cannot upgrade the WebSocket handshake itself.
+const WS_URL = 'ws://127.0.0.1:9000/ws';
 
 const INITIAL_RECONNECT_DELAY = 1000;
 const MAX_RECONNECT_DELAY = 16000;
@@ -84,11 +81,24 @@ export function useWebSocket({
   const [connected, setConnected] = useState(false);
   const [reconnecting, setReconnecting] = useState(false);
 
-  const send = useCallback((data: Record<string, unknown>) => {
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+  const sendQueueRef = useRef<Record<string, unknown>[]>([]);
+
+  const flushSendQueue = useCallback(() => {
+    while (
+      wsRef.current &&
+      wsRef.current.readyState === WebSocket.OPEN &&
+      sendQueueRef.current.length > 0
+    ) {
+      const data = sendQueueRef.current.shift()!;
       wsRef.current.send(JSON.stringify(data));
     }
   }, []);
+
+  const send = useCallback((data: Record<string, unknown>) => {
+    console.log('[Orion Diagnostic] WS out', data, { readyState: wsRef.current?.readyState });
+    sendQueueRef.current.push(data);
+    flushSendQueue();
+  }, [flushSendQueue]);
 
   const handleMessage = useCallback(
     (event: MessageEvent) => {
@@ -100,6 +110,7 @@ export function useWebSocket({
       }
 
       const { type, seq, payload } = envelope;
+      console.log('[Orion Diagnostic] WS in', { type, seq, payload });
 
       // Sequence ordering: discard out-of-order messages.
       if (seq <= lastSeqRef.current) {
@@ -110,6 +121,7 @@ export function useWebSocket({
       switch (type) {
         case 'candle_update': {
           const p = payload as CandleUpdatePayload;
+          console.log('[Orion Diagnostic] candle_update', { cursor: p.cursor, total: p.total, timestamp: p.timestamp, close: p.close });
           // Fire direct callback first (bypasses React render cycle) so the
           // chart series.update() / setData() runs synchronously on the WS
           // message event before any React re-render can batch/delay it.
@@ -151,6 +163,7 @@ export function useWebSocket({
 
         case 'session_started': {
           const p = payload as SessionStartedPayload;
+          console.log('[Orion Diagnostic] session_started', { p, hasChart: !!onSessionHistoryRef.current });
           onSessionResetRef.current?.();
           dispatch({ type: 'SESSION_STARTED', payload: p });
           break;
@@ -158,6 +171,7 @@ export function useWebSocket({
 
         case 'session_state': {
           const p = payload as SessionStatePayload;
+          console.log('[Orion Diagnostic] session_state', { candles: p.candles?.length, openPositions: p.open_positions?.length, pendingOrders: p.pending_orders?.length, hasChart: !!onSessionHistoryRef.current });
           // The engine sends the authoritative bar history here (session
           // start, rewind, seek, timeframe change). Push it straight to the
           // chart so it redraws the whole past timeline via setData().
@@ -225,6 +239,7 @@ export function useWebSocket({
       reconnectDelayRef.current = INITIAL_RECONNECT_DELAY;
       lastSeqRef.current = -1;
       dispatch({ type: 'SET_CONNECTED', connected: true });
+      flushSendQueue();
     };
 
     ws.onclose = () => {
@@ -252,7 +267,7 @@ export function useWebSocket({
     };
 
     ws.onmessage = handleMessage;
-  }, [enabled, handleMessage, dispatch]);
+  }, [enabled, handleMessage, dispatch, flushSendQueue]);
 
   useEffect(() => {
     mountedRef.current = true;

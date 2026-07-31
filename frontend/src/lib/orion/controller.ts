@@ -69,6 +69,7 @@ export interface ActivityEvent {
 export interface OrionControllerBridge {
   getState: () => AppState;
   getChartHandle: () => ChartHandle | null;
+  getAvailableTickers?: () => string[];
   send: (cmd: Record<string, unknown>) => void;
   dispatch: (action: AppAction) => void;
   apiBase: string;
@@ -139,6 +140,10 @@ class OrionControllerImpl {
     const tools = listOrionTools('driving')
       .map((t) => `${t.name}: ${t.description}`)
       .join('\n');
+    const availableTickers = this.bridge?.getAvailableTickers?.() ?? [];
+    const tickerList = availableTickers.length > 0
+      ? availableTickers.join(', ')
+      : 'No local market data synced yet.';
     return [
       'You are Orion, the autonomous agent for OpenRewind. You have access to these tools:',
       '',
@@ -147,12 +152,22 @@ class OrionControllerImpl {
       'Current workspace state:',
       renderWorldStateForPrompt(ws),
       '',
+      'Available local data symbols:',
+      tickerList,
+      '',
       'Rules:',
-      '1. Use getWorldState whenever you need current account, positions, or session context.',
-      '2. Use getCandles to load historical candles; it automatically tries nearby weekdays if the date is missing.',
-      '3. Use runStrategy to backtest a strategy before trading it. End-condition guardrails are enforced automatically.',
-      '4. Use setSession to switch symbol/date, placeOrder to open a trade, and closePosition to close one.',
-      '5. When you have enough information, answer without tool calls and summarize concisely.',
+      '1. You are an autonomous agent that PHYSICALLY CONTROLS the OpenRewind workspace. When the user asks you to DO anything (go to a stock, load a symbol, switch symbol/date, run a strategy, trade, play, pause, etc.), you MUST call the appropriate tools. Never answer in prose for action requests.',
+      '2. NAVIGATION vs STRATEGY: distinguish these two request types.',
+      '   - Navigation Only: If the user asks to go to a stock, load a symbol, or change the symbol/date (e.g. "load apple on july 13th"), call setSession ONCE with the symbol and optional date, then STOP. Do not call runLiveStrategy.',
+      '   - Strategy Execution: If the user explicitly asks to run a strategy or model (e.g. "run an EMA cross"), you MUST first call setSession with the symbol and date, wait for the tool result, then call runLiveStrategy with only the strategy name (and any params/endCondition if the user specified them). runLiveStrategy does NOT accept symbol or date.',
+      '3. Use setSession to start/reload the chart. setSession waits for the UI to repaint before returning.',
+      '4. Use runLiveStrategy only on the currently loaded session. It steps the existing chart and places real market orders.',
+      '5. Use runStrategy only when the user explicitly asks for a historical backtest without changing the live session.',
+      '6. Use getWorldState whenever you need current account, positions, or session context.',
+      '7. Use getCandles to load historical candles; it automatically tries nearby weekdays if the date is missing.',
+      '8. Use placeOrder to open a trade and closePosition to close one.',
+      '9. Only call setSession for symbols in the Available local data symbols list. If the user asks for a missing symbol, respond that you do not have local data and suggest 2-3 alternatives from the list. Do not call any trading tools for missing data.',
+      '10. For purely analytical questions (what, why, how, explain, describe, summarize) answer concisely without tool calls.',
     ].join('\n');
   }
 
@@ -303,6 +318,7 @@ class OrionControllerImpl {
       ];
 
       const maxIterations = 8;
+      let toolFailure: string | null = null;
       for (let iter = 0; iter < maxIterations; iter++) {
         if (this.cancelRequested) throw new Error('cancelled');
 
@@ -347,20 +363,43 @@ class OrionControllerImpl {
 
           this.log('tool', `${name}(${JSON.stringify(args).slice(0, 120)})`);
           const result = await invokeOrionTool(name, args, ctx);
+
+          // If a driving tool (e.g. runLiveStrategy) reports it failed, stop
+          // the agent immediately so the LLM cannot follow up with a fake
+          // trade summary. Restore the workspace and exit.
+          if (result && typeof result === 'object' && result.ok === false) {
+            toolFailure = result.error || `Tool ${name} failed`;
+            this.log('error', toolFailure);
+            if (toolFailure && result.posted !== true) {
+              await this.bridge?.postChatMessage?.(toolFailure).catch(() => {});
+            }
+          }
+
           messages.push({
             role: 'tool',
             name,
             tool_name: name,
             content: JSON.stringify(result),
           });
+
+          if (toolFailure) break;
         }
+
+        if (toolFailure) break;
       }
 
       this.setStatus('finalizing');
-      if (this.snapshot) {
-        await this.restoreSnapshot(this.snapshot);
+
+      if (toolFailure) {
+        if (this.snapshot) {
+          await this.restoreSnapshot(this.snapshot);
+        }
+        this.log('info', 'Snapshot restored. Session returned to prior state.');
+        this.setStatus('idle');
+        return { ok: false, reason: toolFailure };
       }
-      this.log('info', 'Snapshot restored. Session returned to prior state.');
+
+      this.log('info', 'Automation complete. Workspace reflects the agent-driven session.');
 
       // Free the 8B model from RAM after a task completes.
       void releaseAgentModel();

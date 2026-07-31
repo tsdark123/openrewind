@@ -71,6 +71,7 @@ std::size_t SessionManager::start_session(const std::string& symbol,
     // Reset playback defaults.
     speed_.store(1);
     timeframe_.store(1);
+    stop_ts_.store(0);
 
     // ---------------------------------------------------------------------
     // Position the playback cursor at the requested start date.
@@ -79,8 +80,8 @@ std::size_t SessionManager::start_session(const std::string& symbol,
     //   Filters the buffer to the CLOSED interval
     //   [09:30:00 ET, 16:00:00 ET] on that calendar date, discarding all
     //   other bars.  Cursor lands at index 0 = market open.
-    //   parse_timestamp() adds +5 h (ET→UTC) internally, so "09:30:00"
-    //   becomes the correct UTC epoch for regular session open.
+    //   parse_timestamp() adds the correct EST/EDT offset internally, so
+    //   "09:30:00" becomes the correct UTC epoch for the session open.
     //   Throws if the day has no data (weekend, holiday, outside the
     //   rolling 30-day window).
     //
@@ -218,6 +219,15 @@ void SessionManager::seek(int64_t target_timestamp) {
     }
 
     buffer_.seek(target_timestamp);
+
+    if (on_candle_advanced_) {
+        CandleAdvancedEvent event{};
+        event.candle        = buffer_.current();
+        event.cursor        = buffer_.cursor();
+        event.total_candles = buffer_.size();
+        event.account       = engine_.snapshot();
+        on_candle_advanced_(event);
+    }
 }
 
 void SessionManager::play() {
@@ -225,12 +235,34 @@ void SessionManager::play() {
         return;
     }
 
+    stop_ts_.store(0);
     playing_.store(true);
+    if (on_playing_changed_) on_playing_changed_(*this, true);
     cv_.notify_one();
+}
+
+void SessionManager::play_until(int64_t stop_timestamp) {
+    if (!active_) {
+        return;
+    }
+
+    stop_ts_.store(stop_timestamp);
+    playing_.store(true);
+    if (on_playing_changed_) on_playing_changed_(*this, true);
+    cv_.notify_one();
+}
+
+void SessionManager::set_stop_timestamp(int64_t stop_timestamp) {
+    stop_ts_.store(stop_timestamp);
+}
+
+void SessionManager::clear_stop_timestamp() {
+    stop_ts_.store(0);
 }
 
 void SessionManager::pause() {
     playing_.store(false);
+    if (on_playing_changed_) on_playing_changed_(*this, false);
     cv_.notify_one();
 }
 
@@ -468,6 +500,11 @@ int64_t SessionManager::end_timestamp() const {
 void SessionManager::set_on_candle_advanced(OnCandleAdvanced callback) {
     std::lock_guard<std::mutex> lock(mutex_);
     on_candle_advanced_ = std::move(callback);
+}
+
+void SessionManager::set_on_playing_changed(OnPlayingChanged callback) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    on_playing_changed_ = std::move(callback);
 }
 
 void SessionManager::set_on_order_filled(MatchingEngine::OnOrderFilled callback) {
@@ -771,14 +808,42 @@ void SessionManager::playback_loop() {
                         playing_.store(false);
                         break;
                     }
+
+                    const int64_t stop = stop_ts_.load();
+                    if (stop > 0 && buffer_.current().timestamp <= stop) {
+                        playing_.store(false);
+                        break;
+                    }
+
                     stepped = rewind_one_locked();
+
+                    if (stepped && stop > 0 && buffer_.current().timestamp <= stop) {
+                        playing_.store(false);
+                        break;
+                    }
                 } else {
                     // Forward playback
+                    const int64_t stop = stop_ts_.load();
                     if (buffer_.at_end()) {
                         playing_.store(false);
                         break;
                     }
+
+                    // Stop guard: if the current candle is already at or past the
+                    // requested stop timestamp, halt playback before advancing.
+                    if (stop > 0 && buffer_.current().timestamp >= stop) {
+                        playing_.store(false);
+                        break;
+                    }
+
                     stepped = advance_one_locked();
+
+                    // After stepping, check again so the last emitted candle is the
+                    // first one at or past the stop timestamp.
+                    if (stepped && stop > 0 && buffer_.current().timestamp >= stop) {
+                        playing_.store(false);
+                        break;
+                    }
                 }
 
                 // Stop if we couldn't step (reached boundary)
@@ -799,6 +864,12 @@ void SessionManager::playback_loop() {
                     return shutdown_.load() || !playing_.load();
                 });
             }
+        }
+
+        // If this thread drove the transition to stopped, fire the callback
+        // outside the lock so server-side state snapshots can't deadlock.
+        if (!shutdown_.load() && on_playing_changed_) {
+            on_playing_changed_(*this, playing_.load());
         }
     }
 }

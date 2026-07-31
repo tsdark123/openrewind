@@ -74,6 +74,10 @@ interface ChartProps {
     atr: boolean;
     stochastic: boolean;
   };
+  /** Authoritative candle history broadcast by the engine. Kept as a prop so
+   *  the chart re-applies history after symbol/timeframe changes even if the
+   *  WS message arrived before the chart instance was ready. */
+  sessionHistory?: CandleData[];
   pendingOrderSL?: number;
   pendingOrderTP?: number;
   onPendingOrderSLChange?: (price: number) => void;
@@ -121,6 +125,7 @@ export const Chart = forwardRef<ChartHandle, ChartProps>(function Chart({
   chartLocked = false,
   onClearAll,
   lightMode = false,
+  sessionHistory = [],
 }, ref) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -444,6 +449,38 @@ export const Chart = forwardRef<ChartHandle, ChartProps>(function Chart({
     if (lockToEdge) chartRef.current?.timeScale().scrollToPosition(2, false);
   }, [lightMode, toLWC, lockToEdge]);
 
+  // --- Internal helper: replace the chart's entire candle history ---
+  const setHistory = useCallback((incoming: CandleData[]) => {
+    // Guarantee strictly-ascending, unique timestamps — lightweight-charts
+    // silently misbehaves (overwrites one bar in place) otherwise.
+    const clean = [...incoming]
+      .sort((a, b) => a.timestamp - b.timestamp)
+      .filter((c, i, arr) => i === 0 || c.timestamp !== arr[i - 1].timestamp);
+
+    candleHistoryRef.current = clean;
+    indicatorCacheRef.current.clear();
+    // Track the very first bar for the boundary marker + scroll lock.
+    historyStartRef.current = clean[0]?.timestamp ?? null;
+    // Advance the marker cutoff to the last bar so we see all markers
+    // that fall on or before the new frontier (handles rewind correctly).
+    markerCutoffRef.current = clean[clean.length - 1]?.timestamp ?? Infinity;
+    applyHistory(clean);
+
+    // Only auto-fit the very first time we get data for a session, so
+    // later resyncs (order fills, etc.) don't yank the user's zoom/pan.
+    if (clean.length > 0 && !hasFittedRef.current) {
+      hasFittedRef.current = true;
+      chartRef.current?.timeScale().fitContent();
+    }
+    setHistoryVersion((v) => v + 1);
+    setMarkerVersion((v) => v + 1);
+  }, [applyHistory]);
+
+  // --- Re-apply history whenever the parent receives a fresh session_state ---
+  useEffect(() => {
+    setHistory(sessionHistory);
+  }, [sessionHistory, setHistory]);
+
   // --- Expose imperative handle for direct chart updates from WS callback ---
   useImperativeHandle(ref, () => ({
     resetChart() {
@@ -462,31 +499,7 @@ export const Chart = forwardRef<ChartHandle, ChartProps>(function Chart({
 
     // Authoritative history from the engine (session start, rewind, seek,
     // timeframe change). Always a full redraw via setData().
-    setHistory(incoming: CandleData[]) {
-      // Guarantee strictly-ascending, unique timestamps — lightweight-charts
-      // silently misbehaves (overwrites one bar in place) otherwise.
-      const clean = [...incoming]
-        .sort((a, b) => a.timestamp - b.timestamp)
-        .filter((c, i, arr) => i === 0 || c.timestamp !== arr[i - 1].timestamp);
-
-      candleHistoryRef.current = clean;
-      indicatorCacheRef.current.clear();
-      // Track the very first bar for the boundary marker + scroll lock.
-      historyStartRef.current = clean[0]?.timestamp ?? null;
-      // Advance the marker cutoff to the last bar so we see all markers
-      // that fall on or before the new frontier (handles rewind correctly).
-      markerCutoffRef.current = clean[clean.length - 1]?.timestamp ?? Infinity;
-      applyHistory(clean);
-
-      // Only auto-fit the very first time we get data for a session, so
-      // later resyncs (order fills, etc.) don't yank the user's zoom/pan.
-      if (clean.length > 0 && !hasFittedRef.current) {
-        hasFittedRef.current = true;
-        chartRef.current?.timeScale().fitContent();
-      }
-      setHistoryVersion((v) => v + 1);
-      setMarkerVersion((v) => v + 1);
-    },
+    setHistory,
 
     // Snapshot slice of the chart's internal history buffer. Never returns
     // the live ref array — always a copy — so callers can safely mutate the

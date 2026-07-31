@@ -25,6 +25,7 @@ import type { ChartHandle } from '../../components/Chart';
 import { runStrategy as executeStrategy, getStrategy, num, ema, sma, stddev, atr, rangeOf } from './strategies';
 import type { EndCondition, StrategyResult } from './strategies';
 import type { Position, Side } from '../../types';
+import { flushSync } from 'react-dom';
 
 // -----------------------------------------------------------------------------
 // Tool dispatcher context — everything a tool might need, threaded through so
@@ -57,6 +58,9 @@ export interface OrionToolResult<T = unknown> {
   ok: boolean;
   data?: T;
   error?: string;
+  /** If true, the tool already displayed the error to the user; the controller
+   *  should not post it again. */
+  posted?: boolean;
 }
 
 export interface OrionToolDefinition<TArgs = unknown, TResult = unknown> {
@@ -201,7 +205,11 @@ export async function fetchCandles(
   if (!first.ok) {
     throw new Error(`Engine returned ${first.status}`);
   }
-  if (!first.body.missing) return first.body;
+  if (!first.body.missing && first.body.candles.length > 0) return first.body;
+
+  // The engine can return missing: false with an empty list when the date
+  // filter matches no rows. Treat that as missing so callers fall back/notify.
+  first.body.missing = true;
 
   // No date filter means the engine already tried the full history and failed.
   if (!args.date) return first.body;
@@ -520,8 +528,7 @@ registerOrionTool<SetSessionArgs, { symbol: string; date: string; totalCandles: 
   description:
     "Starts a new replay session for the requested symbol and date. If the " +
     "date is not available, tries the previous weekdays and reports the " +
-    "fallback date used. This changes the user's chart/workspace; the " +
-    "automation driver will restore the prior session at task end.",
+    "fallback date used. This changes the user's chart/workspace.",
   parameters: {
     type: 'object',
     properties: {
@@ -556,9 +563,47 @@ registerOrionTool<SetSessionArgs, { symbol: string; date: string; totalCandles: 
         const text = await res.text();
         return { ok: false, error: `Engine start failed (${res.status}): ${text}` };
       }
-      const body = (await res.json()) as { total_candles?: number };
-      // Let the WS session_started/session_state messages reach the reducer.
-      await new Promise((r) => setTimeout(r, 600));
+      const body = (await res.json()) as {
+        session_id?: string;
+        total_candles?: number;
+        start_ts?: number;
+        end_ts?: number;
+        start_date?: string;
+        start_cursor?: number;
+      };
+
+      // Directly drive the React reducer so the workspace re-renders even if
+      // the WebSocket message is dropped or processed before the chart mounts.
+      // Force React to commit the new symbol/date state synchronously on the
+      // main UI thread — this is the exact global state mutation used by the
+      // Toolbar dropdown. Without flushSync the update can sit batched while the
+      // agent loop races ahead.
+      flushSync(() => {
+        if (ctx.dispatch) {
+          ctx.dispatch({
+            type: 'SESSION_STARTED',
+            payload: {
+              session_id: body.session_id ?? '1',
+              symbol: args.symbol,
+              total_candles: body.total_candles ?? 0,
+              start_ts: body.start_ts ?? 0,
+              end_ts: body.end_ts ?? 0,
+              start_date: body.start_date ?? sessionDate,
+              start_cursor: body.start_cursor ?? 0,
+            },
+          });
+          ctx.dispatch({
+            type: 'SET_REPLAY_DATE',
+            date: body.start_date ?? sessionDate,
+          });
+        }
+
+        // Wipe old candles so waitForChartReady cannot see stale Netflix history.
+        ctx.chartRef?.current?.resetChart();
+      });
+
+      // Traffic Cop: do not let the next tool run until the chart has painted.
+      await waitForChartReady(ctx, args.symbol);
       return {
         ok: true,
         data: {
@@ -852,21 +897,24 @@ function getLiveSignal(
 
 async function waitForNextCandle(
   ctx: OrionRuntimeContext,
-  timeoutMs = 1500
+  timeoutMs = 3000
 ): Promise<CandleData | null> {
   if (!ctx.send) return null;
   const startCursor = ctx.getState?.().cursor ?? ctx.state.cursor;
+  const startCandle = ctx.chartRef?.current?.getRecentCandles(1)?.[0];
+  const startTs = startCandle?.timestamp ?? 0;
   ctx.send({ cmd: 'next_candle' });
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     await new Promise((r) => setTimeout(r, 50));
     const state = ctx.getState?.();
-    if (state && state.cursor > startCursor) {
-      const c = ctx.chartRef?.current?.getRecentCandles(1)?.[0];
-      if (c) return c;
+    const latest = ctx.chartRef?.current?.getRecentCandles(1)?.[0];
+    if (state && state.cursor > startCursor && latest && latest.timestamp > startTs) {
+      return latest;
     }
   }
-  return ctx.chartRef?.current?.getRecentCandles(1)?.[0] ?? null;
+  console.warn('[Orion] waitForNextCandle timeout at cursor', ctx.getState?.().cursor);
+  return null;
 }
 
 async function waitForPosition(
@@ -882,6 +930,42 @@ async function waitForPosition(
     if (pos) return pos;
   }
   return null;
+}
+
+async function waitForChartReady(
+  ctx: OrionRuntimeContext,
+  expectedSymbol: string
+): Promise<void> {
+  const HARD_TIMEOUT_MS = 3000;
+  const start = Date.now();
+  while (Date.now() - start < HARD_TIMEOUT_MS) {
+    await new Promise((r) => setTimeout(r, 50));
+    const state = ctx.getState?.() ?? ctx.state;
+    const candles = ctx.chartRef?.current?.getRecentCandles(1) ?? [];
+    const symbolLoaded = state.symbol?.toUpperCase() === expectedSymbol.toUpperCase();
+    const hasData = state.sessionActive && state.totalCandles > 0;
+    const hasCandles = candles.length > 0;
+    console.log('[Orion Diagnostic] waitForChartReady tick', { expectedSymbol, symbol: state.symbol, sessionActive: state.sessionActive, totalCandles: state.totalCandles, chartCandles: candles.length });
+    if (symbolLoaded && hasData && hasCandles) {
+      // Wait one paint frame so lightweight-charts physically draws the bars,
+      // but never hang if the display loop is paused/backgrounded.
+      if (typeof requestAnimationFrame === 'function') {
+        await Promise.race([
+          new Promise((resolve) => requestAnimationFrame(resolve)),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('requestAnimationFrame timed out')), 250)),
+        ]).catch(() => {
+          console.warn('[Orion] waitForChartReady requestAnimationFrame did not fire; continuing.');
+        });
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      return;
+    }
+  }
+  const state = ctx.getState?.() ?? ctx.state;
+  console.error('[Orion Crash Debug]', { expectedSymbol, actualSymbol: state.symbol, sessionActive: state.sessionActive, totalCandles: state.totalCandles, chartCandles: ctx.chartRef?.current?.getRecentCandles(1)?.length });
+  throw new Error(
+    `waitForChartReady timeout: expected ${expectedSymbol}, found ${state.symbol || '(none)'}. sessionActive=${state.sessionActive} totalCandles=${state.totalCandles}`
+  );
 }
 
 function formatMoney(n: number): string {
@@ -961,10 +1045,11 @@ registerOrionTool<
 >({
   name: 'runLiveStrategy',
   description:
-    'Runs a strategy against the live replay session, stepping one candle at a ' +
-    'time and placing real market orders with stop-loss and take-profit. The ' +
-    'session must already be loaded; use setSession first if needed. End-condition ' +
-    'guardrails are enforced so the run cannot go on indefinitely.',
+    'Runs a strategy against the live replay session that is already loaded. ' +
+    'Steps one candle at a time and places real market orders with stop-loss ' +
+    'and take-profit. The chart must already be set via setSession before ' +
+    'calling this tool. End-condition guardrails are enforced so the run ' +
+    'cannot continue indefinitely.',
   parameters: {
     type: 'object',
     properties: {
@@ -993,6 +1078,16 @@ registerOrionTool<
   execute: async (args, ctx) => {
     if (!ctx.send) return { ok: false, error: 'No WebSocket send bridge.' };
     if (!ctx.getState) return { ok: false, error: 'State accessor not available.' };
+
+    const symbol = ctx.getState().symbol;
+    if (!symbol || !ctx.getState().sessionActive) {
+      return { ok: false, error: 'No active chart session. Call setSession first.' };
+    }
+
+    console.log('[Orion Diagnostic] runLiveStrategy start', { args, state: ctx.getState() });
+
+    // Traffic Cop: ensure the chart is painted before stepping.
+    await waitForChartReady(ctx, symbol);
 
     // Halt any auto-play so we control the stepping.
     ctx.send({ cmd: 'pause' });
@@ -1037,13 +1132,12 @@ registerOrionTool<
     };
     refreshPosition();
 
-    while (true) {
-      if (ctx.getState!().cursor >= (ctx.getState!().totalCandles - 1)) {
+    const maxSteps = merged.maxBars ?? 100;
+    for (let step = 0; step < maxSteps; step++) {
+      const state = ctx.getState!();
+      console.log('[Orion Diagnostic] runLiveStrategy step', { step, cursor: state.cursor, totalCandles: state.totalCandles, historyLength: history.length, currentPosition, chartCandles: ctx.chartRef?.current?.getRecentCandles(1)?.length });
+      if (state.cursor >= state.totalCandles - 1) {
         endReason = 'end-of-data';
-        break;
-      }
-      if (merged.maxBars !== undefined && bars >= merged.maxBars) {
-        endReason = 'max-bars';
         break;
       }
       if (merged.maxTrades !== undefined && trades >= merged.maxTrades) {
@@ -1056,6 +1150,7 @@ registerOrionTool<
       }
 
       const signal = getLiveSignal(args.name, history, args.params ?? {}, currentPosition);
+      console.log('[Orion Diagnostic] runLiveStrategy signal', { step, cursor: state.cursor, action: signal.action, bars, currentPosition, signal });
 
       if (signal.action === 'close' && currentPosition) {
         await invokeOrionTool('closePosition', { position_id: currentPosition.id }, ctx);
@@ -1079,8 +1174,10 @@ registerOrionTool<
       }
 
       const next = await waitForNextCandle(ctx);
+      console.log('[Orion Diagnostic] waitForNextCandle result', { next: next ? { timestamp: next.timestamp, close: next.close } : null, step, cursor: state.cursor, chartCandles: ctx.chartRef?.current?.getRecentCandles(1)?.length });
       if (!next) {
-        endReason = 'end-of-data';
+        endReason = 'candle-timeout';
+        console.error('[Orion Diagnostic] candle timeout at step', step, 'cursor', state.cursor);
         break;
       }
       history.push(next);
@@ -1118,7 +1215,6 @@ registerOrionTool<
     );
 
     await ctx.postChatMessage?.(report.markdown);
-    await ctx.restoreSnapshot?.();
 
     return {
       ok: true,

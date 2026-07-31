@@ -1,8 +1,8 @@
 // =============================================================================
 // OrionDrivingOverlay — Transparent "glass" lock layer + status pill.
 //
-// Mounts as `position: fixed; inset: 0` at the App root whenever the
-// OrionController is driving. Purpose:
+// Mounts as `position: absolute; inset: 0` inside the chart container
+// whenever the OrionController is driving. Purpose:
 //
 //   - Block accidental clicks and keyboard shortcuts on the workspace while
 //     Orion is executing an autonomous task. Chart itself stays visible so
@@ -42,10 +42,10 @@ export function OrionDrivingOverlay({ visible, activityLine }: OrionDrivingOverl
 
   return (
     <div
-      // Full-viewport transparent trap. `pointer-events: auto` blocks
-      // clicks; z-index sits above every workspace panel but below any
-      // future modal we'd want to remain accessible.
-      className="pointer-events-auto fixed inset-0 z-[9998] cursor-not-allowed"
+      // Chart-area glass layer. `pointer-events: none` keeps the visual
+      // overlay over the canvas without intercepting clicks on the toolbar,
+      // symbol input, sidebar, or any header menus.
+      className="pointer-events-none absolute inset-0 z-20"
       // No click handler — swallowing pointer events is enough. We keep
       // the layer visually transparent so the chart & animations stay
       // fully readable.

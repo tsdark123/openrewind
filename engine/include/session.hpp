@@ -44,6 +44,11 @@ struct CandleAdvancedEvent {
     AccountSnapshot account;     // Account state after matching
 };
 
+// Callback fired whenever play/pause state changes (including when auto-play
+// hits the end of data or a requested stop timestamp).
+class SessionManager;
+using OnPlayingChanged = std::function<void(SessionManager&, bool)>;
+
 class SessionManager {
 public:
     using OnCandleAdvanced = std::function<void(const CandleAdvancedEvent&)>;
@@ -95,6 +100,14 @@ public:
     // Start auto-play: the background thread advances candles at the
     // configured speed until paused or the data ends.
     void play();
+
+    // Start auto-play and stop when the cursor reaches or passes the given
+    // timestamp.  Passing 0 (or calling play()) disables the stop guard.
+    void play_until(int64_t stop_timestamp);
+
+    // Set/clear the timestamp guard used by play_until().
+    void set_stop_timestamp(int64_t stop_timestamp);
+    void clear_stop_timestamp();
 
     // Pause auto-play.
     void pause();
@@ -174,6 +187,7 @@ public:
     // -------------------------------------------------------------------------
 
     void set_on_candle_advanced(OnCandleAdvanced callback);
+    void set_on_playing_changed(OnPlayingChanged callback);
 
     // These are forwarded directly to the MatchingEngine.
     void set_on_order_filled(MatchingEngine::OnOrderFilled callback);
@@ -187,10 +201,11 @@ private:
     bool           active_ = false;
 
     // --- Playback State ---
-    std::atomic<bool> playing_{false};
-    std::atomic<int>  speed_{1};        // candles per second
-    std::atomic<int>  timeframe_{1};    // aggregation minutes
-    std::atomic<int>  direction_{0};    // 0 = forward, 1 = backward
+    std::atomic<bool>     playing_{false};
+    std::atomic<int>      speed_{1};        // candles per second
+    std::atomic<int>      timeframe_{1};    // aggregation minutes
+    std::atomic<int>      direction_{0};    // 0 = forward, 1 = backward
+    std::atomic<int64_t>  stop_ts_{0};      // 0 = disabled; play_until stops here
 
     // --- Background Playback Thread ---
     std::thread             playback_thread_;
@@ -200,6 +215,7 @@ private:
 
     // --- Event Callbacks ---
     OnCandleAdvanced                   on_candle_advanced_;
+    OnPlayingChanged                   on_playing_changed_;
     MatchingEngine::OnOrderFilled      on_order_filled_;
     MatchingEngine::OnPositionClosed   on_position_closed_;
 

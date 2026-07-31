@@ -155,6 +155,8 @@ export interface SessionStartedPayload {
   total_candles: number;
   start_ts: number;
   end_ts: number;
+  start_date?: string;
+  start_cursor?: number;
 }
 
 export interface SessionStatePayload {

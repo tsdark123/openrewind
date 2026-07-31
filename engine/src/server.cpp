@@ -80,11 +80,12 @@ void OpenRewindServer::start_ingest_worker() {
         constexpr auto INTERVAL = std::chrono::minutes(30);
 
         std::cout << "[OpenRewind] auto-ingest worker started — kicking off "
-                     "initial fetch_data.py --mode append\n";
+                     "initial fetch_data.py --mode full\n";
 
-        // Initial kickoff so a fresh boot has the latest bars before the
-        // first user lands. Runs synchronously on the worker thread.
-        int rc0 = std::system("python scripts/fetch_data.py --mode append");
+        // Initial kickoff: fetch the full rolling 30-day window every time the
+        // engine boots, so the user can pick any date in the last month. The
+        // 30-minute periodic ticks stay on append mode to keep it fast.
+        int rc0 = std::system("python scripts/fetch_data.py --mode full");
         if (rc0 != 0) {
             std::cerr << "[OpenRewind] ingest worker: initial fetch_data.py "
                          "exited with " << rc0 << " (continuing)\n";
@@ -567,6 +568,12 @@ void OpenRewindServer::setup_websocket() {
 
 void OpenRewindServer::wire_event_callbacks() {
 
+    // On play/pause change: broadcast session_state.
+    session_.set_on_playing_changed(
+        [this](SessionManager& /*session*/, bool /*is_playing*/) {
+            broadcast("session_state", build_full_state());
+        });
+
     // On candle advance (manual or auto-play): broadcast candle_update.
     session_.set_on_candle_advanced(
         [this](const CandleAdvancedEvent& event) {
@@ -648,6 +655,37 @@ void OpenRewindServer::handle_ws_command(crow::websocket::connection& conn,
 
     std::string command = cmd["cmd"].get<std::string>();
 
+    // --- set_symbol ---
+    // Allows an Orion tool to initialize a session directly over the WS
+    // connection instead of round-tripping through the REST start endpoint.
+    if (command == "set_symbol") {
+        if (!cmd.contains("symbol")) {
+            send_to(conn, "error", {{"message", "set_symbol requires 'symbol' field"}});
+            return;
+        }
+        try {
+            std::string symbol = cmd["symbol"].get<std::string>();
+            double starting_balance = cmd.value("starting_balance", 100000.0);
+            std::string start_date = cmd.value("start_date", "");
+            std::string data_dir = cmd.value("data_dir", data_dir_);
+            std::size_t total = session_.start_session(symbol, starting_balance, data_dir, start_date);
+            json response = {
+                {"session_id",     "1"},
+                {"symbol",         symbol},
+                {"total_candles",  total},
+                {"start_ts",       session_.start_timestamp()},
+                {"end_ts",         session_.end_timestamp()},
+                {"start_date",     start_date},
+                {"start_cursor",   session_.cursor()}
+            };
+            broadcast("session_started", response);
+            broadcast("session_state", build_full_state());
+        } catch (const std::exception& e) {
+            send_to(conn, "error", {{"message", e.what()}});
+        }
+        return;
+    }
+
     if (!session_.is_active() && command != "ping") {
         send_to(conn, "error", {{"message", "No active session"}});
         return;
@@ -686,9 +724,26 @@ void OpenRewindServer::handle_ws_command(crow::websocket::connection& conn,
         send_to(conn, "session_state", state);
     }
 
-    // --- play ---
+    // --- play / play_until ---
+    // Optional fields: speed, direction, until (epoch seconds).
+    // If 'until' is present, playback halts when the cursor reaches/passes it.
     else if (command == "play") {
-        session_.play();
+        if (cmd.contains("speed")) {
+            session_.set_speed(cmd["speed"].get<int>());
+        }
+        if (cmd.contains("direction")) {
+            std::string dir_str = cmd["direction"].get<std::string>();
+            if (dir_str == "forward") {
+                session_.set_direction(PlayDirection::Forward);
+            } else if (dir_str == "backward") {
+                session_.set_direction(PlayDirection::Backward);
+            }
+        }
+        if (cmd.contains("until")) {
+            session_.play_until(cmd["until"].get<int64_t>());
+        } else {
+            session_.play();
+        }
     }
 
     // --- pause ---
@@ -704,6 +759,10 @@ void OpenRewindServer::handle_ws_command(crow::websocket::connection& conn,
         }
         int speed = cmd["speed"].get<int>();
         session_.set_speed(speed);
+
+        // Reflect the new speed in the UI immediately.
+        json state = build_full_state();
+        send_to(conn, "session_state", state);
     }
 
     // --- set_direction ---
@@ -723,6 +782,10 @@ void OpenRewindServer::handle_ws_command(crow::websocket::connection& conn,
             return;
         }
         session_.set_direction(dir);
+
+        // Reflect the new direction in the UI immediately.
+        json state = build_full_state();
+        send_to(conn, "session_state", state);
     }
 
     // --- set_timeframe ---

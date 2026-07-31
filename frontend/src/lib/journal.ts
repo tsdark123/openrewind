@@ -32,11 +32,15 @@ export const MONTH_NAMES = [
 export const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 
 function isTauri(): boolean {
-  return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+  const win = typeof window !== 'undefined' ? window as any : undefined;
+  const tauri = win?.__TAURI__?.core ?? win?.__TAURI_INTERNALS__;
+  return typeof tauri?.invoke === 'function';
 }
 
 function invoke(cmd: string, args?: Record<string, unknown>): Promise<unknown> {
-  const tauri = (window as any).__TAURI_INTERNALS__;
+  const win = window as any;
+  const tauri = win.__TAURI__?.core ?? win.__TAURI_INTERNALS__;
+  if (typeof tauri?.invoke !== 'function') throw new Error('Tauri runtime not available');
   return tauri.invoke(cmd, args);
 }
 

@@ -41,11 +41,15 @@ interface ToolbarProps {
   onOpenCalendar?: () => void;
   orionOpen?: boolean;
   onToggleOrion?: () => void;
+  /** Inline error for the symbol picker, shown below the input. */
+  error?: string;
 }
 
-export function Toolbar({ symbol, availableTickers, onSymbolChange, replayDate, onDateChange, timeframe, lockToEdge, showMarkers, lightMode, indicators, onSetTimeframe, onToggleLock, onToggleMarkers, onToggleLightMode, onToggleIndicator, onReset, onOpenCalendar, orionOpen, onToggleOrion }: ToolbarProps) {
+export function Toolbar({ symbol, availableTickers, onSymbolChange, replayDate, onDateChange, timeframe, lockToEdge, showMarkers, lightMode, indicators, onSetTimeframe, onToggleLock, onToggleMarkers, onToggleLightMode, onToggleIndicator, onReset, onOpenCalendar, orionOpen, onToggleOrion, error }: ToolbarProps) {
   const [indicatorsDropdownOpen, setIndicatorsDropdownOpen] = useState(false);
   const [calendarOpen, setCalendarOpen] = useState(false);
+
+  console.log('[Orion Diagnostic] Toolbar render', { symbol, availableTickers: availableTickers.length, replayDate, lightMode, orionOpen });
 
   // Rolling 30-day window — matches the yfinance data retention in fetch_data.py.
   const { todayStr, minDateStr } = useMemo(() => {
@@ -67,9 +71,10 @@ export function Toolbar({ symbol, availableTickers, onSymbolChange, replayDate, 
             tickers={availableTickers}
             value={symbol}
             onCommit={onSymbolChange}
-            placeholder="SYMBOL"
+            placeholder="Search symbols…"
             size="sm"
             lightMode={lightMode}
+            error={error}
           />
         </div>
 
@@ -77,7 +82,7 @@ export function Toolbar({ symbol, availableTickers, onSymbolChange, replayDate, 
             the session filtered to core market hours (09:30–16:00 ET) for
             that exact calendar date. Controls stay locked until a date is
             chosen for the current ticker. */}
-        <div className="relative flex items-center gap-1">
+        <div className="relative z-30 flex items-center gap-1">
           <CalendarDays className={`h-3.5 w-3.5 flex-shrink-0 ${lightMode ? 'text-gray-400' : 'text-[#4c525e]'}`} />
           <button
             type="button"
