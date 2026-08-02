@@ -73,6 +73,8 @@ export interface OrionControllerBridge {
   send: (cmd: Record<string, unknown>) => void;
   dispatch: (action: AppAction) => void;
   apiBase: string;
+  // Local Data directory passed to engine calls. Managed mode omits it.
+  dataDir?: string;
   /**
    * Appends a text message to the currently-active Orion chat thread.
    * The controller uses this to publish "Orion is planning…", the plan
@@ -236,14 +238,18 @@ class OrionControllerImpl {
     // engine wipes and reseeds candles identically to a manual switch.
     if (snap.symbol && snap.date) {
       try {
+        const dataDir = this.bridge?.dataDir;
         await fetch(`${apiBase}/api/session/start`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            symbol: snap.symbol,
-            starting_balance: snap.balance > 0 ? snap.balance : 100000,
-            start_date: snap.date,
-          }),
+          body: JSON.stringify(
+            {
+              symbol: snap.symbol,
+              starting_balance: snap.balance > 0 ? snap.balance : 100000,
+              start_date: snap.date,
+              ...(dataDir ? { data_dir: dataDir } : {}),
+            }
+          ),
         });
       } catch (e) {
         this.log('error', `Session restore failed: ${e instanceof Error ? e.message : String(e)}`);
@@ -298,6 +304,7 @@ class OrionControllerImpl {
         performanceLog: this.bridge.getState().performanceLog,
         threads,
         apiBase: this.bridge.apiBase,
+        dataDir: this.bridge.dataDir,
         send: this.bridge.send,
         dispatch: this.bridge.dispatch,
         getState: () => this.bridge!.getState(),

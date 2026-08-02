@@ -12,6 +12,7 @@
     "tauri:build": "cd .. && pnpm tauri build"
   },
   "dependencies": {
+    "@tauri-apps/plugin-dialog": "^2.2.0",
     "@tauri-apps/plugin-http": "^2.5.9",
     "lightweight-charts": "^4.2.1",
     "lightweight-charts-drawing": "^0.1.1",
@@ -28,6 +29,7 @@
     "autoprefixer": "^10.4.20",
     "postcss": "^8.4.49",
     "tailwindcss": "^3.4.16",
+    "tailwindcss-animate": "^1.0.7",
     "typescript": "^5.6.3",
     "vite": "^6.0.3"
   }

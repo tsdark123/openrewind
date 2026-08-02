@@ -26,6 +26,7 @@ import { runStrategy as executeStrategy, getStrategy, num, ema, sma, stddev, atr
 import type { EndCondition, StrategyResult } from './strategies';
 import type { Position, Side } from '../../types';
 import { flushSync } from 'react-dom';
+import { sessionStartBody } from '../engine';
 
 // -----------------------------------------------------------------------------
 // Tool dispatcher context — everything a tool might need, threaded through so
@@ -43,6 +44,9 @@ export interface OrionRuntimeContext {
   // In Tauri builds the engine is on 127.0.0.1:9000; in browser dev mode
   // the empty string routes through the Vite proxy. Mirrors App.tsx.
   apiBase: string;
+  // Optional: explicit data directory used only in Local Data mode. Managed
+  // mode leaves this undefined so the engine uses its default directory.
+  dataDir?: string;
   // Write / session tools need these to control the live engine/redux state.
   send?: (cmd: Record<string, unknown>) => void;
   dispatch?: (action: AppAction) => void;
@@ -156,11 +160,13 @@ registerOrionTool<Record<string, never>, WorldState>({
   },
 });
 
-interface GetCandlesArgs {
+export interface GetCandlesArgs {
   symbol: string;
   date?: string;
   timeframe?: number;
   limit?: number;
+  // Local Data root passed to the engine as data_dir. Managed mode omits it.
+  dataDir?: string;
 }
 
 interface GetCandlesResult {
@@ -191,6 +197,7 @@ export async function fetchCandles(
     if (date) p.set('date', date);
     if (args.timeframe) p.set('timeframe', String(args.timeframe));
     if (args.limit) p.set('limit', String(args.limit));
+    if (args.dataDir) p.set('data_dir', args.dataDir);
     return p;
   };
 
@@ -265,7 +272,7 @@ registerOrionTool<GetCandlesArgs, GetCandlesResult>({
   mode: 'both',
   execute: async (args, ctx) => {
     try {
-      const body = await fetchCandles(args, ctx.apiBase);
+      const body = await fetchCandles({ ...args, dataDir: ctx.dataDir }, ctx.apiBase);
       return { ok: true, data: body };
     } catch (e) {
       return { ok: false, error: e instanceof Error ? e.message : String(e) };
@@ -542,7 +549,7 @@ registerOrionTool<SetSessionArgs, { symbol: string; date: string; totalCandles: 
   mode: 'driving',
   execute: async (args, ctx) => {
     const candleRes = await fetchCandles(
-      { symbol: args.symbol, date: args.date, timeframe: 1, limit: 1 },
+      { symbol: args.symbol, date: args.date, timeframe: 1, limit: 1, dataDir: ctx.dataDir },
       ctx.apiBase
     );
     if (candleRes.missing) {
@@ -553,11 +560,12 @@ registerOrionTool<SetSessionArgs, { symbol: string; date: string; totalCandles: 
       const res = await fetch(`${ctx.apiBase}/api/session/start`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          symbol: args.symbol,
-          start_date: sessionDate,
-          starting_balance: args.starting_balance ?? 100000,
-        }),
+        body: JSON.stringify(
+          sessionStartBody(
+            { symbol: args.symbol, start_date: sessionDate, starting_balance: args.starting_balance ?? 100000 },
+            ctx.dataDir
+          )
+        ),
       });
       if (!res.ok) {
         const text = await res.text();

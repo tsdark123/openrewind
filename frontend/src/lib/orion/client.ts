@@ -10,10 +10,11 @@
 //             let Ollama unload it (default 5m TTL) — we don't pin it in RAM
 //             indefinitely because that murders low-VRAM laptops.
 //
-// The client is deliberately transport-agnostic: in Tauri we call Ollama's
-// HTTP endpoint through `@tauri-apps/plugin-http` (bypasses CORS + webview
-// networking quirks); in browser dev mode we fall back to the standard
-// fetch API. `orionChat` picks the right one automatically.
+// The client is deliberately transport-agnostic: in Tauri it calls the Ollama
+// HTTP endpoint directly at 127.0.0.1:11434 through `@tauri-apps/plugin-http`
+// (bypasses CORS + webview networking quirks). In browser dev mode the same
+// requests are routed through the Vite proxy at `/ollama` so CORS and
+// OLLAMA_ORIGINS are not an issue. `orionChat` picks the right one automatically.
 // =============================================================================
 
 import { fetch as tauriFetch } from '@tauri-apps/plugin-http';
@@ -64,18 +65,34 @@ export interface OrionChatResponse {
   raw: unknown;
 }
 
-function isTauri(): boolean {
+export function isTauri(): boolean {
   if (typeof window === 'undefined') return false;
   const win = window as any;
   const tauri = win.__TAURI__?.core ?? win.__TAURI_INTERNALS__;
   return typeof tauri?.invoke === 'function';
 }
 
+export function getOllamaBaseUrl(): string {
+  return isTauri() ? 'http://127.0.0.1:11434' : '/ollama';
+}
+
 async function ollamaFetch(path: string, init: RequestInit): Promise<Response> {
-  const url = `http://localhost:11434${path}`;
-  return isTauri()
-    ? tauriFetch(url, init as any)
-    : fetch(url, init);
+  const url = `${getOllamaBaseUrl()}${path}`;
+  return isTauri() ? tauriFetch(url, init as any) : fetch(url, init);
+}
+
+function ollamaFetchWithTimeout(path: string, init: RequestInit, ms: number, reason: string): Promise<Response> {
+  const controller = new AbortController();
+  return new Promise((resolve, reject) => {
+    const id = setTimeout(() => {
+      controller.abort();
+      reject(new Error(reason));
+    }, ms);
+    ollamaFetch(path, { ...init, signal: controller.signal }).then(
+      (r) => { clearTimeout(id); resolve(r); },
+      (e) => { clearTimeout(id); reject(e); }
+    );
+  });
 }
 
 /**
@@ -88,18 +105,28 @@ async function ollamaFetch(path: string, init: RequestInit): Promise<Response> {
  */
 const ensuredModels = new Set<string>();
 
-async function ensureModel(model: string): Promise<{ ready: boolean; error?: string }> {
+const OLLAMA_CHECK_TIMEOUT = 5000;
+
+export async function ensureModel(model: string): Promise<{ ready: boolean; error?: string }> {
   if (ensuredModels.has(model)) return { ready: true };
+
+  console.log('[orion-client] runtime:', isTauri() ? 'tauri' : 'browser', 'baseUrl:', getOllamaBaseUrl(), 'ensureModel:', model);
 
   // /api/show is cheap: it 200s when the model exists, 404s otherwise.
   try {
-    const res = await ollamaFetch('/api/show', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: model }),
-    });
+    const res = await ollamaFetchWithTimeout(
+      '/api/show',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: model }),
+      },
+      OLLAMA_CHECK_TIMEOUT,
+      'Ollama is not responding'
+    );
     if (res.ok) {
       ensuredModels.add(model);
+      console.log('[orion-client] ensureModel result:', { model, ready: true });
       return { ready: true };
     }
     if (res.status !== 404) {
@@ -117,15 +144,22 @@ async function ensureModel(model: string): Promise<{ ready: boolean; error?: str
  * reported through the optional callback so the UI can render a status
  * chip (the agent-mode boot indicator).
  */
+const OLLAMA_PULL_CONNECT_TIMEOUT = 10000;
+
 export async function pullOrionModel(
   model: string,
   onProgress?: (percent: number, status: string) => void
 ): Promise<void> {
-  const res = await ollamaFetch('/api/pull', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name: model, stream: true }),
-  });
+  const res = await ollamaFetchWithTimeout(
+    '/api/pull',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: model, stream: true }),
+    },
+    OLLAMA_PULL_CONNECT_TIMEOUT,
+    'Ollama is not responding'
+  );
   if (!res.ok || !res.body) {
     throw new Error(`Ollama /api/pull ${res.status}`);
   }

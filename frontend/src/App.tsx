@@ -9,12 +9,14 @@ import { PlaybackControls } from './components/layout/PlaybackControls';
 import { OrderPanel } from './components/layout/OrderPanel';
 import { TradeHistoryDrawer } from './components/layout/TradeHistoryDrawer';
 import { TradingCalendar } from './components/calendar/TradingCalendar';
-import { OrionChatSidepanel } from './components/ui/ai-chat';
+import { OrionTerminal } from './components/ui/orion-terminal';
 import { OrionDrivingOverlay } from './components/ui/OrionDrivingOverlay';
 import { useWebSocket } from './hooks/useWebSocket';
 import { endSession, loadPerformanceLog } from './lib/journal';
 import { orionController } from './lib/orion/controller';
 import { fetchCandles } from './lib/orion/tools';
+import { useDataSource, getEngineDataDir } from './lib/dataSourceContext';
+import { engineUrl, sessionStartBody } from './lib/engine';
 import { threadKeyForContext, appendMessage, loadOrionThreads, writeOrionThreads } from './lib/orionThreads';
 import type {
   AppState,
@@ -36,6 +38,9 @@ import type { ActiveTool } from './components/drawing/drawingTools';
 const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 const API_BASE = isTauri ? 'http://127.0.0.1:9000' : '';
 
+
+import { DataSourceMenu } from './components/DataSourceMenu';
+import { LocalDataScreen } from './components/LocalDataScreen';
 
 // Return the most recent past trading weekday (YYYY-MM-DD). If today is a
 // weekday we still step back one calendar day because the local market data
@@ -315,13 +320,17 @@ export default function App() {
   const [state, dispatch] = useReducer(appReducer, initialState);
   const chartRef = useRef<ChartHandle>(null);
 
+  // Active data source and its engine-facing directory.
+  const { dataSource, isResolving: dataSourceResolving, selectManaged, selectLocal } = useDataSource();
+  const dataDir = getEngineDataDir(dataSource);
+
   // dateConfirmed is kept as internal bookkeeping for session lifecycle;
   // playback locking is now driven by isOrionDriving.
   const [, setDateConfirmed] = useState(false);
   const [dateError, setDateError] = useState<string | null>(null);
 
-  // Inline symbol/data error shown under the Toolbar search input instead of
-  // the full-width amber banner.
+  // Inline symbol/data error shown under the Toolbar search input instead of the
+  // full-width amber banner.
   const [symbolError, setSymbolError] = useState<string | null>(null);
   const clearSymbolError = useCallback(() => setSymbolError(null), []);
 
@@ -332,9 +341,9 @@ export default function App() {
   // Orion AI coach side-panel visibility.
   const [isOrionOpen, setIsOrionOpen] = useState(false);
 
-  // Intro splash control.
+  // Intro / data-source / workspace view controller.
   const [showIntro, setShowIntro] = useState(true);
-  const [introFinished, setIntroFinished] = useState(false);
+  const [view, setView] = useState<'intro' | 'menu' | 'local' | 'workspace'>('intro');
   const [dataSynced, setDataSynced] = useState(false);
 
   const replayDate = state.replayDate;
@@ -351,6 +360,13 @@ export default function App() {
   }, []);
 
   const onSessionHistory = useCallback((candles: CandleData[]) => {
+    const current = sessionHistoryRef.current;
+    const sameHistory =
+      candles.length === current.length &&
+      (candles.length === 0 ||
+        candles[candles.length - 1].timestamp === current[current.length - 1].timestamp);
+    if (sameHistory) return;
+
     setSessionHistory(candles);
     chartRef.current?.setHistory(candles);
   }, []);
@@ -360,7 +376,7 @@ export default function App() {
   availableTickersRef.current = availableTickers;
 
   const fetchTickers = useCallback(() => {
-    fetch(`${API_BASE}/api/tickers`)
+    fetch(engineUrl(API_BASE, '/api/tickers', undefined, dataDir))
       .then((r) => r.json())
       .then((d: { tickers?: string[] }) => {
         if (Array.isArray(d.tickers)) setAvailableTickers(d.tickers);
@@ -368,7 +384,7 @@ export default function App() {
       .catch((err) => {
         console.warn('[OpenRewind] Failed to fetch ticker list:', err);
       });
-  }, []);
+  }, [dataDir]);
 
   const onDataSynced = useCallback(() => {
     fetchTickers();
@@ -406,6 +422,7 @@ export default function App() {
       send,
       dispatch,
       apiBase: API_BASE,
+      dataDir,
       postChatMessage: async (text: string) => {
         // Append into whichever Orion thread is currently active for the
         // user's context. Loading here keeps the ai-chat sidepanel a
@@ -432,16 +449,16 @@ export default function App() {
       unsub();
     };
     // API_BASE is a module constant; send/dispatch are stable identity.
+    // dataDir is recomputed when the active source changes and is safe to rebind.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [send]);
+  }, [send, dataDir]);
 
   const isOrionDriving = orionStatus === 'driving' || orionStatus === 'finalizing';
   const lastActivityLine = orionActivity[orionActivity.length - 1]?.message;
 
-  // --- Fetch the list of tradable tickers from the C++ engine on mount.
-  // Used by both the Start Session form and the in-app Toolbar autocomplete.
+  // --- Load the performance log on mount. Tickers are fetched once the
+  // user enters the workspace so they reflect the active data source.
   useEffect(() => {
-    fetchTickers();
     loadPerformanceLog().then((log) => dispatch({ type: 'SET_PERFORMANCE_LOG', log }));
 
     // Boot the local Ollama service automatically when running as a Tauri app.
@@ -457,10 +474,10 @@ export default function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);  // run once on mount; onDataSynced and the connected effect handle subsequent refreshes
 
-  // --- Re-fetch tickers whenever the WebSocket reconnects ---
+  // --- Re-fetch tickers whenever we enter the workspace or the data source changes ---
   useEffect(() => {
-    if (connected) fetchTickers();
-  }, [connected, fetchTickers]);
+    if (view === 'workspace') fetchTickers();
+  }, [connected, view, fetchTickers]);
 
   // --- End Session: once all open positions are closed, persist the active
   // session trades to the journal, reset the workspace, and clear the sandbox.
@@ -479,6 +496,7 @@ export default function App() {
         send({ cmd: 'pause' });
         chartRef.current?.resetChart();
         dispatch({ type: 'END_SESSION' });
+        dispatch({ type: 'SET_REPLAY_DATE', date: getLastTradingDate() });
         setDateConfirmed(false);
         setSessionHistory([]);
         setIsEndingSession(false);
@@ -512,9 +530,9 @@ export default function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [state.sessionActive, state.isPlaying, send, isOrionDriving]);
 
-  // --- Auto-pull fresh market data once the intro splash finishes ---
+  // --- Auto-pull fresh market data once the workspace is entered with managed data ---
   useEffect(() => {
-    if (!introFinished || dataSynced) return;
+    if (view !== 'workspace' || dataSource?.mode !== 'managed' || dataSynced) return;
 
     const syncData = async () => {
       try {
@@ -543,7 +561,7 @@ export default function App() {
 
     syncData();
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [introFinished, dataSynced]);
+  }, [view, dataSource, dataSynced]);
 
   // --- Change replay date from the Toolbar date picker ---
   // Probe the requested date; if the local cache has no bars for it, fall
@@ -568,7 +586,7 @@ export default function App() {
       let sessionDate = newDate;
       try {
         const probe = await fetchCandles(
-          { symbol: state.symbol, date: newDate, timeframe: 1, limit: 1 },
+          { symbol: state.symbol, date: newDate, timeframe: 1, limit: 1, dataDir },
           API_BASE
         );
         if (probe.missing) {
@@ -595,16 +613,18 @@ export default function App() {
 
       try {
         const balance = state.balance > 0 ? state.balance : 100000;
+        const requestBody = sessionStartBody(
+          { symbol: state.symbol, starting_balance: balance, start_date: sessionDate },
+          dataDir
+        );
+        console.log('[session-trace] handleDateChange request:', requestBody);
         const res = await fetch(`${API_BASE}/api/session/start`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            symbol: state.symbol,
-            starting_balance: balance,
-            start_date: sessionDate,
-          }),
+          body: JSON.stringify(requestBody),
         });
         const data = await res.json();
+        console.log('[session-trace] handleDateChange response:', data);
         if (data.error) {
           console.error('[OpenRewind] Date change failed:', data.error);
           console.log('[Orion Diagnostic] handleDateError triggered', { reason: 'engine-error', error: data.error });
@@ -634,7 +654,7 @@ export default function App() {
         setSymbolError('No local market data found for this date.');
       }
     },
-    [state.sessionActive, state.symbol, state.balance, clearDateError, setSymbolError, clearSymbolError]
+    [state.sessionActive, state.symbol, state.balance, clearDateError, setSymbolError, clearSymbolError, dataDir]
   );
 
   // --- WS command helpers ---
@@ -784,6 +804,8 @@ export default function App() {
   const [showMarkers, setShowMarkers] = useState(true);
   const [chartKey] = useState(0);
   const [sessionHistory, setSessionHistory] = useState<CandleData[]>([]);
+  const sessionHistoryRef = useRef<CandleData[]>([]);
+  sessionHistoryRef.current = sessionHistory;
   const [showOrderPanel, setShowOrderPanel] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const [pendingOrderSL, setPendingOrderSL] = useState(0);
@@ -797,9 +819,24 @@ export default function App() {
   const [lightMode, setLightMode] = useState(false);
   const [clearHandler, setClearHandler] = useState<(() => void) | null>(null);
 
+  // --- Reset session state when the active data source changes ---
+  useEffect(() => {
+    if (!dataSource) return;
+    setDataSynced(false);
+    setAvailableTickers([]);
+    setDateConfirmed(false);
+    chartRef.current?.resetChart();
+    setSessionHistory([]);
+    dispatch({ type: 'END_SESSION' });
+    // Neutral date; a specific symbol/date selection will override this.
+    dispatch({ type: 'SET_REPLAY_DATE', date: getLastTradingDate() });
+  }, [dataSource]);
+
   const handleReset = useCallback(() => {
     // Discard any sandbox trades for the current symbol/date before restarting.
     dispatch({ type: 'CLEAR_ACTIVE_SESSION_TRADES_FOR_DATE', symbol: state.symbol, date: state.replayDate });
+    chartRef.current?.resetChart(true);
+    setSessionHistory([]);
     send({ cmd: 'reset_session' });
   }, [send, dispatch, state.symbol, state.replayDate]);
 
@@ -826,12 +863,14 @@ export default function App() {
       try {
         const balance = state.balance > 0 ? state.balance : 100000;
         let sessionDate = targetDate ?? replayDate;
+        console.log('[session-trace] handleSymbolChange start:', { newSymbol, targetDate, replayDate, sessionDate });
         if (sessionDate) {
           try {
             const probe = await fetchCandles(
-              { symbol: newSymbol, date: sessionDate, timeframe: 1, limit: 1 },
+              { symbol: newSymbol, date: sessionDate, timeframe: 1, limit: 1, dataDir },
               API_BASE
             );
+            console.log('[session-trace] handleSymbolChange probe:', { newSymbol, sessionDate, missing: probe.missing, fallbackDate: probe.fallbackDate });
             if (probe.missing) {
               console.log('[Orion Diagnostic] handleSymbolError triggered', { reason: 'no-data', newSymbol, sessionDate });
               setSymbolError('No local market data found for this symbol.');
@@ -843,17 +882,18 @@ export default function App() {
           }
         }
 
-        const body: Record<string, unknown> = {
-          symbol: newSymbol,
-          starting_balance: balance,
-        };
-        if (sessionDate) body.start_date = sessionDate;
+        const requestBody = sessionStartBody(
+          { symbol: newSymbol, starting_balance: balance, start_date: sessionDate },
+          dataDir
+        );
+        console.log('[session-trace] handleSymbolChange request:', requestBody);
         const res = await fetch(`${API_BASE}/api/session/start`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
+          body: JSON.stringify(requestBody),
         });
         const data = await res.json();
+        console.log('[session-trace] handleSymbolChange response:', data);
         if (data.error) {
           console.error('[OpenRewind] Symbol switch failed:', data.error);
           console.log('[Orion Diagnostic] handleSymbolError triggered', { reason: 'engine-error', error: data.error });
@@ -884,7 +924,30 @@ export default function App() {
         setSymbolError('No local market data found for this symbol.');
       }
     },
-    [state.symbol, state.balance, replayDate, clearDateError, setSymbolError, clearSymbolError]
+    [state.symbol, state.balance, replayDate, clearDateError, setSymbolError, clearSymbolError, dataDir]
+  );
+
+  // --- Data-source menu handlers ---
+  const handleChooseManaged = useCallback(() => {
+    selectManaged();
+    setView('workspace');
+  }, [selectManaged]);
+
+  const handleChooseLocal = useCallback(async () => {
+    await selectLocal();
+    setView('local');
+  }, [selectLocal]);
+
+  const handleBackToMenu = useCallback(() => {
+    setView('menu');
+  }, []);
+
+  const handleEnterLocalWorkspace = useCallback(
+    (symbol: string, date: string) => {
+      setView('workspace');
+      handleSymbolChange(symbol, date);
+    },
+    [handleSymbolChange]
   );
 
   // Reset unlock states when no open positions
@@ -907,11 +970,28 @@ export default function App() {
           lightMode={lightMode}
           onFinished={() => {
             setShowIntro(false);
-            setIntroFinished(true);
+            setView('menu');
           }}
         />
       )}
-      {/* Top header */}
+      {view === 'menu' && (
+        <DataSourceMenu
+          onManaged={handleChooseManaged}
+          onLocal={handleChooseLocal}
+          isResolving={dataSourceResolving}
+          lightMode={lightMode}
+        />
+      )}
+      {view === 'local' && (
+        <LocalDataScreen
+          onBack={handleBackToMenu}
+          onEnterWorkspace={handleEnterLocalWorkspace}
+          lightMode={lightMode}
+        />
+      )}
+      {view === 'workspace' && (
+        <>
+          {/* Top header */}
       {dateError && (
         <ErrorAlert message={dateError} onClose={clearDateError} lightMode={lightMode} />
       )}
@@ -987,7 +1067,6 @@ export default function App() {
               <Chart
                 ref={chartRef}
                 key={chartKey}
-                sessionHistory={sessionHistory}
                 positions={state.openPositions}
                 trades={state.tradeHistory}
                 currentPrice={currentPrice}
@@ -1079,12 +1158,13 @@ export default function App() {
 
         {/* Orion AI coach side-panel */}
         {isOrionOpen && (
-          <OrionChatSidepanel
+          <OrionTerminal
             performanceLog={state.performanceLog}
             lightMode={lightMode}
             appState={state}
             chartRef={chartRef}
             apiBase={API_BASE}
+            dataDir={dataDir}
             availableTickers={availableTickers}
             onSwitchSymbol={handleSymbolChange}
             send={send}
@@ -1099,6 +1179,8 @@ export default function App() {
         log={state.performanceLog}
         lightMode={lightMode}
       />
+      </>
+    )}
     </div>
   );
 }

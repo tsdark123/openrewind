@@ -71,7 +71,7 @@ export function Toolbar({ symbol, availableTickers, onSymbolChange, replayDate, 
             tickers={availableTickers}
             value={symbol}
             onCommit={onSymbolChange}
-            placeholder="Search symbols…"
+            placeholder="Search"
             size="sm"
             lightMode={lightMode}
             error={error}

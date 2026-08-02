@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { motion } from 'motion/react';
 import { Send, Sparkles, Zap, Trash2 } from 'lucide-react';
-import { fetch as tauriFetch } from '@tauri-apps/plugin-http';
 import { cn } from '../../lib/utils';
 import { classifyOrionIntent, type OrionIntent } from '../../lib/orion/router';
-import { ORION_AGENT_MODEL, orionChat, pullOrionModel } from '../../lib/orion/client';
+import { ORION_AGENT_MODEL, ensureModel, orionChat, pullOrionModel } from '../../lib/orion/client';
 import { orionController } from '../../lib/orion/controller';
 import { parseChartCommand, executeChartCommand, parseChartCommandWithLLM, type PlannerContext } from '../../lib/orion/planner';
+import { commonSenseReply, suggestCommand } from '../../lib/orion/commonSense';
 import {
   DEFAULT_GREETING,
   GLOBAL_THREAD_KEY,
@@ -35,6 +35,8 @@ interface OrionChatSidepanelProps {
   appState: AppState;
   chartRef: { current: ChartHandle | null } | null;
   apiBase: string;
+  // Local Data directory for Orion candle/session calls. Managed mode omits it.
+  dataDir?: string;
   availableTickers: string[];
   onSwitchSymbol: (symbol: string, date?: string) => void | Promise<void>;
   send: (payload: Record<string, unknown>) => void;
@@ -48,6 +50,7 @@ export function OrionChatSidepanel({
   appState,
   chartRef,
   apiBase,
+  dataDir,
   availableTickers,
   onSwitchSymbol,
   send,
@@ -118,41 +121,20 @@ export function OrionChatSidepanel({
     }
   }, [messages, isTyping]);
 
-  const isTauri = (() => {
-    if (typeof window === 'undefined') return false;
-    const win = window as any;
-    const tauri = win.__TAURI__?.core ?? win.__TAURI_INTERNALS__;
-    return typeof tauri?.invoke === 'function';
-  })();
-
-  // In a real Tauri shell use the plugin-http fetch (bypasses CORS). In the
-  // browser dev preview the Tauri runtime is not present, so fall back to the
-  // standard fetch API. This prevents @tauri-apps/plugin-http from calling
-  // core.invoke on an undefined __TAURI_INTERNALS__.
-  const httpFetch = isTauri ? tauriFetch : fetch;
-
   // Lightweight Ollama readiness check. If Ollama isn't there, the chat
   // simply stays in offline mode and the local symbol-switch still works.
   useEffect(() => {
     let cancelled = false;
     const checkModel = async () => {
-      try {
-        const response = await httpFetch('http://localhost:11434/api/show', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ model: ORION_MODEL }),
-        });
-        if (cancelled) return;
-        setSetupStage(response.ok ? 'ready' : 'error');
-      } catch {
-        if (!cancelled) setSetupStage('error');
-      }
+      const check = await ensureModel(ORION_MODEL);
+      if (cancelled) return;
+      setSetupStage(check.ready ? 'ready' : 'error');
     };
     checkModel();
     return () => {
       cancelled = true;
     };
-  }, [httpFetch]);
+  }, []);
 
   const handleResetChat = () => {
     setThreads((prev) => setThreadMessages(prev, threadKey, [DEFAULT_GREETING]));
@@ -171,7 +153,8 @@ export function OrionChatSidepanel({
     // Chart-control planner: extracts entities (symbol/date/times/speed/
     // direction) from the message, looks at the live chart state, and runs the
     // minimum engine commands to fulfill the request. Works offline.
-    let cmd = parseChartCommand(trimmed, availableTickers);
+    let cmd = parseChartCommand(trimmed, availableTickers, undefined, appState.replayDate);
+    console.log('[orion-trace] parsed command:', JSON.parse(JSON.stringify(cmd)));
 
     // Let the local LLM make sense of typos / filler when the offline parser
     // is unsure and Orion is online.
@@ -188,12 +171,24 @@ export function OrionChatSidepanel({
     }
 
     if (cmd.intent !== 'unknown') {
+      if (availableTickers.length === 0) {
+        setThreads((prev) =>
+          appendMessage(prev, threadKey, {
+            sender: 'ai',
+            text: "The OpenRewind chart engine is not connected, so I can't control the chart right now.",
+          })
+        );
+        setIsTyping(false);
+        return;
+      }
+
       const plannerCtx: PlannerContext = {
         appState,
         getState: () => appStateRef.current,
         chartRef,
         performanceLog,
         apiBase,
+        dataDir,
         availableTickers,
         send,
         dispatch,
@@ -202,6 +197,7 @@ export function OrionChatSidepanel({
       };
       try {
         const result = await executeChartCommand(cmd, plannerCtx);
+        console.log('[orion-trace] executeChartCommand result:', result);
         setThreads((prev) => appendMessage(prev, threadKey, { sender: 'ai', text: result.message }));
       } catch (err) {
         const detail = err instanceof Error ? err.message : String(err);
@@ -213,7 +209,17 @@ export function OrionChatSidepanel({
     }
 
     if (setupStage !== 'ready') {
-      setThreads((prev) => appendMessage(prev, threadKey, { sender: 'ai', text: "Orion is offline right now. I can still switch your chart — try 'switch to NFLX'." }));
+      const common = commonSenseReply(trimmed, false);
+      if (common) {
+        setThreads((prev) => appendMessage(prev, threadKey, { sender: 'ai', text: common }));
+        setIsTyping(false);
+        return;
+      }
+      const suggestion = suggestCommand(trimmed);
+      const text = suggestion
+        ? `"${trimmed}" is not recognized as a request. Did you mean "${suggestion}"?`
+        : `"${trimmed}" is not recognized as a request. Try 'help' to see available commands.`;
+      setThreads((prev) => appendMessage(prev, threadKey, { sender: 'ai', text }));
       setIsTyping(false);
       return;
     }

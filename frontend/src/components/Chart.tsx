@@ -74,10 +74,6 @@ interface ChartProps {
     atr: boolean;
     stochastic: boolean;
   };
-  /** Authoritative candle history broadcast by the engine. Kept as a prop so
-   *  the chart re-applies history after symbol/timeframe changes even if the
-   *  WS message arrived before the chart instance was ready. */
-  sessionHistory?: CandleData[];
   pendingOrderSL?: number;
   pendingOrderTP?: number;
   onPendingOrderSLChange?: (price: number) => void;
@@ -97,7 +93,7 @@ interface ChartProps {
 export interface ChartHandle {
   updateCandle: (payload: CandleUpdatePayload) => void;
   setHistory: (candles: CandleData[]) => void;
-  resetChart: () => void;
+  resetChart: (clearLayout?: boolean) => void;
   // Returns up to `n` most recent visible candles in chronological order.
   // Used by Orion tools (WorldState builder, strategy warm-up) to sample
   // the chart context without going back to the engine.
@@ -125,7 +121,6 @@ export const Chart = forwardRef<ChartHandle, ChartProps>(function Chart({
   chartLocked = false,
   onClearAll,
   lightMode = false,
-  sessionHistory = [],
 }, ref) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -177,6 +172,23 @@ export const Chart = forwardRef<ChartHandle, ChartProps>(function Chart({
   // Timestamp of the very first bar in the loaded history (bar index 0).
   // Used for the "Max History Limit" boundary marker and scroll lock.
   const historyStartRef = useRef<number | null>(null);
+  // First candle timestamp of the currently displayed session. Used to detect
+  // symbol/date switches so the chart fits to the new data instead of trying
+  // to restore a logical range from the previous session.
+  const previousFirstTimestampRef = useRef<number | null>(null);
+  // Captured time-scale logical range so pan/zoom survives symbol/timeframe
+  // changes. Explicit reset (or first-ever load) clears it.
+  const userVisibleRangeRef = useRef<{ from: number; to: number } | null>(null);
+  // Previous session's bar count, used to map the saved logical range onto a
+  // new symbol/date while keeping the same zoom width and relative pan.
+  const prevHistoryLengthRef = useRef(0);
+  // Last logged price range so we can emit console output only when the user
+  // squeezes/expands the price (Y) scale.
+  const prevPriceRangeRef = useRef<{ min: number; max: number } | null>(null);
+  // Counter to silence the time-scale subscriber during programmatic data
+  // updates (setData, fitContent, setVisibleLogicalRange). User pans/zooms
+  // happen while this is zero, so the ref only captures manual changes.
+  const programmaticRef = useRef(0);
 
   // --- Prop refs for stable event-handler closures ---
   // Updated synchronously on every render; allows the interaction
@@ -352,12 +364,18 @@ export const Chart = forwardRef<ChartHandle, ChartProps>(function Chart({
       wickDownColor: t.downColor,
     });
 
+    // Put volume on its own price scale so high-volume bars cannot squash
+    // candlestick price scaling into invisibility.
     const volumeSeries = chart.addHistogramSeries({
       color: t.volUp,
       priceFormat: { type: 'volume' },
-      priceScaleId: '',
+      priceScaleId: 'volume',
+      lastValueVisible: false,
     });
-    volumeSeries.priceScale().applyOptions({ scaleMargins: { top: 0.8, bottom: 0 } });
+    volumeSeries.priceScale().applyOptions({
+      scaleMargins: { top: 0.8, bottom: 0 },
+      visible: false,
+    });
 
     chartRef.current = chart;
     candleSeriesRef.current = candleSeries;
@@ -404,17 +422,55 @@ export const Chart = forwardRef<ChartHandle, ChartProps>(function Chart({
     // never shows a fully blank canvas. When unlocked, scaling/panning is free.
     let isClampingScroll = false;
     const handleRangeChange = (range: { from: number; to: number } | null) => {
-      if (!chartLockedRef.current || !range || isClampingScroll || range.from >= -1) return;
+      if (!range) return;
+
+      console.log('[Chart time-scale interaction]', {
+        from: range.from,
+        to: range.to,
+        width: range.to - range.from,
+        programmatic: programmaticRef.current,
+        locked: chartLockedRef.current,
+      });
+
+      // Capture manual pans/zooms so they survive symbol/date switches.
+      if (programmaticRef.current === 0) {
+        userVisibleRangeRef.current = range;
+        prevHistoryLengthRef.current = candleHistoryRef.current.length;
+      }
+
+      if (programmaticRef.current > 0 || !chartLockedRef.current || isClampingScroll || range.from >= -1) return;
       isClampingScroll = true;
       requestAnimationFrame(() => {
-        chart.timeScale().setVisibleLogicalRange({ from: -1, to: range.to });
-        isClampingScroll = false;
+        programmaticRef.current += 1;
+        try {
+          chart.timeScale().setVisibleLogicalRange({ from: -1, to: range.to });
+        } finally {
+          programmaticRef.current -= 1;
+          isClampingScroll = false;
+        }
       });
     };
     chart.timeScale().subscribeVisibleLogicalRangeChange(handleRangeChange);
 
+    const pricePoll = setInterval(() => {
+      const series = candleSeriesRef.current;
+      const container = containerRef.current;
+      if (!series || !container) return;
+      const top = series.coordinateToPrice(0);
+      const bottom = series.coordinateToPrice(container.clientHeight);
+      if (top == null || bottom == null) return;
+      const min = Math.min(top, bottom);
+      const max = Math.max(top, bottom);
+      const prev = prevPriceRangeRef.current;
+      if (!prev || Math.abs(prev.min - min) > 1e-9 || Math.abs(prev.max - max) > 1e-9) {
+        prevPriceRangeRef.current = { min, max };
+        console.log('[Chart price-scale interaction]', { min, max, range: max - min });
+      }
+    }, 150);
+
     return () => {
       chart.timeScale().unsubscribeVisibleLogicalRangeChange(handleRangeChange);
+      clearInterval(pricePoll);
       resizeObserver.disconnect();
       fsm.destroy();
       drawingManager.detach();
@@ -435,18 +491,41 @@ export const Chart = forwardRef<ChartHandle, ChartProps>(function Chart({
     const series = candleSeriesRef.current;
     const volSeries = volumeSeriesRef.current;
     if (!series || !volSeries) return;
+    console.log('[Chart.applyHistory]', {
+      historyLength: history.length,
+      first: history[0],
+      last: history[history.length - 1],
+      seriesDataBefore: series.data().length,
+      volDataBefore: volSeries.data().length,
+    });
     const t = lightMode ? {
       volUp: 'rgba(46,148,97,0.3)', volDown: 'rgba(239,83,80,0.3)',
       upColor: '#2e9461', downColor: '#ef5350',
     } : CHART_THEME;
-    series.setData(history.map(toLWC));
-    volSeries.setData(history.map((c) => ({
-      time: c.timestamp as UTCTimestamp,
-      value: c.volume,
-      color: c.close >= c.open ? t.volUp : t.volDown,
-    })));
+    programmaticRef.current += 1;
+    try {
+      series.setData(history.map(toLWC));
+      volSeries.setData(history.map((c) => ({
+        time: c.timestamp as UTCTimestamp,
+        value: c.volume,
+        color: c.close >= c.open ? t.volUp : t.volDown,
+      })));
+    } finally {
+      programmaticRef.current -= 1;
+    }
+    console.log('[Chart.applyHistory] after', {
+      seriesDataAfter: series.data().length,
+      volDataAfter: volSeries.data().length,
+    });
     lastChartTimeRef.current = history[history.length - 1]?.timestamp ?? null;
-    if (lockToEdge) chartRef.current?.timeScale().scrollToPosition(2, false);
+    if (lockToEdge) {
+      programmaticRef.current += 1;
+      try {
+        chartRef.current?.timeScale().scrollToPosition(2, false);
+      } finally {
+        programmaticRef.current -= 1;
+      }
+    }
   }, [lightMode, toLWC, lockToEdge]);
 
   // --- Internal helper: replace the chart's entire candle history ---
@@ -457,42 +536,180 @@ export const Chart = forwardRef<ChartHandle, ChartProps>(function Chart({
       .sort((a, b) => a.timestamp - b.timestamp)
       .filter((c, i, arr) => i === 0 || c.timestamp !== arr[i - 1].timestamp);
 
+    // Snapshot the old history before we overwrite it so we can map the
+    // user's pan/zoom onto the new symbol/date by logical bar count.
+    const oldHistory = candleHistoryRef.current;
     candleHistoryRef.current = clean;
     indicatorCacheRef.current.clear();
+
+    // Capture the user's current view before setData() can reset it.
+    const currentRange = chartRef.current?.timeScale().getVisibleLogicalRange();
+
+    // Detect a brand-new session (different symbol/date or first load after
+    // reset). On a switch the previously saved logical range belongs to a
+    // different set of bars, so we need to map it to the new bar count.
+    const newSession =
+      clean.length > 0 &&
+      (previousFirstTimestampRef.current === null ||
+        clean[0].timestamp !== previousFirstTimestampRef.current);
+    if (newSession) {
+      console.log('[Chart.setHistory] new session detected', {
+        previousFirst: previousFirstTimestampRef.current,
+        newFirst: clean[0].timestamp,
+      });
+    }
+    console.log('[Chart.setHistory] pan/zoom inputs', {
+      newSession,
+      incomingLength: incoming.length,
+      cleanLength: clean.length,
+      oldHistoryLength: oldHistory.length,
+      currentRange,
+      userVisibleRange: userVisibleRangeRef.current,
+      prevHistoryLength: prevHistoryLengthRef.current,
+    });
+
+    // Determine which visible range to restore. Falls back to the saved ref
+    // when the chart is empty (e.g. right after reset).
+    // For a brand-new session, map the previous logical range onto the new
+    // data so the same zoom width and relative pan position survive.
+    let saved: { from: number; to: number } | null = null;
+    if (newSession) {
+      // If the chart was just reset, use the view that resetChart saved.
+      // If not reset, the chart still holds the old data and currentRange
+      // is the user's view. Ignore an empty chart's default logical range.
+      let prev: { from: number; to: number } | null;
+      let prevLen: number;
+      if (oldHistory.length === 0) {
+        prev = userVisibleRangeRef.current;
+        prevLen = prevHistoryLengthRef.current;
+      } else {
+        prev = currentRange ?? userVisibleRangeRef.current;
+        prevLen = oldHistory.length;
+      }
+
+      if (prev) {
+        const newMax = Math.max(0, clean.length - 1);
+        const width = Math.max(1, prev.to - prev.from);
+
+        // Restore the user's exact logical range. The X-axis pan/zoom is
+        // stored in logical bar coordinates, so the same zoom width and
+        // offset survive a session change regardless of the new bar count.
+        let newFrom = prev.from;
+        let newTo = prev.to;
+
+        // If the saved view would be completely off the new data, nudge it
+        // back so the new candles are still visible while keeping the zoom.
+        if (newTo < 0) {
+          newFrom = 0;
+          newTo = width;
+        } else if (newFrom > newMax) {
+          newFrom = newMax;
+          newTo = newFrom + width;
+        }
+
+        // Defensive clamping for a valid, non-empty range.
+        if (newTo < newFrom + 1) {
+          newTo = newFrom + 1;
+        }
+
+        saved = { from: newFrom, to: newTo };
+        console.log('[Chart.setHistory] restored user visible range', { prev, prevLen, newMax, width, saved });
+      } else {
+        console.log('[Chart.setHistory] no saved user visible range', { currentRange, userVisibleRange: userVisibleRangeRef.current });
+      }
+    } else {
+      saved = currentRange ?? userVisibleRangeRef.current;
+      console.log('[Chart.setHistory] same-session visible range', { currentRange, userVisibleRange: userVisibleRangeRef.current, saved });
+    }
+
     // Track the very first bar for the boundary marker + scroll lock.
     historyStartRef.current = clean[0]?.timestamp ?? null;
     // Advance the marker cutoff to the last bar so we see all markers
     // that fall on or before the new frontier (handles rewind correctly).
     markerCutoffRef.current = clean[clean.length - 1]?.timestamp ?? Infinity;
     applyHistory(clean);
+    previousFirstTimestampRef.current = clean[0]?.timestamp ?? null;
 
-    // Only auto-fit the very first time we get data for a session, so
-    // later resyncs (order fills, etc.) don't yank the user's zoom/pan.
-    if (clean.length > 0 && !hasFittedRef.current) {
-      hasFittedRef.current = true;
-      chartRef.current?.timeScale().fitContent();
+    if (clean.length > 0) {
+      programmaticRef.current += 1;
+      try {
+        // If the user (or a previous symbol/date) turned off price-scale
+        // auto-scaling, the candles can land outside the visible price range.
+        // For a brand-new session, force the candlestick price scale to fit.
+        if (newSession) {
+          candleSeriesRef.current?.priceScale().applyOptions({ autoScale: true });
+        }
+
+        const ts = chartRef.current?.timeScale();
+        if (saved && ts) {
+          // Restore the user's exact pan/zoom. The visible logical range can
+          // extend before the first bar or past the last one, so only reject
+          // truly nonsensical values and let lightweight-charts clamp naturally.
+          if (
+            Number.isFinite(saved.from) &&
+            Number.isFinite(saved.to) &&
+            saved.from < saved.to
+          ) {
+            try {
+              ts.setVisibleLogicalRange(saved);
+            } catch {
+              ts.fitContent();
+            }
+          } else {
+            ts.fitContent();
+          }
+        } else if (ts) {
+          // First load or after explicit reset — fit naturally.
+          ts.fitContent();
+        }
+        // Mark the chart as already fitted so the first live candle update
+        // doesn't call fitContent() and blow away the user's pan/zoom.
+        hasFittedRef.current = true;
+      } finally {
+        programmaticRef.current -= 1;
+      }
     }
     setHistoryVersion((v) => v + 1);
     setMarkerVersion((v) => v + 1);
   }, [applyHistory]);
 
-  // --- Re-apply history whenever the parent receives a fresh session_state ---
-  useEffect(() => {
-    setHistory(sessionHistory);
-  }, [sessionHistory, setHistory]);
-
   // --- Expose imperative handle for direct chart updates from WS callback ---
   useImperativeHandle(ref, () => ({
-    resetChart() {
+    resetChart(clearLayout = false) {
+      // The explicit Reset button can pass clearLayout=true to discard the
+      // user view. On a normal symbol/date switch we keep the manually
+      // captured view and only update the matching bar count so the next
+      // session can restore the exact same logical range.
+      if (clearLayout) {
+        userVisibleRangeRef.current = null;
+        prevHistoryLengthRef.current = 0;
+        prevPriceRangeRef.current = null;
+        console.log('[Chart.resetChart] layout cleared');
+      } else {
+        const dataLen = candleHistoryRef.current.length;
+        if (userVisibleRangeRef.current && dataLen > 0) {
+          prevHistoryLengthRef.current = dataLen;
+          console.log('[Chart.resetChart] preserving pan/zoom', { range: userVisibleRangeRef.current, dataLen });
+        } else {
+          console.log('[Chart.resetChart] no manual pan/zoom to preserve', { userVisibleRange: userVisibleRangeRef.current, dataLen });
+        }
+      }
+
       candleHistoryRef.current = [];
       lastChartTimeRef.current = null;
       prevCandleLengthRef.current = 0;
       hasFittedRef.current = false;
       markerCutoffRef.current = Infinity;
       historyStartRef.current = null;
+      previousFirstTimestampRef.current = null;
       indicatorCacheRef.current.clear();
-      candleSeriesRef.current?.setData([]);
-      volumeSeriesRef.current?.setData([]);
+      programmaticRef.current += 1;
+      try {
+        candleSeriesRef.current?.setData([]);
+        volumeSeriesRef.current?.setData([]);
+      } finally {
+        programmaticRef.current -= 1;
+      }
       setHistoryVersion((v) => v + 1);
       setMarkerVersion((v) => v + 1);
     },
@@ -583,21 +800,57 @@ export const Chart = forwardRef<ChartHandle, ChartProps>(function Chart({
       lastChartTimeRef.current = bucket;
       // Advance the cutoff so forward playback never hides newly-reached markers.
       markerCutoffRef.current = bucket;
-      series.update(toLWC(bar));
-      volSeries.update({
-        time: bucket as UTCTimestamp,
-        value: bar.volume,
-        color: bar.close >= bar.open ? t.volUp : t.volDown,
+
+      // After resetChart the candlestick series is empty. Some builds of
+      // lightweight-charts do not render an candlestick via update() until it
+      // has been primed with setData(), so feed the first bar through
+      // applyHistory() and append the rest normally.
+      if (history.length === 1) {
+        applyHistory([...history]);
+      } else {
+        series.update(toLWC(bar));
+        volSeries.update({
+          time: bucket as UTCTimestamp,
+          value: bar.volume,
+          color: bar.close >= bar.open ? t.volUp : t.volDown,
+        });
+      }
+
+      // Safety check: lightweight-charts can get into a state where the
+      // series' internal data does not match our history buffer (especially
+      // after a symbol/date switch). If it diverges, resync with setData.
+      const seriesDataLen = series.data().length;
+      const volDataLen = volSeries.data().length;
+      console.log('[Chart.updateCandle] after update', {
+        bucket,
+        bar,
+        historyLength: history.length,
+        seriesDataLength: seriesDataLen,
+        volDataLength: volDataLen,
       });
+      if (seriesDataLen !== history.length) {
+        console.warn('[Chart.updateCandle] series data mismatch, resyncing');
+        applyHistory([...history]);
+      }
 
       // series.update() never adjusts the visible range. On a chart that has
       // never been fitted the bars land outside the viewport and nothing
       // appears to happen — fit once so playback is visible immediately.
       if (!hasFittedRef.current) {
         hasFittedRef.current = true;
-        chartRef.current?.timeScale().fitContent();
+        programmaticRef.current += 1;
+        try {
+          chartRef.current?.timeScale().fitContent();
+        } finally {
+          programmaticRef.current -= 1;
+        }
       } else if (lockToEdge) {
-        chartRef.current?.timeScale().scrollToRealTime();
+        programmaticRef.current += 1;
+        try {
+          chartRef.current?.timeScale().scrollToRealTime();
+        } finally {
+          programmaticRef.current -= 1;
+        }
       }
 
       setHistoryVersion((v) => v + 1);
@@ -1330,21 +1583,7 @@ export const Chart = forwardRef<ChartHandle, ChartProps>(function Chart({
     };
 
     const cutoff = markerCutoffRef.current;
-    const historyStart = historyStartRef.current;
     const raw: Marker[] = [];
-
-    // Always pin a boundary marker at bar 0 so traders know exactly
-    // where the available history begins — regardless of SL/TP changes.
-    if (historyStart !== null) {
-      raw.push({
-        time: historyStart as UTCTimestamp,
-        position: 'belowBar',
-        color: '#4c525e',
-        shape: 'arrowUp',
-        text: '◀ Max History Limit',
-        size: 0,
-      });
-    }
 
     const autoColor = '#ff3700';
 

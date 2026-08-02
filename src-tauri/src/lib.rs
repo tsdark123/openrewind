@@ -13,6 +13,8 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::time::{sleep, timeout};
 
+mod local_data;
+
 #[allow(dead_code)]
 struct EngineProcess(CommandChild);
 
@@ -424,7 +426,14 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_http::init())
-        .invoke_handler(tauri::generate_handler![fetch_market_data, read_journal, write_journal, read_orion_threads, write_orion_threads, ensure_ollama_running, download_ollama])
+        .plugin(tauri_plugin_dialog::init())
+        .invoke_handler(tauri::generate_handler![
+            fetch_market_data, read_journal, write_journal, read_orion_threads,
+            write_orion_threads, ensure_ollama_running, download_ollama,
+            local_data::get_local_data_dir, local_data::list_local_tickers,
+            local_data::pick_csv_file, local_data::inspect_local_csv,
+            local_data::import_local_csv,
+        ])
         .setup(|app| {
             // Resolve the directory where Tauri unpacks bundled resources.
             // In production this is the install prefix (e.g. C:\Program Files\OpenRewind\).

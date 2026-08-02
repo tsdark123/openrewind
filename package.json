@@ -6,7 +6,8 @@
     "dev": "tauri dev",
     "build": "tauri build",
     "frontend:dev": "cd frontend && pnpm dev",
-    "frontend:build": "cd frontend && pnpm build"
+    "frontend:build": "cd frontend && pnpm build",
+    "dev:full": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dev-full.ps1"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2"

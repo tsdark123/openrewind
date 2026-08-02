@@ -24,11 +24,14 @@ export type ChartIntent =
   | 'pause'
   | 'seek'
   | 'set_speed'
+  | 'set_timeframe'
   | 'step_forward'
   | 'step_backward'
   | 'unknown';
 
 export interface ParsedTime { hour: number; minute: number; }
+
+export const SUPPORTED_TIMEFRAMES = [1, 5, 15, 60, 240, 1440] as const;
 
 export interface ChartCommand {
   intent: ChartIntent;
@@ -39,6 +42,7 @@ export interface ChartCommand {
   speed?: number;
   direction?: 'forward' | 'backward';
   relativeMinutes?: number;
+  timeframe?: number;
 }
 
 export interface PlannerContext {
@@ -49,6 +53,8 @@ export interface PlannerContext {
   chartRef: { current: ChartHandle | null } | null;
   performanceLog: PerformanceLog;
   apiBase: string;
+  // Local Data directory passed to engine calls. Managed mode omits it.
+  dataDir?: string;
   availableTickers: string[];
   send: (payload: Record<string, unknown>) => void;
   dispatch: (action: AppAction) => void;
@@ -85,21 +91,27 @@ const SKIP = new Set([
 const MONTHS = ['january','february','march','april','may','june','july','august','september','october','november','december'];
 
 function todayEt(): { y: number; m: number; d: number } {
-  // Use the local wall-clock date because the user is in the same timezone
-  // as the market. If the clock is off, the fetch fallback will correct it.
   const now = new Date();
   return { y: now.getFullYear(), m: now.getMonth() + 1, d: now.getDate() };
 }
 
-function offsetDate(offsetDays: number): string {
-  const { y, m, d } = todayEt();
+function baseDateParts(base?: string): { y: number; m: number; d: number } {
+  if (base && /^\d{4}-\d{2}-\d{2}$/.test(base)) {
+    const [y, mo, d] = base.split('-').map((n) => parseInt(n, 10));
+    return { y, m: mo, d };
+  }
+  return todayEt();
+}
+
+function offsetDate(offsetDays: number, base?: string): string {
+  const { y, m, d } = baseDateParts(base);
   const date = new Date(y, m - 1, d);
   date.setDate(date.getDate() + offsetDays);
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 }
 
-function dayOfWeekDate(target: number, direction: 'last' | 'next'): string {
-  const { y, m, d } = todayEt();
+function dayOfWeekDate(target: number, direction: 'last' | 'next', base?: string): string {
+  const { y, m, d } = baseDateParts(base);
   const date = new Date(y, m - 1, d);
   const current = date.getDay();
   let delta: number;
@@ -113,29 +125,37 @@ function dayOfWeekDate(target: number, direction: 'last' | 'next'): string {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 }
 
-function parseRelativeDate(input: string): string | undefined {
+function parseRelativeDate(input: string, base?: string): string | undefined {
   const t = input.toLowerCase();
 
-  if (/\byesterday\b/.test(t)) return offsetDate(-1);
-  if (/\b(today|tonight)\b/.test(t)) return offsetDate(0);
-  if (/\btomorrow\b/.test(t)) return offsetDate(1);
+  if (/\byesterday\b/.test(t)) return offsetDate(-1, base);
+  if (/\b(today|tonight)\b/.test(t)) return offsetDate(0, base);
+  if (/\btomorrow\b/.test(t)) return offsetDate(1, base);
 
-  if (/\b(?:last|previous)\s+week\b/.test(t)) return offsetDate(-7);
-  if (/\bthis\s+week\b/.test(t)) return offsetDate(0);
-  if (/\bnext\s+week\b/.test(t)) return offsetDate(7);
+  const daysMatch = /\b(\d+)\s*days?\s*(ago|from\s*now|ahead|back)\b/.exec(t);
+  if (daysMatch) {
+    const n = parseInt(daysMatch[1], 10);
+    const dir = daysMatch[2].replace(/\s+/g, ' ').trim();
+    if (dir === 'ago' || dir === 'back') return offsetDate(-n, base);
+    return offsetDate(n, base);
+  }
+
+  if (/\b(?:last|previous)\s+week\b/.test(t)) return offsetDate(-7, base);
+  if (/\bthis\s+week\b/.test(t)) return offsetDate(0, base);
+  if (/\bnext\s+week\b/.test(t)) return offsetDate(7, base);
 
   const days = ['sunday','monday','tuesday','wednesday','thursday','friday','saturday'];
   const dayMatch = /\b(?:last\s+)?(sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b/.exec(t);
   if (dayMatch) {
     const target = days.indexOf(dayMatch[1]);
     const direction = dayMatch[0].startsWith('last ') ? 'last' : 'last';
-    return dayOfWeekDate(target, direction);
+    return dayOfWeekDate(target, direction, base);
   }
 
   return undefined;
 }
 
-function parseDate(input: string): string | undefined {
+function parseDate(input: string, base?: string): string | undefined {
   const iso = input.match(/\b(\d{4})-(\d{1,2})-(\d{1,2})\b/);
   if (iso) return `${iso[1]}-${iso[2].padStart(2, '0')}-${iso[3].padStart(2, '0')}`;
 
@@ -147,7 +167,7 @@ function parseDate(input: string): string | undefined {
   if (m1) {
     const month = String(MONTHS.indexOf(m1[1].toLowerCase()) + 1).padStart(2, '0');
     const day = m1[2].padStart(2, '0');
-    const year = m1[3] ? (m1[3].length === 2 ? `20${m1[3]}` : m1[3]) : String(new Date().getFullYear());
+    const year = m1[3] ? (m1[3].length === 2 ? `20${m1[3]}` : m1[3]) : String(baseDateParts(base).y);
     return `${year}-${month}-${day}`;
   }
 
@@ -155,20 +175,21 @@ function parseDate(input: string): string | undefined {
   if (m2) {
     const month = String(MONTHS.indexOf(m2[2].toLowerCase()) + 1).padStart(2, '0');
     const day = m2[1].padStart(2, '0');
-    const year = m2[3] ? (m2[3].length === 2 ? `20${m2[3]}` : m2[3]) : String(new Date().getFullYear());
+    const year = m2[3] ? (m2[3].length === 2 ? `20${m2[3]}` : m2[3]) : String(baseDateParts(base).y);
     return `${year}-${month}-${day}`;
   }
 
-  return parseRelativeDate(input);
+  return parseRelativeDate(input, base);
 }
 
 function extractSymbolAndDate(
   text: string,
   availableTickers: string[],
-  symbolAliases: Record<string, string> = ALIASES
+  symbolAliases: Record<string, string> = ALIASES,
+  base?: string
 ): { symbol?: string; date?: string } {
   const tickerSet = new Set(availableTickers.map((t) => t.toUpperCase()));
-  const date = parseDate(text);
+  const date = parseDate(text, base);
   const tokens = text
     .toLowerCase()
     .split(/[^a-z0-9]+/)
@@ -243,13 +264,79 @@ function extractSpeed(text: string): number | undefined {
 }
 
 function extractRelativeMinutes(text: string): number | undefined {
-  const m = text.match(/(\d+(?:\.\d+)?)\s*(?:min|minute|hour|hr)s?\b/i);
+  const m = text.match(/(?:another\s+)?(\d+(?:\.\d+)?)\s*(?:more\s+|extra\s+)?(?:min|minute|hour|hr)s?\b/i);
   if (!m) return undefined;
   const n = parseFloat(m[1]);
   const unit = m[2]?.toLowerCase() || '';
   if (Number.isNaN(n) || n <= 0) return undefined;
   if (unit.startsWith('hour') || unit.startsWith('hr')) return Math.round(n * 60);
   return Math.round(n);
+}
+
+const TIME_LABELS: Record<number, string> = {
+  1: '1m',
+  5: '5m',
+  15: '15m',
+  60: '1h',
+  240: '4h',
+  1440: 'daily',
+};
+
+function formatTimeframe(minutes: number): string {
+  return TIME_LABELS[minutes] ?? `${minutes}m`;
+}
+
+export function clampTimeframe(tf?: number): number | undefined {
+  if (tf === undefined) return undefined;
+  const n = Number.isFinite(tf) ? Math.max(1, Math.round(tf)) : 1;
+  return SUPPORTED_TIMEFRAMES.includes(n as any) ? n : undefined;
+}
+
+function extractTimeframe(text: string): number | undefined {
+  const t = text.toLowerCase();
+
+  // Compact token forms: 5m, 1h, 4h, 1d, 60m, 240m.
+  const compact = /\b(1m|5m|15m|60m|240m|1h|4h|1d)\b/.exec(t);
+  if (compact) {
+    switch (compact[1]) {
+      case '1m': return 1;
+      case '5m': return 5;
+      case '15m': return 15;
+      case '60m':
+      case '1h': return 60;
+      case '240m':
+      case '4h': return 240;
+      case '1d': return 1440;
+    }
+  }
+
+  // Named whole-word timeframes.
+  if (/\bintraday\b/.test(t)) return 1;
+  if (/\bhourly\b/.test(t)) return 60;
+  if (/\bdaily\b/.test(t)) return 1440;
+
+  // Phrases like "5 minute timeframe", "1 hour chart", "1 day bars".
+  const hasTimeframeContext = /\b(timeframe|tf|chart|bars)\b/.test(t);
+  if (hasTimeframeContext) {
+    const m = /\b(\d+(?:\.\d+)?)\s*(?:minute|hour|day)s?\b/.exec(t);
+    if (m) {
+      const n = parseFloat(m[1]);
+      if (!Number.isNaN(n) && n > 0) {
+        const unit = t.charAt(m.index + m[0].length - 1);
+        if (/m/.test(unit)) {
+          const rounded = Math.round(n);
+          if (SUPPORTED_TIMEFRAMES.includes(rounded as any)) return rounded;
+        } else if (/h/.test(unit)) {
+          const minutes = Math.round(n * 60);
+          if (SUPPORTED_TIMEFRAMES.includes(minutes as any)) return minutes;
+        } else if (/d/.test(unit)) {
+          return 1440;
+        }
+      }
+    }
+  }
+
+  return undefined;
 }
 
 function detectDirection(text: string, relative?: number): 'forward' | 'backward' | undefined {
@@ -270,6 +357,7 @@ function detectIntent(text: string, e: {
   speed?: number;
   relative?: number;
   direction?: 'forward' | 'backward';
+  timeframe?: number;
 }): ChartIntent {
   const t = text.toLowerCase();
 
@@ -278,6 +366,9 @@ function detectIntent(text: string, e: {
   if (/\b(next|step forward|advance one|forward one)\b/i.test(t)) return 'step_forward';
   if (/\b(previous|step back|back one|rewind one)\b/i.test(t)) return 'step_backward';
   if (/\b(jump|seek)\b/i.test(t)) return 'seek';
+
+  // Any explicit or inferred timeframe request takes precedence.
+  if (e.timeframe !== undefined) return 'set_timeframe';
 
   // Time-based motion without explicit verb can be inferred from direction.
   if (e.times.length > 0 || e.relative !== undefined) {
@@ -307,14 +398,16 @@ function detectIntent(text: string, e: {
 export function parseChartCommand(
   text: string,
   availableTickers: string[],
-  symbolAliases: Record<string, string> = ALIASES
+  symbolAliases: Record<string, string> = ALIASES,
+  baseDate?: string
 ): ChartCommand {
-  const { symbol, date } = extractSymbolAndDate(text, availableTickers, symbolAliases);
+  const { symbol, date } = extractSymbolAndDate(text, availableTickers, symbolAliases, baseDate);
   const times = extractTimes(text);
   const speed = extractSpeed(text);
   const relative = extractRelativeMinutes(text);
   const direction = detectDirection(text, relative);
-  const intent = detectIntent(text, { symbol, date, times, speed, relative, direction });
+  const timeframe = extractTimeframe(text);
+  const intent = detectIntent(text, { symbol, date, times, speed, relative, direction, timeframe });
 
   return {
     intent,
@@ -325,6 +418,7 @@ export function parseChartCommand(
     speed,
     direction,
     relativeMinutes: relative,
+    timeframe,
   };
 }
 
@@ -405,7 +499,7 @@ interface DataRange {
 
 async function loadDataRange(ctx: PlannerContext, symbol: string, date: string): Promise<DataRange | null> {
   try {
-    const res = await fetchCandles({ symbol, date, timeframe: 1, limit: 5000 }, ctx.apiBase);
+    const res = await fetchCandles({ symbol, date, timeframe: 1, limit: 5000, dataDir: ctx.dataDir }, ctx.apiBase);
     if (res.missing || res.candles.length === 0) return null;
     return {
       first: res.candles[0].timestamp,
@@ -436,27 +530,36 @@ async function waitForChartReady(ctx: PlannerContext, symbol: string, date: stri
 }
 
 async function switchSession(ctx: PlannerContext, symbol: string, date: string): Promise<PlanResult> {
+  console.log('[planner-trace] switchSession start:', { symbol, date, dataDir: ctx.dataDir });
   const world = buildWorldState(ctx.getState(), ctx.chartRef, ctx.performanceLog);
   if (world.session.symbol === symbol && world.session.date === date) {
     return { ok: true, message: `Already on ${symbol} ${date}.`, executed: true };
   }
 
-  ctx.onMessage?.(`Switching to ${symbol}${date ? ` on ${date}` : ''}…`);
-
-  const probe = await fetchCandles({ symbol, date, timeframe: 1, limit: 1 }, ctx.apiBase);
+  const probe = await fetchCandles({ symbol, date, timeframe: 1, limit: 1, dataDir: ctx.dataDir }, ctx.apiBase);
+  console.log('[planner-trace] switchSession probe:', { symbol, date, missing: probe.missing, count: probe.candles.length, fallbackDate: probe.fallbackDate });
   if (probe.missing) {
+    console.log('[planner-trace] switchSession failed: no market data');
     return { ok: false, message: `No market data for ${symbol} on ${date}.`, executed: false };
   }
   const sessionDate = probe.fallbackDate ?? date;
 
   ctx.chartRef?.current?.resetChart();
+  console.log('[planner-trace] switchSession calling onSwitchSymbol:', { symbol, sessionDate });
   await ctx.onSwitchSymbol(symbol, sessionDate);
 
   const ready = await waitForChartReady(ctx, symbol, sessionDate);
+  console.log('[planner-trace] switchSession chart ready:', ready, { symbol, sessionDate });
   if (!ready) {
+    console.log('[planner-trace] switchSession failed: chart not ready');
     return { ok: false, message: `Switched to ${symbol}, but the chart didn't load in time for ${sessionDate}.`, executed: false };
   }
-  return { ok: true, message: `Switched to ${symbol} on ${sessionDate}.`, executed: true };
+
+  const result = sessionDate !== date
+    ? { ok: true, message: `${date} isn't a trading day for ${symbol}; used the nearest available date ${sessionDate} instead.`, executed: true }
+    : { ok: true, message: `Switched to ${symbol} on ${sessionDate}.`, executed: true };
+  console.log('[planner-trace] switchSession success:', result);
+  return result;
 }
 
 async function ensureSessionForCommand(cmd: ChartCommand, ctx: PlannerContext): Promise<PlanResult | null> {
@@ -492,6 +595,7 @@ function clampSpeed(s?: number): number {
 
 export async function executeChartCommand(cmd: ChartCommand, ctx: PlannerContext): Promise<PlanResult> {
   const { send, dispatch, onMessage, getState } = ctx;
+  console.log('[planner-trace] executeChartCommand start:', JSON.parse(JSON.stringify(cmd)));
 
   const handlePause = (): PlanResult => {
     send({ cmd: 'pause' });
@@ -519,16 +623,32 @@ export async function executeChartCommand(cmd: ChartCommand, ctx: PlannerContext
   }
 
   const worldBefore = buildWorldState(getState(), ctx.chartRef, ctx.performanceLog);
+  console.log('[planner-trace] ensureSessionForCommand input:', { intent: cmd.intent, symbol: cmd.symbol, date: cmd.date, currentSymbol: worldBefore.session.symbol, currentDate: worldBefore.session.date });
   const switchResult = await ensureSessionForCommand(cmd, ctx);
+  console.log('[planner-trace] ensureSessionForCommand result:', switchResult);
   if (switchResult) return switchResult;
 
   const world = buildWorldState(getState(), ctx.chartRef, ctx.performanceLog);
   const symbol = world.session.symbol;
   const date = world.session.date;
   const didSwitch = worldBefore.session.symbol !== symbol || worldBefore.session.date !== date;
-  const nowTs = currentCandleTs(world);
 
-  // Compute timestamps for time-based commands.
+  if (cmd.intent === 'set_timeframe') {
+    const tf = clampTimeframe(cmd.timeframe);
+    console.log('[planner-trace] set_timeframe step:', { tf, symbol, date, didSwitch });
+    if (tf === undefined) {
+      return { ok: false, message: 'Please tell me which timeframe to use (1m, 5m, 15m, 1h, 4h, daily).', executed: false };
+    }
+    send({ cmd: 'set_timeframe', minutes: tf });
+    dispatch({ type: 'SET_TIMEFRAME', timeframe: tf });
+    const message = didSwitch
+      ? `Switched to ${symbol} on ${date} and set timeframe to ${formatTimeframe(tf)}.`
+      : `Timeframe set to ${formatTimeframe(tf)}.`;
+    console.log('[planner-trace] set_timeframe complete:', message);
+    return { ok: true, message, executed: true };
+  }
+
+  const nowTs = currentCandleTs(world);
   let startTs: number | undefined;
   let endTs: number | undefined;
 
@@ -581,6 +701,14 @@ export async function executeChartCommand(cmd: ChartCommand, ctx: PlannerContext
               endTs = amTs;
               continue;
             }
+          }
+
+          // A 4:00 PM target lines up with the close of the last 1m bar (3:59 PM
+          // open -> 4:00 PM close). Nudge it back instead of rejecting.
+          if (ts - dataRange.last <= 60) {
+            if (ts === startTs) startTs = dataRange.last;
+            if (ts === endTs) endTs = dataRange.last;
+            continue;
           }
 
           const targetStr = formatTime(toEtTime(ts, date));
@@ -639,6 +767,7 @@ export async function executeChartCommand(cmd: ChartCommand, ctx: PlannerContext
 
   if (cmd.intent === 'seek') {
     const target = startTs ?? endTs;
+    console.log('[planner-trace] seek step:', { target, startTs, endTs, symbol, date });
     if (target === undefined) {
       return { ok: false, message: 'Tell me what time to seek to, e.g. "seek to 1:47pm".', executed: false };
     }
@@ -662,22 +791,17 @@ export async function executeChartCommand(cmd: ChartCommand, ctx: PlannerContext
       return { ok: false, message: 'Tell me what time to stop at, e.g. "fast forward to 1:47pm".', executed: false };
     }
 
-    const speedNotice = cmd.speed === undefined ? ' (10x assumed)' : '';
-
     // Seek to explicit start if the user gave one or if we decided to restart.
     if (startTs !== undefined && startTs !== nowTs) {
-      onMessage?.(`Seeking to ${formatTime(toEtTime(startTs, date))}…`);
       send({ cmd: 'seek', timestamp: startTs });
       const arrived = await waitForCandleAt(ctx, startTs, 5000);
       if (!arrived) return { ok: false, message: 'Could not seek to the start time.', executed: false };
     }
 
+    console.log('[planner-trace] play step:', { direction, speed, startTs, endTs, symbol, date });
     send({ cmd: 'play', direction, speed, until: endTs });
     dispatch({ type: 'SET_PLAYING', isPlaying: true });
     dispatch({ type: 'SET_SPEED', speed });
-
-    const action = direction === 'backward' ? 'Rewinding' : 'Fast-forwarding';
-    onMessage?.(`${action} ${symbol} to ${formatTime(toEtTime(endTs, date))}${cmd.speed === undefined ? speedNotice : ''}.`);
 
     // Poll briefly for completion and then report the pause. The engine broadcasts
     // session_state when it auto-pauses at the stop timestamp.
@@ -714,6 +838,7 @@ function normalizeLLMIntent(raw: unknown): ChartIntent | undefined {
     'pause',
     'seek',
     'set_speed',
+    'set_timeframe',
     'step_forward',
     'step_backward',
     'unknown',
@@ -749,6 +874,7 @@ export async function parseChartCommandWithLLM(
     speed: 10,
     direction: 'forward',
     relativeMinutes: undefined,
+    timeframe: undefined,
   };
 
   const currentCandle = world.recentCandles[world.recentCandles.length - 1];
@@ -761,11 +887,12 @@ export async function parseChartCommandWithLLM(
     'Output ONLY a JSON object and nothing else. Use null for missing/unknown fields.',
     'JSON schema (null means optional/absent):',
     JSON.stringify(example, null, 2),
-    'Valid intents: switch, fast_forward, rewind, play, pause, seek, set_speed, step_forward, step_backward, unknown.',
+    'Valid intents: switch, fast_forward, rewind, play, pause, seek, set_speed, set_timeframe, step_forward, step_backward, unknown.\nThe "timeframe" field is minutes per bar: 1, 5, 15, 60, 240, or 1440 (daily).',
     'Times are 24-hour objects with "hour" and "minute". Use "unknown" intent if the message is not a chart command.',
     'Examples:',
-    JSON.stringify({ intent: 'fast_forward', symbol: null, date: null, startTime: null, endTime: { hour: 14, minute: 0 }, speed: 10, direction: 'forward', relativeMinutes: null }),
-    JSON.stringify({ intent: 'switch', symbol: 'AAPL', date: '2026-07-28', startTime: null, endTime: null, speed: null, direction: null, relativeMinutes: null }),
+    JSON.stringify({ intent: 'fast_forward', symbol: null, date: null, startTime: null, endTime: { hour: 14, minute: 0 }, speed: 10, direction: 'forward', relativeMinutes: null, timeframe: null }),
+    JSON.stringify({ intent: 'switch', symbol: 'AAPL', date: '2026-07-28', startTime: null, endTime: null, speed: null, direction: null, relativeMinutes: null, timeframe: null }),
+    JSON.stringify({ intent: 'set_timeframe', symbol: null, date: null, startTime: null, endTime: null, speed: null, direction: null, relativeMinutes: null, timeframe: 5 }),
     JSON.stringify({ intent: 'unknown' }),
   ].join('\n');
 
@@ -799,7 +926,7 @@ export async function parseChartCommandWithLLM(
       }
     }
 
-    const date = typeof raw.date === 'string' ? parseDate(raw.date) : undefined;
+    const date = typeof raw.date === 'string' ? parseDate(raw.date, world.session.date) : undefined;
     const startTime = normalizeLLMTime(raw.startTime);
     const endTime = normalizeLLMTime(raw.endTime);
     const speed = typeof raw.speed === 'number' ? clampSpeed(raw.speed) : undefined;
@@ -807,6 +934,7 @@ export async function parseChartCommandWithLLM(
       raw.direction === 'forward' || raw.direction === 'backward' ? raw.direction : undefined;
     const relativeMinutes =
       typeof raw.relativeMinutes === 'number' ? Math.max(1, Math.round(raw.relativeMinutes)) : undefined;
+    const timeframe = clampTimeframe(typeof raw.timeframe === 'number' ? raw.timeframe : undefined);
 
     return {
       intent,
@@ -817,6 +945,7 @@ export async function parseChartCommandWithLLM(
       speed,
       direction,
       relativeMinutes,
+      timeframe,
     };
   } catch {
     return null;

@@ -41,6 +41,9 @@ Release/
 frontend/node_modules/
 frontend/dist/
 frontend/.vite/
+frontend/*.log
+frontend/tsconfig.tsbuildinfo
+*.log
 
 # --- Python ---
 __pycache__/
