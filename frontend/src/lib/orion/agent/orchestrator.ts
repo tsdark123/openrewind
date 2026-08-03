@@ -3,33 +3,53 @@
 //
 // Routing policy
 //   1. Short interjections/hesitations are handled offline, instantly.
-//   2. Conversation-classified inputs go to the chat path (offline or Ollama).
-//   3. Deterministic chart parser is tried next.  A fast path is only taken
+//   2. "What action did you just perform?" is answered from the execution log
+//      with no LLM call.
+//   3. Conversation-classified inputs go to the chat path.
+//   4. Deterministic chart parser is tried next.  A fast path is only taken
 //      when the parse is a supported intent and has all required fields.
-//   4. Incomplete switch requests (parser sees switch but no symbol, or the
-//      whole parse is unknown and the user seems to be naming a symbol) are
-//      converted into a resolve_symbol plan.  That produces a structured
-//      SYMBOL_UNAVAILABLE / SYMBOL_AMBIGUOUS receipt when appropriate.
-//   5. Anything not handled falls back to chat.
+//   5. Incomplete switch requests are converted into a resolve_symbol plan.
+//   6. Anything not handled falls back to compact semantic-intent extraction,
+//      with bounded execution context rendered into the prompt.
 //
-// Every request logs routing timing when ORION_AGENT_DEBUG is enabled.
+// Phase 5 changes:
+//   - Every return path flows through finalizeTurn(), recording the turn in
+//     the verified execution context.
+//   - ChartActionIntent is the reusable ActionTemplate. Full AgentPlans are not
+//     stored in the context.
+//   - contextReference lets anaphoric requests ("do that again", "same
+//     timeframe", "go back to the candle") be resolved structurally.
 // =============================================================================
 
-import type { AgentContext, AgentPlan, AgentExecutionResult, CancellationToken } from './types';
+import type {
+  AgentContext,
+  AgentPlan,
+  AgentExecutionResult,
+  CancellationToken,
+  ChartActionIntent,
+  CandleSnapshot,
+  CompactStateSnapshot,
+  ExecutionContextEntry,
+} from './types';
 import { createCancellationSource, type CancellationSource } from './types';
-import { parseChartCommand, extractDateInput, type ChartCommand } from '../planner';
+import { parseChartCommand, extractDateInput, extractTimes, type ChartCommand, type ParsedTime } from '../planner';
 import { SYMBOL_ALIASES } from '../symbolAliases';
 import { classifyOrionIntent } from '../router';
 import { orionChat } from '../client';
 import { buildWorldState, renderWorldStateForPrompt, type WorldState } from '../worldState';
 import { commonSenseReply } from '../commonSense';
 import type { SymbolResolution } from './resolveSymbol';
-import { chartCommandToPlan } from './planner-adapter';
+import { chartCommandToPlan, chartCommandToActionTemplate } from './planner-adapter';
 import { executeAgentPlan } from './executor';
 import { extractSemanticIntent } from './intent';
-import { compileChartActionIntent } from './intentCompiler';
+import { compileChartActionIntent, resolveContextReference } from './intentCompiler';
 import { validateAgentPlan } from './validatePlan';
 import { agentTrace } from './config';
+import {
+  buildCompactStateSnapshot,
+  buildCandleSnapshot,
+} from './executionContext';
+import type { CandleData } from '../../../types';
 
 export interface OrchestratorOptions {
   /** Whether Ollama/chat model is ready. */
@@ -50,7 +70,18 @@ export interface OrchestratorResult {
   /** Execution result, if an action plan ran. */
   result?: AgentExecutionResult;
   /** Route chosen for diagnostics. */
-  route: 'chat' | 'deterministic' | 'resolve' | 'llm-plan' | 'clarification' | 'unsupported' | 'unrecognized' | 'error';
+  route: 'chat' | 'deterministic' | 'resolve' | 'llm-plan' | 'clarification' | 'unsupported' | 'unrecognized' | 'recent-action-summary' | 'error';
+}
+
+interface RouteOutput {
+  ok: boolean;
+  message: string;
+  wasChat: boolean;
+  route: OrchestratorResult['route'];
+  plan?: AgentPlan;
+  result?: AgentExecutionResult;
+  /** The normalized ActionTemplate when the turn produced a replayable action. */
+  template?: ChartActionIntent;
 }
 
 let planCounter = 0;
@@ -95,7 +126,7 @@ const INTERJECTIONS: Record<string, string> = {
   'okay?': 'Ready when you are.',
   'what?': 'What would you like me to do?',
   'yeah?': "Yeah—what's up?",
-  'yes?': 'What would you like to do?',
+  'yes?': 'What would you like me to do?',
   'no?': 'No problem. Let me know what you need.',
   'really?': 'Really. What do you need?',
 };
@@ -105,11 +136,134 @@ function shortInterjectionReply(text: string): string | null {
   return INTERJECTIONS[t] ?? null;
 }
 
+function normalizeQuery(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/\bwut\b/g, 'what')
+    .replace(/\b[u]\b/g, 'you')
+    .replace(/[’']/g, '')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 function isConversation(text: string): boolean {
   const t = text.trim().toLowerCase();
   if (t.length <= 4) return true;
   if (/^(hi|hello|hey|um|uh|hmm|ok|okay|yes|no|what|why|how|tell me|are you|is it|can you|could you|will you|would you|should i)\b/.test(t)) return true;
   return false;
+}
+
+function isRecentActionQuestion(text: string): boolean {
+  const t = normalizeQuery(text);
+  // Avoid historical questions like "what did you do yesterday"
+  if (/\b(yesterday|last week|last month|last year|ago)\b/.test(t)) return false;
+  const patterns = [
+    /^what action did you just (do|perform)$/,
+    /^what did you just do$/,
+    /^what was the last thing you did$/,
+    /^what did orion just do$/,
+    /^what happened just now$/,
+    /^what did (the agent|it|orion) do$/,
+    /^what just happened$/,
+  ];
+  return patterns.some((re) => re.test(t));
+}
+
+function isCanonicalRepeat(text: string): boolean {
+  const t = normalizeQuery(text);
+  const patterns = [
+    /^do (that|it|this) again$/,
+    /^do the last action again$/,
+    /^run (that|it) again$/,
+    /^repeat (that|it)$/,
+    /^again$/,
+    /^do it over$/,
+  ];
+  return patterns.some((re) => re.test(t));
+}
+
+async function handleCanonicalRepeat(
+  text: string,
+  ctx: AgentContext,
+  token: CancellationToken
+): Promise<RouteOutput | null> {
+  const prior = ctx.executionLog.latestSuccessfulAction();
+  if (!prior?.template) {
+    agentTrace('route', 'canonical-repeat', { text, found: false });
+    return {
+      ok: true,
+      message: 'There is no replayable action yet.',
+      wasChat: true,
+      route: 'clarification',
+    };
+  }
+
+  agentTrace('route', 'canonical-repeat', {
+    text,
+    prior: prior.originalRequest,
+    template: prior.template,
+  });
+
+  // Resolve the stored template again so context-dependent fields (e.g.
+  // compare_candles) are re-bound to the current execution log.
+  const resolution = resolveContextReference(prior.template, ctx);
+  if (!resolution.ok) {
+    return {
+      ok: false,
+      message: `I couldn't repeat that: ${resolution.error}`,
+      wasChat: true,
+      route: 'clarification',
+    };
+  }
+
+  const plan = compileChartActionIntent(resolution.intent, {
+    anchorDate:
+      resolution.anchorDate ||
+      ctx.getState().replayDate ||
+      new Date().toISOString().slice(0, 10),
+    resolvedCandle: resolution.resolvedCandle,
+    resolvedCompare: resolution.resolvedCompare,
+    stateSymbol: ctx.getState().symbol,
+  });
+
+  const validation = validateAgentPlan(plan);
+  if (!validation.ok) {
+    agentTrace('route', 'canonical-repeat-invalid', { error: validation.error });
+    return {
+      ok: false,
+      message: `I couldn't repeat that: ${validation.error}`,
+      wasChat: false,
+      route: 'error',
+    };
+  }
+
+  plan.id = plan.id || makePlanId();
+  const result = await executeAgentPlan(plan, ctx, token);
+  agentTrace('route', 'canonical-repeat-executed', { ok: result.ok });
+
+  return {
+    ok: result.ok,
+    message: composeResponse(result, ctx),
+    wasChat: false,
+    plan,
+    result,
+    route: 'deterministic',
+    template: resolution.intent,
+  };
+}
+
+function looksLikeContextReference(text: string): boolean {
+  const t = text.trim().toLowerCase();
+  return (
+    /\b(?:do|run|perform)\s+(?:that|it|this|the same)\s+(?:again|thing|one)\b/.test(t) ||
+    /\b(?:again|same|repeat)\b.*\b(?:timeframe|time frame|date|session|candle)\b/.test(t) ||
+    /\b(?:same|the same)\s+(?:timeframe|time frame|date|session)\b/.test(t) ||
+    /\bgo\s+back\s+(?:to\s+)?(?:the\s+)?(?:candle|stock|symbol|one)\b/.test(t) ||
+    /\b(?:previous|last|prior)\s+(?:candle|one|stock|symbol|session)\b/.test(t) ||
+    /\bcompare\s+(?:this|the|that)\s+candle\s+(?:with|to|against)\s+(?:the\s+)?(?:previous|last|prior|reported)\b/.test(t) ||
+    /\b(?:the|a)\s+candle\s+we\s+were\s+discussing\b/.test(t)
+  );
 }
 
 function looksLikeSwitch(text: string): boolean {
@@ -131,6 +285,55 @@ function looksLikeChartQuery(text: string): boolean {
 function buildWorldStateForChat(ctx: AgentContext): string {
   const ws = buildWorldState(ctx.getState(), ctx.chartRef, ctx.performanceLog);
   return renderWorldStateForPrompt(ws);
+}
+
+function buildRecentActionSummary(log: AgentContext['executionLog'], text: string): string {
+  const latest = log.latest();
+  if (!latest) return "We haven't done anything in this session yet.";
+
+  const successful = log.latestSuccessfulAction();
+  const failed = log.latestFailedAction();
+  const action = successful; // answer the most recent successful action by default
+
+  if (isRecentActionQuestion(text)) {
+    if (latest.route === 'ui-action' && latest.actionKind === 'chart_reset') {
+      const prior = log.latestSuccessfulAction();
+      if (prior) {
+        return `You just reset the chart. The latest Orion action before that was "${prior.originalRequest}" (${prior.planSummary ?? prior.route}).`;
+      }
+      if (failed) {
+        return `You just reset the chart. The previous action "${failed.originalRequest}" had failed: ${failed.errorMessage ?? 'unknown error'}.`;
+      }
+      return 'You just reset the chart.';
+    }
+
+    if (latest.template) {
+      if (latest.ok === true) {
+        const detail = latest.planSummary ?? latest.route;
+        const receipts = latest.receipts.filter((r) => r.success).map((r) => r.message).join(' ');
+        return `I just ran "${latest.originalRequest}" (${detail}). It succeeded. ${receipts}`;
+      }
+      if (latest.ok === false) {
+        const fail = latest.receipts.find((r) => !r.success);
+        return `I attempted "${latest.originalRequest}" (${latest.planSummary ?? latest.route}) but it failed: ${fail?.message ?? latest.errorMessage ?? 'unknown error'}.`;
+      }
+    }
+    // latest turn was chat/clarification; report the most recent successful action instead
+    if (action) {
+      return `We were just chatting. The last action before that was "${action.originalRequest}" (${action.planSummary ?? action.route}) and it succeeded.`;
+    }
+    if (failed) {
+      return `We were just chatting. The last action before that was "${failed.originalRequest}" and it failed: ${failed.errorMessage ?? 'unknown error'}.`;
+    }
+    return "We haven't executed an action yet; we've just been talking.";
+  }
+
+  // Generic "what did you just do" style — should not normally reach here because
+  // the specific question is handled, but keep a safe fallback.
+  if (action) {
+    return `The most recent successful action was "${action.originalRequest}" (${action.planSummary ?? action.route}).`;
+  }
+  return "I haven't completed a successful action yet in this session.";
 }
 
 // ---------------------------------------------------------------------------
@@ -158,17 +361,16 @@ async function runChat(text: string, ctx: AgentContext, setupReady: boolean, sta
   agentTrace('llm chat start', text);
   try {
     const world = buildWorldStateForChat(ctx);
-    const last = ctx.lastResult;
-    const recentContext = last
-      ? `RECENT ACTION\n${last.ok ? 'Succeeded' : 'Failed'}: ${last.receipts.filter((r) => r.success || r.success === false).map((r) => r.message).join('; ')}`
-      : 'No prior action recorded in this turn.';
+    const recentContext = ctx.executionLog.renderForPrompt({ maxActions: 3, includeCandles: true });
     const systemPrompt = [
       'You are Orion, an observant, offline AI trading coach embedded in OpenRewind.',
       `The WORLD STATE below is a live snapshot of the current session, not a completed/ended session. Do not claim the session has ended unless sessionActive is explicitly false.`,
-      'Only state facts that are present in the WORLD STATE or RECENT ACTION. Do not invent trades, profits, losses, or state changes.',
+      'Only state facts that are present in the WORLD STATE or RECENT ACTIONS. Do not invent trades, profits, losses, or state changes.',
       'Be concise: 2-4 short sentences unless asked for detail. Use plain English only.',
       'Do not provide regulated investment advice.',
       '',
+      'RECENT ACTIONS',
+      '--------------',
       recentContext,
       '',
       'WORLD STATE',
@@ -226,45 +428,8 @@ function makeResolvePlan(query: string): AgentPlan {
   };
 }
 
-async function resolveAndMaybeSwitch(
-  text: string,
-  ctx: AgentContext,
-  cmd: ChartCommand,
-  token: CancellationToken
-): Promise<OrchestratorResult | null> {
-  const query = extractSymbolCandidate(text);
-  const resolvePlan = makeResolvePlan(query);
-  resolvePlan.id = makePlanId();
-  const resolveResult = await executeAgentPlan(resolvePlan, ctx, token);
-
-  // Resolve failed cleanly: report structured failure and do not change state.
-  const failingReceipt = resolveResult.receipts.find((rc) => !rc.success);
-  if (failingReceipt) {
-    return {
-      ok: false,
-      message: failingReceipt.message,
-      wasChat: false,
-      plan: resolvePlan,
-      result: resolveResult,
-      route: 'resolve',
-    };
-  }
-
-  // Resolve succeeded: extract the symbol and attempt a switch.
-  const resolveData = resolveResult.receipts[0]?.data as SymbolResolution | undefined;
-  if (!resolveData || !resolveData.ok || !resolveData.symbol) {
-    return {
-      ok: false,
-      message: 'Resolved a symbol, but the result was missing.',
-      wasChat: false,
-      plan: resolvePlan,
-      result: resolveResult,
-      route: 'resolve',
-    };
-  }
-
-  const symbol = resolveData.symbol;
-  const switchPlan: AgentPlan = {
+function makeSwitchPlan(symbol: string): AgentPlan {
+  return {
     id: makePlanId(),
     kind: 'action',
     summary: `Switch to ${symbol} (resolved)`,
@@ -277,48 +442,10 @@ async function resolveAndMaybeSwitch(
       },
     ],
   };
-
-  if (!isDeterministicPlanComplete(switchPlan, text, cmd, ctx.getState().replayDate)) {
-    agentTrace('route', 'resolve-incomplete', { text });
-    return null;
-  }
-
-  const switchResult = await executeAgentPlan(switchPlan, ctx, token);
-
-  // Combine receipts for the caller.
-  const combinedResult: AgentExecutionResult = {
-    ok: resolveResult.ok && switchResult.ok,
-    planId: switchPlan.id,
-    receipts: [...resolveResult.receipts, ...switchResult.receipts],
-    finalWorldState: switchResult.finalWorldState ?? resolveResult.finalWorldState,
-    stoppedAtStepId: switchResult.stoppedAtStepId ?? resolveResult.stoppedAtStepId,
-    errorCode: !switchResult.ok ? switchResult.errorCode : resolveResult.errorCode,
-    errorMessage: !switchResult.ok ? switchResult.errorMessage : resolveResult.errorMessage,
-  };
-
-  if (token.cancelled) {
-    return {
-      ok: false,
-      message: 'Orion cancelled the request because a new one started.',
-      wasChat: false,
-      plan: switchPlan,
-      result: combinedResult,
-      route: 'error',
-    };
-  }
-
-  return {
-    ok: combinedResult.ok,
-    message: composeResponse(combinedResult, ctx),
-    wasChat: false,
-    plan: switchPlan,
-    result: combinedResult,
-    route: 'resolve',
-  };
 }
 
 // ---------------------------------------------------------------------------
-// Main entry
+// Deterministic planning completeness
 // ---------------------------------------------------------------------------
 
 type ActionDimension = 'symbol' | 'date' | 'timeframe' | 'absoluteTime' | 'relativeSeek' | 'playbackControl' | 'candleQuery' | 'previousSymbol';
@@ -344,7 +471,7 @@ function planCoversDimensions(plan: AgentPlan): Set<ActionDimension> {
       covered.add('playbackControl');
     }
     if (cap === 'playback.play' || cap === 'playback.pause') covered.add('playbackControl');
-    if (cap === 'chart.get_current_candle' || cap === 'chart.get_candle_at_time' || cap === 'chart.candle_query') {
+    if (cap === 'chart.get_current_candle' || cap === 'chart.get_candle_at_time' || cap === 'analysis.compare_candles') {
       covered.add('candleQuery');
       if (cap === 'chart.get_candle_at_time' && step.args?.time) covered.add('absoluteTime');
     }
@@ -355,7 +482,6 @@ function planCoversDimensions(plan: AgentPlan): Set<ActionDimension> {
   }
   return covered;
 }
-
 
 function textRequestsTimeframe(t: string): boolean {
   const hasContext = /\b(?:timeframe|time frame|tf|bars?|chart)\b/i.test(t);
@@ -396,7 +522,7 @@ function textRequestsRelativeSeek(t: string): boolean {
 }
 
 function textRequestsPlaybackControl(t: string): boolean {
-  return /\b(?:play|pause|rewind|fast[-\s]?forward|fastforward|speed up|slow down|set\s+speed)\b/i.test(t);
+  return /\b(?:play|pause|rewind|fast[-\s]?forward|fastforward|speed up|slow down|set\s+speed)\b/.test(t);
 }
 
 function textRequestsCandleQuery(t: string): boolean {
@@ -456,20 +582,340 @@ function getRequestedDimensions(text: string, cmd: ChartCommand, baseDate?: stri
   return dims;
 }
 
-function isDeterministicPlanComplete(plan: AgentPlan, text: string, cmd: ChartCommand, baseDate?: string): boolean {
+function stateCoversDimension(
+  dim: ActionDimension,
+  cmd: ChartCommand,
+  state: ReturnType<AgentContext['getState']>
+): boolean {
+  if (dim === 'symbol') return !!cmd.symbol && state.symbol === cmd.symbol;
+  if (dim === 'date') return !!cmd.date && state.replayDate === cmd.date;
+  if (dim === 'timeframe') return cmd.timeframe !== undefined && state.timeframe === cmd.timeframe;
+  return false;
+}
+
+const ALL_ACTION_DIMENSIONS: ActionDimension[] = [
+  'symbol',
+  'date',
+  'timeframe',
+  'absoluteTime',
+  'relativeSeek',
+  'playbackControl',
+  'candleQuery',
+  'previousSymbol',
+];
+
+const INHERIT_FIELD_TO_DIMENSION: Record<string, ActionDimension | undefined> = {
+  date: 'date',
+  timeframe: 'timeframe',
+  seekTime: 'absoluteTime',
+  relativeSeekMinutes: 'relativeSeek',
+  playback: 'playbackControl',
+  finalQuery: 'candleQuery',
+};
+
+function formatParsedTime(t: ParsedTime): string {
+  return `${t.hour.toString().padStart(2, '0')}:${t.minute.toString().padStart(2, '0')}`;
+}
+
+function isCompareRequest(text: string): boolean {
+  return /\bcompare\b/i.test(text) || /\b(?:this|the|that)\s+candle\s+(?:with|to|against)\s+(?:the\s+)?(?:previous|last|prior|reported)\b/i.test(text);
+}
+
+function isCurrentCandleRequest(text: string): boolean {
+  return /\b(?:current|now|latest)\s+(?:candle|price|bar)\b/i.test(text);
+}
+
+interface IntentSanitizationResult {
+  ok: boolean;
+  intent?: ChartActionIntent;
+  reason?: string;
+  trace: {
+    kept: string[];
+    stripped: string[];
+    defaults: string[];
+  };
+}
+
+function formatDateForTrace(d: ChartActionIntent['date']): string {
+  if (!d) return '';
+  if (d.kind === 'absolute') return d.value ?? '';
+  return `${d.kind}:${d.count ?? 1}:${d.direction ?? 'backward'}`;
+}
+
+/**
+ * Field-level semantic-safety sanitizer. After the compact model emits a
+ * ChartActionIntent (and after context references have been resolved), each
+ * actionable field is checked independently:
+ *   1. Keep it if the current request explicitly grounds it.
+ *   2. Keep it if a valid contextReference authorizes it.
+ *   3. Strip it as a safe state default if it only repeats the current state.
+ *   4. Strip it if it is an unsupported optional field.
+ * If no meaningful grounded action remains, the entire intent is rejected.
+ * This prevents `clean` -> `Switch AAPL 2023-03-15 15m @11:15 current_candle`
+ * while still allowing "Take me to Apple around quarter past eleven."
+ */
+function sanitizeIntentGrounding(
+  resolved: ChartActionIntent,
+  text: string,
+  originalContextReference: ChartActionIntent['contextReference'],
+  ctx: AgentContext
+): IntentSanitizationResult {
+  const cmd = parseChartCommand(text, ctx.availableTickers, SYMBOL_ALIASES, ctx.getState().replayDate);
+  const baseDate = ctx.getState().replayDate;
   const requested = getRequestedDimensions(text, cmd, baseDate);
+  const anaphoric = looksLikeContextReference(text);
+  const state = ctx.getState();
+
+  const allowed = new Set<ActionDimension>(requested);
+  if (anaphoric && originalContextReference) {
+    const { mode, inherit } = originalContextReference;
+    if (mode === 'repeat') {
+      for (const d of ALL_ACTION_DIMENSIONS) allowed.add(d);
+    } else if (mode === 'inherit' && inherit) {
+      for (const f of inherit) {
+        const dim = INHERIT_FIELD_TO_DIMENSION[f];
+        if (dim) allowed.add(dim);
+      }
+    } else if (mode === 'use_as_target') {
+      allowed.add('absoluteTime');
+      allowed.add('symbol');
+      allowed.add('date');
+      allowed.add('timeframe');
+      allowed.add('candleQuery');
+    } else if (mode === 'anchor_relative_date') {
+      allowed.add('date');
+    }
+  }
+
+  if (resolved.finalQuery === 'compare_candles' && (anaphoric || isCompareRequest(text))) {
+    allowed.add('candleQuery');
+  }
+
+  const extractedTimes = extractTimes(text).map(formatParsedTime);
+  const trace: IntentSanitizationResult['trace'] = { kept: [], stripped: [], defaults: [] };
+
+  // Work on a deep copy; contextReference is consumed by resolveContextReference.
+  const sanitized = JSON.parse(JSON.stringify(resolved)) as ChartActionIntent;
+  delete (sanitized as unknown as Record<string, unknown>).contextReference;
+
+  // Symbol
+  if (sanitized.symbol !== undefined) {
+    if (allowed.has('symbol')) {
+      trace.kept.push(`symbol:${sanitized.symbol}`);
+    } else if (sanitized.symbol === state.symbol && state.symbol) {
+      delete sanitized.symbol;
+      trace.defaults.push(`symbol:${state.symbol}`);
+    } else {
+      const v = sanitized.symbol;
+      delete sanitized.symbol;
+      trace.stripped.push(`symbol:${v}`);
+    }
+  }
+
+  // Previous symbol
+  if (sanitized.previousSymbol) {
+    if (allowed.has('previousSymbol')) {
+      trace.kept.push('previousSymbol');
+    } else {
+      delete sanitized.previousSymbol;
+      trace.stripped.push('previousSymbol');
+    }
+  }
+
+  // Date
+  if (sanitized.date) {
+    const dateTrace = formatDateForTrace(sanitized.date);
+    if (allowed.has('date')) {
+      trace.kept.push(`date:${dateTrace}`);
+    } else if (sanitized.date.kind === 'absolute' && sanitized.date.value === state.replayDate) {
+      delete sanitized.date;
+      trace.defaults.push(`date:${state.replayDate}`);
+    } else {
+      delete sanitized.date;
+      trace.stripped.push(`date:${dateTrace}`);
+    }
+  }
+
+  // Timeframe
+  if (sanitized.timeframeMinutes !== undefined) {
+    const tf = sanitized.timeframeMinutes;
+    if (allowed.has('timeframe')) {
+      trace.kept.push(`timeframe:${tf}m`);
+    } else if (tf === state.timeframe) {
+      delete sanitized.timeframeMinutes;
+      trace.defaults.push(`timeframe:${tf}m`);
+    } else {
+      delete sanitized.timeframeMinutes;
+      trace.stripped.push(`timeframe:${tf}m`);
+    }
+  }
+
+  // Absolute time
+  if (sanitized.seekTime !== undefined) {
+    const t = sanitized.seekTime;
+    if (allowed.has('absoluteTime')) {
+      trace.kept.push(`seekTime:${t}`);
+    } else {
+      delete sanitized.seekTime;
+      trace.stripped.push(`seekTime:${t}`);
+    }
+  }
+
+  // Query time (used by candle_at_time)
+  if (sanitized.queryTime !== undefined) {
+    const t = sanitized.queryTime;
+    const timeGrounded = extractedTimes.includes(t) ||
+      (anaphoric && originalContextReference && (originalContextReference.mode === 'repeat' || originalContextReference.mode === 'use_as_target'));
+    if (timeGrounded && allowed.has('absoluteTime')) {
+      trace.kept.push(`queryTime:${t}`);
+    } else {
+      delete sanitized.queryTime;
+      trace.stripped.push(`queryTime:${t}`);
+    }
+  }
+
+  // Relative seek
+  if (sanitized.relativeSeekMinutes !== undefined) {
+    const m = sanitized.relativeSeekMinutes;
+    if (allowed.has('relativeSeek')) {
+      trace.kept.push(`relativeSeek:${m}m`);
+    } else {
+      delete sanitized.relativeSeekMinutes;
+      trace.stripped.push(`relativeSeek:${m}m`);
+    }
+  }
+
+  // Playback
+  if (sanitized.playback) {
+    const pb = sanitized.playback;
+    if (allowed.has('playbackControl')) {
+      trace.kept.push(`playback:${pb.action}`);
+      if (pb.untilTime !== undefined) {
+        const t = pb.untilTime;
+        if (extractedTimes.includes(t) || allowed.has('absoluteTime')) {
+          trace.kept.push(`playback.untilTime:${t}`);
+        } else {
+          delete pb.untilTime;
+          trace.stripped.push(`playback.untilTime:${t}`);
+        }
+      }
+      if (pb.speed !== undefined) {
+        const s = pb.speed;
+        if (cmd.speed === s) {
+          trace.kept.push(`playback.speed:${s}`);
+        } else if (s === 1) {
+          trace.defaults.push(`playback.speed:${s}`);
+        } else {
+          delete pb.speed;
+          trace.stripped.push(`playback.speed:${s}`);
+        }
+      }
+      if (pb.direction !== undefined) {
+        const d = pb.direction;
+        if (cmd.direction === d || textRequestsPlaybackControl(text)) {
+          trace.kept.push(`playback.direction:${d}`);
+        } else {
+          delete pb.direction;
+          trace.stripped.push(`playback.direction:${d}`);
+        }
+      }
+    } else {
+      delete sanitized.playback;
+      trace.stripped.push('playback');
+    }
+  }
+
+  // Compare
+  if (sanitized.compare) {
+    if (sanitized.finalQuery === 'compare_candles' && (anaphoric || isCompareRequest(text) || allowed.has('candleQuery'))) {
+      trace.kept.push('compare');
+    } else {
+      delete sanitized.compare;
+      trace.stripped.push('compare');
+    }
+  }
+
+  // Final query
+  if (sanitized.finalQuery) {
+    const fq = sanitized.finalQuery;
+    if (fq === 'compare_candles') {
+      if (sanitized.compare && (anaphoric || isCompareRequest(text) || allowed.has('candleQuery'))) {
+        trace.kept.push(`finalQuery:${fq}`);
+      } else {
+        delete sanitized.finalQuery;
+        trace.stripped.push(`finalQuery:${fq}`);
+      }
+    } else if (fq === 'candle_at_time') {
+      if ((allowed.has('candleQuery') || textRequestsCandleQuery(text)) && allowed.has('absoluteTime') && (sanitized.queryTime !== undefined || sanitized.seekTime !== undefined)) {
+        trace.kept.push(`finalQuery:${fq}`);
+      } else {
+        delete sanitized.finalQuery;
+        trace.stripped.push(`finalQuery:${fq}`);
+      }
+    } else if (fq === 'current_candle') {
+      if (allowed.has('candleQuery') || textRequestsCandleQuery(text) || isCurrentCandleRequest(text)) {
+        trace.kept.push(`finalQuery:${fq}`);
+      } else {
+        delete sanitized.finalQuery;
+        trace.stripped.push(`finalQuery:${fq}`);
+      }
+    } else {
+      delete sanitized.finalQuery;
+      trace.stripped.push(`finalQuery:${fq}`);
+    }
+  }
+
+  // A sanitized intent must still be meaningful. A date without a symbol is
+  // only actionable when an active session symbol exists.
+  const hasAction =
+    sanitized.symbol !== undefined ||
+    sanitized.previousSymbol ||
+    sanitized.timeframeMinutes !== undefined ||
+    sanitized.seekTime !== undefined ||
+    sanitized.queryTime !== undefined ||
+    sanitized.relativeSeekMinutes !== undefined ||
+    sanitized.playback !== undefined ||
+    sanitized.finalQuery !== undefined ||
+    (sanitized.date && (sanitized.symbol !== undefined || state.symbol));
+
+  if (!hasAction) {
+    const reason = trace.stripped.length > 0
+      ? `Nothing left after stripping: ${trace.stripped.join(', ')}`
+      : 'No actionable fields were grounded';
+    agentTrace('grounding', {
+      ok: false,
+      kept: trace.kept,
+      stripped: trace.stripped,
+      defaults: trace.defaults,
+      reason,
+    });
+    return { ok: false, reason, trace };
+  }
+
+  agentTrace('grounding', {
+    ok: true,
+    kept: trace.kept,
+    stripped: trace.stripped,
+    defaults: trace.defaults,
+    finalIntent: sanitized,
+  });
+
+  return { ok: true, intent: sanitized, trace };
+}
+
+function isDeterministicPlanComplete(plan: AgentPlan, text: string, cmd: ChartCommand, ctx: AgentContext): boolean {
+  const requested = getRequestedDimensions(text, cmd, ctx.getState().replayDate);
   const covered = planCoversDimensions(plan);
+  const state = ctx.getState();
   agentTrace('deterministic completeness', { requested: Array.from(requested), covered: Array.from(covered) });
   for (const dim of requested) {
-    if (!covered.has(dim)) {
+    if (!covered.has(dim) && !stateCoversDimension(dim, cmd, state)) {
       agentTrace('deterministic incomplete', { dim, text });
       return false;
     }
   }
   return true;
 }
-
-
 
 function supportedIntent(intent: string): boolean {
   return ['switch', 'play', 'pause', 'set_timeframe', 'seek', 'fast_forward', 'rewind', 'candle_query'].includes(intent);
@@ -479,30 +925,128 @@ function isFastPathReady(cmd: ChartCommand): boolean {
   if (!supportedIntent(cmd.intent)) return false;
   if (cmd.intent === 'switch' && !cmd.symbol) return false;
   if (cmd.intent === 'set_timeframe' && cmd.timeframe === undefined) return false;
-  // play / fast_forward / rewind need an active session, but we let the capability
-  // decide whether it can run; the parse itself is valid.
   return true;
 }
 
-export async function handleOrionMessage(opts: OrchestratorOptions): Promise<OrchestratorResult> {
-  const { text, ctx, setupReady } = opts;
-  const routeStart = now();
+// ---------------------------------------------------------------------------
+// Execution context recording
+// ---------------------------------------------------------------------------
 
-  cancelPreviousPlan();
-  const token = newCancellation();
+function finalizeTurn(
+  ctx: AgentContext,
+  input: {
+    text: string;
+    route: OrchestratorResult['route'];
+    template?: ChartActionIntent;
+    planSummary?: string;
+    plan?: AgentPlan;
+    result?: AgentExecutionResult;
+    before: CompactStateSnapshot;
+    after: CompactStateSnapshot;
+    returnedCandles: CandleSnapshot[];
+  }
+): void {
+  const result = input.result;
+  const entry: ExecutionContextEntry = {
+    sequenceId: 0,
+    timestamp: Date.now(),
+    originalRequest: input.text,
+    route: input.route,
+    template: input.template,
+    planSummary: input.planSummary,
+    planId: input.plan?.id ?? result?.planId,
+    ok: result?.ok,
+    receipts: result?.receipts ?? [],
+    stoppedAtStepId: result?.stoppedAtStepId,
+    errorCode: result?.errorCode,
+    errorMessage: result?.errorMessage,
+    before: input.before,
+    after: input.after,
+    returnedCandles: input.returnedCandles,
+  };
+  ctx.executionLog.record(entry);
+}
 
-  agentTrace('handleOrionMessage start', text, { tickers: ctx.availableTickers.length });
+function extractReturnedCandles(
+  result: AgentExecutionResult | undefined,
+  snapshotId: number,
+  coords: CompactStateSnapshot
+): CandleSnapshot[] {
+  if (!result || !coords.symbol || !coords.date || coords.timeframe === undefined) return [];
+  const candles: CandleSnapshot[] = [];
+  for (const r of result.receipts) {
+    if (!r.success) continue;
+    if (r.capability === 'analysis.compare_candles') {
+      // A comparison is not a new returned candle; it only references earlier ones.
+      continue;
+    }
+    if (r.capability !== 'chart.get_current_candle' && r.capability !== 'chart.get_candle_at_time') continue;
+    const data = r.data as { candle?: CandleData } & Partial<CandleData> | undefined;
+    const candle: CandleData | undefined =
+      data?.candle ??
+      (data && typeof data.timestamp === 'number' && typeof data.close === 'number'
+        ? (data as CandleData)
+        : undefined);
+    if (!candle) continue;
+    candles.push(
+      buildCandleSnapshot(
+        snapshotId,
+        { symbol: coords.symbol, date: coords.date, timeframe: coords.timeframe },
+        candle,
+        r.capability === 'chart.get_current_candle' ? 'current_candle' : 'candle_at_time'
+      )
+    );
+  }
+  return candles;
+}
 
+// ---------------------------------------------------------------------------
+// Main entry
+// ---------------------------------------------------------------------------
+
+async function routeMessage(
+  text: string,
+  ctx: AgentContext,
+  setupReady: boolean,
+  token: CancellationToken
+): Promise<RouteOutput> {
   // 1. Instant interjections.
   const interjection = shortInterjectionReply(text);
   if (interjection) {
-    agentTrace('route', 'interjection', { elapsed: elapsed(routeStart) });
+    agentTrace('route', 'interjection', { text });
     return { ok: true, message: interjection, wasChat: true, route: 'chat' };
   }
 
-  // 2. Conversation heuristics / classifier.
-  const routeChat = isConversation(text);
-  const classification = classifyOrionIntent(text);
+  // 2. "What action did you just perform?" — deterministic and grounded.
+  if (isRecentActionQuestion(text)) {
+    agentTrace('route', 'recent-action-summary');
+    const message = buildRecentActionSummary(ctx.executionLog, text);
+    return { ok: true, message, wasChat: true, route: 'recent-action-summary' };
+  }
+
+  // 2b. Canonical bare repeat requests — replay the latest successful action
+  // without waiting for the model.
+  if (isCanonicalRepeat(text)) {
+    const repeat = await handleCanonicalRepeat(text, ctx, token);
+    if (repeat) return repeat;
+  }
+
+  // 3b. Anaphoric / context-reference requests should not be answered by the
+  // deterministic chart parser because it has no access to execution context.
+  const anaphoric = looksLikeContextReference(text);
+
+  // 3. Conversation heuristics / classifier.
+  let routeChat = isConversation(text);
+  let classification = classifyOrionIntent(text);
+  // Candle comparison is a read-only query, but it is not chat.
+  if (/\bcompare\b.*\bcandle\b/i.test(text)) {
+    classification = { intent: 'agent', confidence: 1, reasons: ['candle comparison override'] };
+  }
+  if (anaphoric) {
+    routeChat = false;
+    classification = { intent: 'agent', confidence: 1, reasons: ['context reference'] };
+  }
+
   if (
     routeChat &&
     classification.intent === 'chat' &&
@@ -510,22 +1054,22 @@ export async function handleOrionMessage(opts: OrchestratorOptions): Promise<Orc
     !looksLikeSwitch(text) &&
     !looksLikeChartQuery(text)
   ) {
-    agentTrace('route', 'chat', { elapsed: elapsed(routeStart) });
-    const message = await runChat(text, ctx, setupReady, routeStart);
+    agentTrace('route', 'chat', { text });
+    const message = await runChat(text, ctx, setupReady, now());
     return { ok: true, message, wasChat: true, route: 'chat' };
   }
 
-  // 3. Deterministic chart parser.
-  const parseStart = now();
-  const cmd: ChartCommand = parseChartCommand(text, ctx.availableTickers, SYMBOL_ALIASES, ctx.getState().replayDate);
-  agentTrace('parsed chart command', cmd, { parseElapsed: elapsed(parseStart) });
+  // 4. Deterministic chart parser.
+  const cmd = parseChartCommand(text, ctx.availableTickers, SYMBOL_ALIASES, ctx.getState().replayDate);
+  agentTrace('parsed chart command', cmd);
 
-  if (isFastPathReady(cmd)) {
+  if (!anaphoric && isFastPathReady(cmd)) {
     const plan = chartCommandToPlan(cmd);
-    if (plan && isDeterministicPlanComplete(plan, text, cmd, ctx.getState().replayDate)) {
+    if (plan && isDeterministicPlanComplete(plan, text, cmd, ctx)) {
       plan.id = plan.id || makePlanId();
+      const template = chartCommandToActionTemplate(cmd);
       const result = await executeAgentPlan(plan, ctx, token);
-      agentTrace('route', 'deterministic', { elapsed: elapsed(routeStart), result: result.ok });
+      agentTrace('route', 'deterministic', { ok: result.ok });
       return {
         ok: result.ok,
         message: composeResponse(result, ctx),
@@ -533,40 +1077,136 @@ export async function handleOrionMessage(opts: OrchestratorOptions): Promise<Orc
         plan,
         result,
         route: 'deterministic',
+        template,
       };
     }
     if (plan) {
-      agentTrace('route', 'deterministic-incomplete', { elapsed: elapsed(routeStart) });
+      agentTrace('route', 'deterministic-incomplete', { text });
     }
   }
 
-  // 4. Incomplete or unresolved switch: let resolve_symbol handle it.
-  if ((cmd.intent === 'switch' && !cmd.symbol) || (cmd.intent === 'unknown' && looksLikeSwitch(text))) {
-    const resolveStart = now();
-    const resolved = await resolveAndMaybeSwitch(text, ctx, cmd, token);
-    agentTrace('route', 'resolve', { elapsed: elapsed(resolveStart) });
-    if (resolved) return resolved;
+  // 5. Incomplete or unresolved switch: let resolve_symbol handle it.
+  if (!anaphoric && ((cmd.intent === 'switch' && !cmd.symbol) || (cmd.intent === 'unknown' && looksLikeSwitch(text)))) {
+    const query = extractSymbolCandidate(text);
+    const resolvePlan = makeResolvePlan(query);
+    const resolveResult = await executeAgentPlan(resolvePlan, ctx, token);
+
+    const failingReceipt = resolveResult.receipts.find((rc) => !rc.success);
+    if (failingReceipt) {
+      // We tried to resolve the user's symbol request. Record the failed action meaning.
+      const template: ChartActionIntent | undefined = query ? { kind: 'chart_action', symbol: query } : undefined;
+      return {
+        ok: false,
+        message: failingReceipt.message,
+        wasChat: false,
+        plan: resolvePlan,
+        result: resolveResult,
+        route: 'resolve',
+        template,
+      };
+    }
+
+    const resolveData = resolveResult.receipts[0]?.data as SymbolResolution | undefined;
+    if (!resolveData || !resolveData.ok || !resolveData.symbol) {
+      return {
+        ok: false,
+        message: 'Resolved a symbol, but the result was missing.',
+        wasChat: false,
+        plan: resolvePlan,
+        result: resolveResult,
+        route: 'resolve',
+      };
+    }
+
+    const symbol = resolveData.symbol;
+    const switchPlan = makeSwitchPlan(symbol);
+    const switchResult = await executeAgentPlan(switchPlan, ctx, token);
+
+    const combinedResult: AgentExecutionResult = {
+      ok: resolveResult.ok && switchResult.ok,
+      planId: switchPlan.id,
+      receipts: [...resolveResult.receipts, ...switchResult.receipts],
+      finalWorldState: switchResult.finalWorldState ?? resolveResult.finalWorldState,
+      stoppedAtStepId: switchResult.stoppedAtStepId ?? resolveResult.stoppedAtStepId,
+      errorCode: !switchResult.ok ? switchResult.errorCode : resolveResult.errorCode,
+      errorMessage: !switchResult.ok ? switchResult.errorMessage : resolveResult.errorMessage,
+    };
+
+    if (token.cancelled) {
+      return {
+        ok: false,
+        message: 'Orion cancelled the request because a new one started.',
+        wasChat: false,
+        plan: switchPlan,
+        result: combinedResult,
+        route: 'error',
+      };
+    }
+
+    const template: ChartActionIntent = { kind: 'chart_action', symbol };
+    return {
+      ok: combinedResult.ok,
+      message: composeResponse(combinedResult, ctx),
+      wasChat: false,
+      plan: switchPlan,
+      result: combinedResult,
+      route: 'resolve',
+      template,
+    };
   }
 
-  // 5. Compact semantic-intent extraction for unfamiliar or compound actionable language.
+  // 6. Compact semantic-intent extraction for unfamiliar or compound actionable language.
   if (setupReady && (classification.intent === 'agent' || !routeChat)) {
-    const llmStart = now();
-    agentTrace('route', 'llm-intent-start', { elapsed: elapsed(routeStart) });
-    const semantic = await extractSemanticIntent(text);
-    agentTrace('llm intent end', { elapsed: elapsed(llmStart), result: semantic.ok ? 'intent' : semantic.kind });
+    agentTrace('route', 'llm-intent-start', { text });
+    const extraction = await extractSemanticIntent(text, { executionLog: ctx.executionLog });
+    agentTrace('llm intent end', { ok: extraction.ok ? 'intent' : extraction.kind });
 
-    if (semantic.ok) {
-      const plan = compileChartActionIntent(semantic.intent, {
-        anchorDate: ctx.getState().replayDate || new Date().toISOString().slice(0, 10),
+    if (extraction.ok) {
+      const resolution = resolveContextReference(extraction.intent, ctx);
+      if (!resolution.ok) {
+        agentTrace('route', 'clarification', { reason: resolution.error });
+        return {
+          ok: true,
+          message: resolution.error,
+          wasChat: true,
+          route: 'clarification',
+        };
+      }
+
+      const sanitization = sanitizeIntentGrounding(resolution.intent, text, extraction.intent.contextReference, ctx);
+      if (!sanitization.ok) {
+        agentTrace('grounding', 'rejected ungrounded chart action', { reason: sanitization.reason });
+        return {
+          ok: true,
+          message: "I'm not sure what you want me to do. Could you specify the symbol, date, timeframe, or time?",
+          wasChat: true,
+          route: 'clarification',
+        };
+      }
+
+      const sanitizedIntent = sanitization.intent!;
+      const plan = compileChartActionIntent(sanitizedIntent, {
+        anchorDate:
+          resolution.anchorDate ||
+          ctx.getState().replayDate ||
+          new Date().toISOString().slice(0, 10),
+        resolvedCandle: resolution.resolvedCandle,
+        resolvedCompare: resolution.resolvedCompare,
+        stateSymbol: ctx.getState().symbol,
       });
       const validation = validateAgentPlan(plan);
       if (!validation.ok) {
-        agentTrace('route', 'error', { elapsed: elapsed(routeStart), error: validation.error });
-        return { ok: false, message: `I could not build a valid plan: ${validation.error}`, wasChat: false, route: 'error' };
+        agentTrace('route', 'error', { error: validation.error });
+        return {
+          ok: false,
+          message: `I could not build a valid plan: ${validation.error}`,
+          wasChat: false,
+          route: 'error',
+        };
       }
       plan.id = plan.id || makePlanId();
       const result = await executeAgentPlan(plan, ctx, token);
-      agentTrace('route', 'llm-plan', { elapsed: elapsed(routeStart), result: result.ok });
+      agentTrace('route', 'llm-plan', { ok: result.ok });
       return {
         ok: result.ok,
         message: composeResponse(result, ctx),
@@ -574,34 +1214,77 @@ export async function handleOrionMessage(opts: OrchestratorOptions): Promise<Orc
         plan,
         result,
         route: 'llm-plan',
+        template: sanitizedIntent,
       };
     }
 
-    const { kind, message } = semantic;
+    const { kind, message } = extraction;
     if (kind === 'clarification') {
-      agentTrace('route', 'clarification', { elapsed: elapsed(routeStart) });
+      agentTrace('route', 'clarification');
       return { ok: true, message, wasChat: true, route: 'clarification' };
     }
 
     if (kind === 'unsupported') {
-      agentTrace('route', 'unsupported', { elapsed: elapsed(routeStart) });
+      agentTrace('route', 'unsupported');
       return { ok: false, message, wasChat: false, route: 'unsupported' };
     }
 
     if (kind === 'invalid') {
-      agentTrace('route', 'error', { elapsed: elapsed(routeStart), error: message });
+      agentTrace('route', 'error', { error: message });
       return { ok: false, message, wasChat: false, route: 'error' };
     }
 
     // offline / model unreachable
-    agentTrace('route', 'error', { elapsed: elapsed(routeStart), error: message });
+    agentTrace('route', 'error', { error: message });
     return { ok: false, message, wasChat: false, route: 'error' };
   }
 
-  // 6. Final chat fallback.
-  agentTrace('route', 'fallback-chat', { elapsed: elapsed(routeStart) });
-  const message = await runChat(text, ctx, setupReady, routeStart);
+  // 7. Final chat fallback.
+  agentTrace('route', 'fallback-chat', { text });
+  const message = await runChat(text, ctx, setupReady, now());
   return { ok: true, message, wasChat: true, route: 'chat' };
+}
+
+export async function handleOrionMessage(opts: OrchestratorOptions): Promise<OrchestratorResult> {
+  const { text, ctx, setupReady } = opts;
+
+  cancelPreviousPlan();
+  const token = newCancellation();
+
+  agentTrace('handleOrionMessage start', text, { tickers: ctx.availableTickers.length });
+
+  const before = buildCompactStateSnapshot(ctx.getState(), ctx.chartRef);
+
+  let routeOutput: RouteOutput;
+  try {
+    routeOutput = await routeMessage(text, ctx, setupReady, token);
+  } catch (e) {
+    const err = e instanceof Error ? e.message : String(e);
+    console.error('[orchestrator] route failed:', e);
+    agentTrace('route', 'error', { error: err });
+    routeOutput = { ok: false, message: `Internal error: ${err}`, wasChat: false, route: 'error' };
+  }
+
+  const after = buildCompactStateSnapshot(ctx.getState(), ctx.chartRef);
+
+  finalizeTurn(ctx, {
+    text,
+    route: routeOutput.route,
+    template: routeOutput.template,
+    planSummary: routeOutput.plan?.summary,
+    plan: routeOutput.plan,
+    result: routeOutput.result,
+    before,
+    after,
+    returnedCandles: extractReturnedCandles(
+      routeOutput.result,
+      0, // store will reassign sequenceId and snapshotIds
+      after
+    ),
+  });
+
+  const { template, ...result } = routeOutput;
+  return result;
 }
 
 function formatHumanDate(iso: string): string {

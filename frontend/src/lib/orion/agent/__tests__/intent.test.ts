@@ -210,7 +210,7 @@ describe('extractSemanticIntent', () => {
     expect(mockedOrionChat).toHaveBeenCalledTimes(1);
     const call = mockedOrionChat.mock.calls[0][0];
     expect(call.format).toBe('json');
-    expect(call.options).toEqual({ temperature: 0, seed: 42, num_predict: 128 });
+    expect(call.options).toEqual({ temperature: 0, seed: 42, num_predict: 160 });
     const system = call.messages.find((m: { role: string; content: string }) => m.role === 'system')?.content ?? '';
     expect(system).toContain(JSON.stringify(SEMANTIC_INTENT_SCHEMA).slice(0, 60));
     expect(r.ok).toBe(true);

@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import type { AppState } from '../../../../types';
 import type { AgentPlan, AgentContext } from '../types';
 import { executeAgentPlan } from '../executor';
+import { createExecutionContext } from '../executionContext';
 import { makeStepId } from '../types';
 import { getCapability } from '../capabilities';
 
@@ -75,6 +76,7 @@ function makeCtx(overrides: Partial<AgentContext> = {}): AgentContext {
       state.replayDate = date ?? state.replayDate;
       state.sessionActive = true;
     },
+    executionLog: createExecutionContext(),
     ...overrides,
   };
 }

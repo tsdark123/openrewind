@@ -5,7 +5,7 @@ import { CoreSpinLoader } from './core-spin-loader';
 import { cn } from '../../lib/utils';
 import { ensureModel, pullOrionModel } from '../../lib/orion/client';
 import { handleOrionMessage } from '../../lib/orion/agent/orchestrator';
-import type { AgentContext, AgentExecutionResult } from '../../lib/orion/agent/types';
+import type { AgentContext, AgentExecutionResult, ExecutionContextStore } from '../../lib/orion/agent/types';
 import {
   DEFAULT_GREETING,
   GLOBAL_THREAD_KEY,
@@ -49,6 +49,7 @@ interface OrionTerminalProps {
   onSwitchSymbol: (symbol: string, date?: string) => void | Promise<void>;
   send: (payload: Record<string, unknown>) => void;
   dispatch: (action: AppAction) => void;
+  executionLog: ExecutionContextStore;
 }
 
 export function OrionTerminal({
@@ -63,6 +64,7 @@ export function OrionTerminal({
   onSwitchSymbol,
   send,
   dispatch,
+  executionLog,
 }: OrionTerminalProps) {
   const threadKey = GLOBAL_THREAD_KEY;
 
@@ -181,6 +183,8 @@ export function OrionTerminal({
   );
 
   const handleResetChat = () => {
+    // Reset only the chat thread UI; the App-owned execution log is durable
+    // across side-panel open/close and must not be cleared here.
     setThreads((prev) => setThreadMessages(prev, threadKey, [DEFAULT_GREETING]));
   };
 
@@ -206,6 +210,7 @@ export function OrionTerminal({
       dispatch,
       onSwitchSymbol,
       lastResult: lastResultRef.current,
+      executionLog,
     };
 
     try {

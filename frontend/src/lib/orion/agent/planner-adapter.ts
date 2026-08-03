@@ -7,7 +7,7 @@
 // =============================================================================
 
 import type { ChartCommand, ParsedTime } from '../planner';
-import type { AgentPlan, AgentStep } from './types';
+import type { AgentPlan, AgentStep, ChartActionIntent, SemanticDate } from './types';
 import { resolveSymbol } from './resolveSymbol';
 import { makeStepId } from './types';
 
@@ -326,6 +326,96 @@ function buildCandleQueryPlan(cmd: ChartCommand): AgentPlan | null {
       },
     ],
   };
+}
+
+function toSemanticDate(dateInput: NonNullable<ChartCommand['dateInput']>): SemanticDate {
+  if (dateInput.kind === 'explicit') {
+    return { kind: 'absolute', value: dateInput.date ?? '' };
+  }
+  if (dateInput.kind === 'today') {
+    return { kind: 'absolute', value: dateInput.from ?? new Date().toISOString().slice(0, 10) };
+  }
+  if (dateInput.kind === 'relative_trading') {
+    return {
+      kind: 'relative_trading',
+      count: dateInput.count ?? 1,
+      direction: dateInput.direction ?? 'backward',
+    };
+  }
+  return {
+    kind: 'relative_calendar',
+    count: dateInput.count ?? 1,
+    direction: dateInput.direction ?? 'backward',
+  };
+}
+
+/**
+ * Convert a deterministic ChartCommand into a compact, reusable ActionTemplate.
+ * Returns undefined when the command cannot be represented safely as a
+ * ChartActionIntent (e.g. an unsupported `set_speed`).
+ */
+export function chartCommandToActionTemplate(cmd: ChartCommand): ChartActionIntent | undefined {
+  if (cmd.intent === 'unknown') return undefined;
+
+  const template: ChartActionIntent = { kind: 'chart_action' };
+
+  if (cmd.symbol) template.symbol = cmd.symbol;
+  if (cmd.dateInput) template.date = toSemanticDate(cmd.dateInput);
+  if (cmd.timeframe !== undefined) template.timeframeMinutes = cmd.timeframe;
+  if (cmd.startTime) template.seekTime = parseTimeToString(cmd.startTime);
+  if (cmd.endTime) {
+    // Some commands put an end time (e.g. play_until). For candle_query,
+    // startTime is used above; play_until end time maps to playback.untilTime.
+    if (cmd.intent === 'play' || cmd.intent === 'fast_forward') {
+      template.playback = {
+        action: 'play_until',
+        speed: cmd.speed,
+        untilTime: parseTimeToString(cmd.endTime),
+        direction: cmd.direction === 'backward' ? 'backward' : 'forward',
+      };
+    }
+  }
+  if (cmd.relativeMinutes !== undefined) {
+    if (cmd.intent === 'rewind' || cmd.direction === 'backward') {
+      template.relativeSeekMinutes = -Math.abs(cmd.relativeMinutes);
+    } else {
+      template.relativeSeekMinutes = Math.abs(cmd.relativeMinutes);
+    }
+  }
+  if (cmd.speed !== undefined && !template.playback) {
+    if (cmd.intent === 'play' || cmd.intent === 'fast_forward') {
+      template.playback = {
+        action: 'play_until',
+        speed: cmd.speed,
+        direction: cmd.direction === 'backward' ? 'backward' : 'forward',
+      };
+    }
+  }
+  if (cmd.intent === 'pause') {
+    template.playback = { action: 'pause' };
+  }
+  if (cmd.intent === 'seek') {
+    if (cmd.endTime) template.seekTime = parseTimeToString(cmd.endTime);
+  }
+  if (cmd.intent === 'candle_query') {
+    template.finalQuery = cmd.endTime ? 'candle_at_time' : 'current_candle';
+    template.queryTime = cmd.endTime ? parseTimeToString(cmd.endTime) : undefined;
+  }
+
+  // If the command produced no actionable template, it is not replayable.
+  if (
+    !template.symbol &&
+    !template.date &&
+    !template.timeframeMinutes &&
+    !template.seekTime &&
+    !template.relativeSeekMinutes &&
+    !template.playback &&
+    !template.finalQuery
+  ) {
+    return undefined;
+  }
+
+  return template;
 }
 
 export function resolveNaturalLanguagePlan(text: string, opts: AdapterOptions): AgentPlan | null {

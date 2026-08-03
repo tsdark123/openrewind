@@ -3,6 +3,7 @@ import type { AppState } from '../../../../types';
 import type { AgentContext } from '../types';
 import { handleOrionMessage } from '../orchestrator';
 import { clearSessionHistory } from '../capabilities';
+import { createExecutionContext } from '../executionContext';
 
 const TEST_TIMEOUT = 600_000;
 
@@ -101,13 +102,13 @@ function makeCtx(overrides: Partial<AgentContext> = {}): AgentContext {
       state.replayDate = date ?? state.replayDate;
       state.sessionActive = true;
     },
+    executionLog: createExecutionContext(),
     ...overrides,
   };
 }
 
 beforeAll(() => {
   // Model availability was verified by `ollama list` before running this file.
-  console.log('[runtime-acceptance] starting LLM runtime tests against local Ollama');
 });
 
 beforeEach(() => {
@@ -124,7 +125,6 @@ describe('LLM runtime acceptance', () => {
         ctx,
         setupReady: true,
       });
-      console.log('[runtime-acceptance] A result:', r);
       expect(r).toBeDefined();
       expect(r.route).toBe('llm-plan');
       expect(r.wasChat).toBe(false);
@@ -150,7 +150,6 @@ describe('LLM runtime acceptance', () => {
         ctx,
         setupReady: true,
       });
-      console.log('[runtime-acceptance] B result:', r);
       expect(r).toBeDefined();
       expect(r.route).toMatch(/llm-plan|clarification/);
       expect(r.wasChat).toBe(r.route === 'clarification');
@@ -167,7 +166,6 @@ describe('LLM runtime acceptance', () => {
       await handleOrionMessage({ text: 'Switch to MSFT.', ctx, setupReady: true });
 
       const r = await handleOrionMessage({ text: 'Take me back to the stock I was just on.', ctx, setupReady: true });
-      console.log('[runtime-acceptance] C result:', r);
       expect(r).toBeDefined();
       expect(r.route).toMatch(/llm-plan|clarification/);
     },
@@ -179,7 +177,6 @@ describe('LLM runtime acceptance', () => {
     async () => {
       const ctx = makeCtx();
       const r = await handleOrionMessage({ text: 'Move it over there.', ctx, setupReady: true });
-      console.log('[runtime-acceptance] D result:', r);
       expect(r).toBeDefined();
       expect(r.route).toBe('clarification');
       expect(r.result?.receipts ?? []).toHaveLength(0);
@@ -193,7 +190,6 @@ describe('LLM runtime acceptance', () => {
     async () => {
       const ctx = makeCtx();
       const r = await handleOrionMessage({ text: 'Add VWAP and backtest a crossover.', ctx, setupReady: true });
-      console.log('[runtime-acceptance] E result:', r);
       expect(r).toBeDefined();
       expect(r.route).toBe('unsupported');
       expect(r.result?.receipts ?? []).toHaveLength(0);

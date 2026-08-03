@@ -95,7 +95,9 @@ export function useWebSocket({
   }, []);
 
   const send = useCallback((data: Record<string, unknown>) => {
-    console.log('[Orion Diagnostic] WS out', data, { readyState: wsRef.current?.readyState });
+    const isDev = typeof import.meta.env !== 'undefined' && import.meta.env.DEV;
+    const stack = isDev ? new Error().stack : undefined;
+    console.log('[Orion Diagnostic] WS out', data, { readyState: wsRef.current?.readyState, ...(stack ? { stack } : {}) });
     sendQueueRef.current.push(data);
     flushSendQueue();
   }, [flushSendQueue]);

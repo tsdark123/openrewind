@@ -11,8 +11,8 @@ import {
 } from '../types';
 
 describe('V1 capability set', () => {
-  it('contains exactly twelve capabilities', () => {
-    expect(V1_CAPABILITIES).toHaveLength(12);
+  it('contains exactly thirteen capabilities', () => {
+    expect(V1_CAPABILITIES).toHaveLength(13);
   });
 
   it('contains all requested V1 names', () => {

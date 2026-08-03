@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { AppState } from '../../../../types';
 import type { AgentContext } from '../types';
 import { handleOrionMessage } from '../orchestrator';
+import { createExecutionContext } from '../executionContext';
 
 import type { OrionChatMessage } from '../../client';
 
@@ -81,6 +82,7 @@ function makeCtx(overrides: Partial<AgentContext> = {}): AgentContext {
       state.replayDate = date ?? state.replayDate;
       state.sessionActive = true;
     },
+    executionLog: createExecutionContext(),
     ...overrides,
   };
 }
@@ -132,14 +134,21 @@ describe('OrionTerminal-style submission through the orchestrator', () => {
     const ctx = makeCtx();
     ctx.getState().symbol = 'AAPL';
     ctx.getState().sessionActive = true;
-    ctx.lastResult = {
+    ctx.executionLog.record({
+      sequenceId: 0,
+      timestamp: Date.now(),
+      originalRequest: 'switch to ZZZZ',
+      route: 'resolve',
+      planSummary: 'Resolve requested symbol',
       ok: false,
-      planId: 'p-1',
       receipts: [
         { planId: 'p-1', stepId: 'r-1', capability: 'session.resolve_symbol', success: false, errorCode: 'SYMBOL_UNAVAILABLE', message: 'ZZZZ is not available', finalizedAt: 0 },
       ],
       errorCode: 'SYMBOL_UNAVAILABLE',
-    };
+      before: { symbol: '', date: '', timeframe: 1, isPlaying: false },
+      after: { symbol: '', date: '', timeframe: 1, isPlaying: false },
+      returnedCandles: [],
+    } as any);
     await handleOrionMessage({ text: 'what happened?', ctx, setupReady: true });
     const call = vi.mocked(orionChat).mock.calls[0]?.[0];
     const prompt = call?.messages.find((m: OrionChatMessage) => m.role === 'system')?.content ?? '';

@@ -3,6 +3,7 @@ import type { AppState } from '../../../../types';
 import type { AgentContext } from '../types';
 import { handleOrionMessage } from '../orchestrator';
 import { clearSessionHistory } from '../capabilities';
+import { createExecutionContext } from '../executionContext';
 import type { OrionChatMessage } from '../../client';
 
 vi.mock('../../client', () => ({
@@ -109,6 +110,7 @@ function makeCtx(overrides: Partial<AgentContext> = {}): AgentContext {
       state.replayDate = date ?? state.replayDate;
       state.sessionActive = true;
     },
+    executionLog: createExecutionContext(),
     ...overrides,
   };
 }
@@ -182,7 +184,7 @@ describe('compact intent routing and execution', () => {
     const system = call?.messages.find((m: OrionChatMessage) => m.role === 'system')?.content ?? '';
     expect(system).toContain('"chart_action"');
     expect(call?.format).toBe('json');
-    expect(call?.options).toEqual({ temperature: 0, seed: 42, num_predict: 128 });
+    expect(call?.options).toEqual({ temperature: 0, seed: 42, num_predict: 160 });
   });
 
   it('B: "move the replay half an hour earlier and give me the bar" routes through llm-plan', async () => {

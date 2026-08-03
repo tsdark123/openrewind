@@ -46,6 +46,7 @@ export const V1_CAPABILITIES = [
   'playback.pause',
   'chart.get_current_candle',
   'chart.get_candle_at_time',
+  'analysis.compare_candles',
 ] as const;
 
 export type V1Capability = (typeof V1_CAPABILITIES)[number];
@@ -54,14 +55,6 @@ export function isV1Capability(value: unknown): value is V1Capability {
   return typeof value === 'string' && (V1_CAPABILITIES as readonly string[]).includes(value);
 }
 
-/**
- * One step in an agent plan.
- *
- * `dependsOn` (optional) lets a plan express that a step must not run unless
- * every listed prior step succeeded. When omitted the executor treats every
- * step as depending on the immediately-preceding required step, which is the
- * common case for chart-control sequences.
- */
 export interface AgentStep {
   /** Stable, plan-local id — e.g. "step-1". Used to correlate receipts. */
   id: string;
@@ -94,6 +87,128 @@ export interface AgentPlan {
   /** Freeform metadata (e.g. planner source). */
   meta?: Record<string, unknown>;
 }
+
+// ---------------------------------------------------------------------------
+// Semantic intent — compact, normalized, and reusable as an ActionTemplate.
+// These shapes are stored in the execution context so recent actions can be
+// referenced without keeping full AgentPlans.
+// ---------------------------------------------------------------------------
+
+export type DateKind = 'absolute' | 'relative_trading' | 'relative_calendar';
+export type PlaybackAction = 'play' | 'pause' | 'play_until';
+export type FinalQuery = 'current_candle' | 'candle_at_time' | 'compare_candles';
+
+export type CompareSideSource =
+  | 'latest_returned_candle'
+  | 'previous_returned_candle'
+  | 'current_chart_candle'
+  | 'market_time';
+
+export interface CompareSide {
+  source: CompareSideSource;
+  /** Required when source is 'market_time'. */
+  marketTime?: string;
+}
+
+export interface CompareSides {
+  left: CompareSide;
+  right: CompareSide;
+}
+
+/** Resolved comparison side: a stored candle snapshot or the live chart current candle. */
+export type ResolvedCompareSide = CandleSnapshot | { source: 'chart' };
+
+export interface ResolvedCompare {
+  left: ResolvedCompareSide;
+  right: ResolvedCompareSide;
+}
+
+export const INHERITABLE_FIELDS = [
+  'date',
+  'timeframe',
+  'seekTime',
+  'relativeSeekMinutes',
+  'playback',
+  'finalQuery',
+] as const;
+export type InheritableField = (typeof INHERITABLE_FIELDS)[number];
+
+export const CONTEXT_REFERENCE_SOURCES = [
+  'latest_successful_action',
+  'latest_failed_action',
+  'latest_returned_candle',
+] as const;
+export type ContextReferenceSource = (typeof CONTEXT_REFERENCE_SOURCES)[number];
+
+export const CONTEXT_REFERENCE_MODES = [
+  'repeat',
+  'inherit',
+  'use_as_target',
+  'anchor_relative_date',
+] as const;
+export type ContextReferenceMode = (typeof CONTEXT_REFERENCE_MODES)[number];
+
+export interface ContextReference {
+  /** Which entry in the execution log to draw from. */
+  source: ContextReferenceSource;
+  /** How the referenced entry should be used. */
+  mode?: ContextReferenceMode;
+  /** When mode is "inherit", which fields to copy from the referenced action. */
+  inherit?: InheritableField[];
+}
+
+export interface SemanticDate {
+  kind: DateKind;
+  /** YYYY-MM-DD; only valid for kind: 'absolute' */
+  value?: string;
+  /** positive integer; only valid for kind: 'relative_trading' */
+  count?: number;
+  /** only valid for kind: 'relative_trading' */
+  direction?: 'backward' | 'forward';
+}
+
+export interface SemanticPlayback {
+  action: PlaybackAction;
+  speed?: number;
+  untilTime?: string; // HH:MM; only for play_until
+  /** For play_until, indicates the direction of playback. */
+  direction?: 'forward' | 'backward';
+}
+
+/**
+ * A compact, validated, normalized representation of a chart-control request.
+ * It is intentionally reusable: relative dates stay relative, and explicit
+ * user overrides can be merged onto a previous template.
+ */
+export interface ChartActionIntent {
+  kind: 'chart_action';
+  symbol?: string;
+  date?: SemanticDate;
+  timeframeMinutes?: number;
+  seekTime?: string; // HH:MM
+  relativeSeekMinutes?: number; // positive = forward, negative = backward
+  playback?: SemanticPlayback;
+  finalQuery?: FinalQuery;
+  queryTime?: string; // HH:MM; required when finalQuery is 'candle_at_time'
+  previousSymbol?: boolean;
+  contextReference?: ContextReference;
+  compare?: CompareSides;
+}
+
+export interface ClarificationIntent {
+  kind: 'clarification';
+  message: string;
+}
+
+export interface UnsupportedIntent {
+  kind: 'unsupported';
+  message: string;
+}
+
+export type SemanticIntent = ChartActionIntent | ClarificationIntent | UnsupportedIntent;
+
+/** The reusable memory representation of a successful action. */
+export type ActionTemplate = ChartActionIntent;
 
 // ---------------------------------------------------------------------------
 // Error codes (stable)
@@ -237,6 +352,115 @@ export interface CapabilityDescriptor {
 }
 
 // ---------------------------------------------------------------------------
+// Bounded execution context — verified runtime memory
+//
+// This is not chat history. It is a compact, append-only log of verified
+// actions, receipts, and returned candle snapshots. It lives in App.tsx so
+// it survives the Orion side panel opening and closing.
+// ---------------------------------------------------------------------------
+
+export interface CompactStateSnapshot {
+  symbol?: string;
+  date?: string;
+  timeframe?: number;
+  replayTimestamp?: number;
+  replayTime?: string; // HH:MM market time
+  isPlaying: boolean;
+  speed: number;
+  direction: 'forward' | 'backward';
+  cursor?: number;
+  currentPrice?: number;
+}
+
+export interface CandleSnapshot {
+  /** Snapshot ID equal to the parent entry's sequenceId. */
+  snapshotId: number;
+  symbol: string;
+  date: string;
+  timeframe: number;
+  timestamp: number;
+  marketTime: string; // HH:MM
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+  source: 'current_candle' | 'candle_at_time';
+}
+
+export interface ExecutionContextEntry {
+  sequenceId: number;
+  timestamp: number;
+  originalRequest: string;
+  route:
+    | 'chat'
+    | 'deterministic'
+    | 'resolve'
+    | 'llm-plan'
+    | 'clarification'
+    | 'unsupported'
+    | 'unrecognized'
+    | 'recent-action-summary'
+    | 'error'
+    | 'ui-action';
+  /** For non-replayable UI/system entries, the kind of action recorded. */
+  actionKind?: 'chart_reset';
+  /** Reusable, validated, normalized action meaning. Only set for replayable action turns. */
+  template?: ActionTemplate;
+  /** One-line summary, e.g. from AgentPlan.summary, for chat/context rendering. */
+  planSummary?: string;
+  /** Plan ID from the executed plan, if any. */
+  planId?: string;
+  /** Outcome summary. */
+  ok?: boolean;
+  /** All step receipts from the turn. */
+  receipts: ExecutionReceipt[];
+  stoppedAtStepId?: string;
+  errorCode?: string;
+  errorMessage?: string;
+  /** Compact before/after state — not a full WorldState. */
+  before?: CompactStateSnapshot;
+  after?: CompactStateSnapshot;
+  /** Candles actually returned to the user during this turn. */
+  returnedCandles: CandleSnapshot[];
+}
+
+export interface ExecutionContextStore {
+  record(entry: ExecutionContextEntry): void;
+  reset(): void;
+  getEntries(): readonly ExecutionContextEntry[];
+
+  // Retrieval API
+  latest(): ExecutionContextEntry | undefined;
+  latestSuccessfulAction(): ExecutionContextEntry | undefined;
+  latestFailedAction(): ExecutionContextEntry | undefined;
+  latestReturnedCandle(): CandleSnapshot | undefined;
+  previousReturnedCandle(): CandleSnapshot | undefined;
+  latestMatchingCandle(opts: {
+    symbol?: string;
+    date?: string;
+    timeframe?: number;
+  }): CandleSnapshot | undefined;
+  findCandle(opts: {
+    snapshotId?: number;
+    symbol: string;
+    date: string;
+    timeframe: number;
+    timestamp: number;
+  }): CandleSnapshot | undefined;
+  findCandleByMarketTime(opts: {
+    symbol?: string;
+    date?: string;
+    timeframe?: number;
+    marketTime: string;
+  }): CandleSnapshot | undefined;
+  latestMatchingAction(predicate: (e: ExecutionContextEntry) => boolean): ExecutionContextEntry | undefined;
+
+  // Prompt rendering
+  renderForPrompt(opts?: { maxActions?: number; includeCandles?: boolean }): string;
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -282,6 +506,11 @@ export interface AgentContext {
   onSwitchSymbol: (symbol: string, date?: string) => void | Promise<void>;
   /** Optional callback for progress / side messages during a plan. */
   onMessage?: (text: string) => void;
-  /** Previous orchestrator execution result, if any, so chat can answer truthfully. */
+  /**
+   * Previous orchestrator execution result, if any, so legacy chat consumers
+   * can answer truthfully. Prefer `executionLog` for new code.
+   */
   lastResult?: AgentExecutionResult;
+  /** Bounded, verified execution-context log. */
+  executionLog: ExecutionContextStore;
 }

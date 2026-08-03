@@ -16,6 +16,8 @@ import { endSession, loadPerformanceLog } from './lib/journal';
 import { orionController } from './lib/orion/controller';
 import { fetchCandles } from './lib/orion/tools';
 import { warmOrionAgent } from './lib/orion/client';
+import { createExecutionContext, buildCompactStateSnapshot } from './lib/orion/agent/executionContext';
+import type { ExecutionContextStore, ExecutionContextEntry } from './lib/orion/agent/types';
 import { useDataSource, getEngineDataDir } from './lib/dataSourceContext';
 import { engineUrl, sessionStartBody } from './lib/engine';
 import { threadKeyForContext, appendMessage, loadOrionThreads, writeOrionThreads } from './lib/orionThreads';
@@ -341,6 +343,10 @@ export default function App() {
 
   // Orion AI coach side-panel visibility.
   const [isOrionOpen, setIsOrionOpen] = useState(false);
+
+  // Bounded, verified execution context. Lives here so it survives the panel
+  // being opened and closed during the same app session.
+  const executionLogRef = useRef<ExecutionContextStore>(createExecutionContext());
 
   // Intro / data-source / workspace view controller.
   const [showIntro, setShowIntro] = useState(true);
@@ -835,18 +841,49 @@ export default function App() {
     setDateConfirmed(false);
     chartRef.current?.resetChart();
     setSessionHistory([]);
+    executionLogRef.current.reset();
     dispatch({ type: 'END_SESSION' });
     // Neutral date; a specific symbol/date selection will override this.
     dispatch({ type: 'SET_REPLAY_DATE', date: getLastTradingDate() });
   }, [dataSource]);
 
   const handleReset = useCallback(() => {
+    // Capture the state before the reset.
+    const before = buildCompactStateSnapshot(stateRef.current, chartRef);
+
     // Discard any sandbox trades for the current symbol/date before restarting.
-    dispatch({ type: 'CLEAR_ACTIVE_SESSION_TRADES_FOR_DATE', symbol: state.symbol, date: state.replayDate });
+    dispatch({ type: 'CLEAR_ACTIVE_SESSION_TRADES_FOR_DATE', symbol: stateRef.current.symbol, date: stateRef.current.replayDate });
     chartRef.current?.resetChart(true);
     setSessionHistory([]);
     send({ cmd: 'reset_session' });
-  }, [send, dispatch, state.symbol, state.replayDate]);
+
+    // Record the reset as a non-replayable UI action in the App-owned log.
+    const after = buildCompactStateSnapshot(stateRef.current, chartRef);
+    const resetEntry: ExecutionContextEntry = {
+      sequenceId: 0,
+      timestamp: Date.now(),
+      originalRequest: 'Reset',
+      route: 'ui-action',
+      actionKind: 'chart_reset',
+      ok: true,
+      planSummary: 'Chart reset',
+      before,
+      after,
+      receipts: [
+        {
+          planId: 'ui-reset',
+          stepId: 'ui-reset',
+          capability: 'ui.chart_reset',
+          success: true,
+          message: 'Chart reset',
+          data: { before, after },
+          finalizedAt: Date.now(),
+        },
+      ],
+      returnedCandles: [],
+    };
+    executionLogRef.current.record(resetEntry);
+  }, [send, dispatch, chartRef, executionLogRef]);
 
   const handleEndSession = useCallback(() => {
     setIsEndingSession(true);
@@ -1177,6 +1214,7 @@ export default function App() {
             onSwitchSymbol={handleSymbolChange}
             send={send}
             dispatch={dispatch}
+            executionLog={executionLogRef.current}
           />
         )}
       </div>

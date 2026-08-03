@@ -17,7 +17,7 @@
 // explicitly and return PRECONDITION_FAILED / NOT_IMPLEMENTED receipts.
 // =============================================================================
 
-import type { AgentStep, ExecutionReceipt, AgentContext, CancellationToken } from './types';
+import type { AgentStep, ExecutionReceipt, AgentContext, CancellationToken, CandleSnapshot } from './types';
 import { successReceipt, failureReceipt } from './receipts';
 import { buildWorldState } from '../worldState';
 import { resolveSymbol } from './resolveSymbol';
@@ -777,5 +777,246 @@ registerCapability({
     } catch (e) {
       return failureReceipt(planId, step, 'ENGINE_ERROR', `Failed to fetch candles: ${e instanceof Error ? e.message : String(e)}`);
     }
+  },
+});
+
+// ---------------------------------------------------------------------------
+// 13. analysis.compare_candles
+// ---------------------------------------------------------------------------
+
+function fmt(n: number): string {
+  return Number.isFinite(n) ? n.toFixed(2) : String(n);
+}
+
+function pct(diff: number, base: number): string {
+  if (!Number.isFinite(base) || base === 0) return 'n/a';
+  return `${((diff / Math.abs(base)) * 100).toFixed(2)}%`;
+}
+
+type CompareSideResolution =
+  | { kind: 'success'; candle: CandleSnapshot }
+  | { kind: 'failure'; receipt: ExecutionReceipt };
+
+function resolveCompareSide(
+  planId: string,
+  step: AgentStep,
+  sideKey: 'left' | 'right',
+  ctx: AgentContext
+): CompareSideResolution {
+  const raw = step.args[sideKey] as Record<string, unknown> | undefined;
+  if (!raw || typeof raw !== 'object' || !('source' in raw)) {
+    return {
+      kind: 'failure',
+      receipt: failureReceipt(planId, step, 'INVALID_ARGUMENTS', `Missing ${sideKey} operand.`),
+    };
+  }
+
+  const source = String(raw.source);
+
+  if (source === 'chart') {
+    const current = ctx.chartRef?.current?.getRecentCandles(1)[0];
+    if (!current) {
+      return {
+        kind: 'failure',
+        receipt: failureReceipt(planId, step, 'PRECONDITION_FAILED', `No live chart candle available for ${sideKey}.`),
+      };
+    }
+    const state = ctx.getState();
+    const marketTime = state.replayDate
+      ? formatTime(toEtTime(current.timestamp, state.replayDate))
+      : '';
+    return {
+      kind: 'success',
+      candle: {
+        snapshotId: 0,
+        source: 'current_candle',
+        symbol: state.symbol,
+        date: state.replayDate ?? '',
+        timeframe: state.timeframe,
+        timestamp: current.timestamp,
+        marketTime,
+        open: current.open,
+        high: current.high,
+        low: current.low,
+        close: current.close,
+        volume: current.volume,
+      },
+    };
+  }
+
+  if (source === 'snapshot') {
+    const symbol = String(raw.symbol ?? '');
+    const date = String(raw.date ?? '');
+    const timeframe = Number(raw.timeframe ?? 0);
+    const timestamp = Number(raw.timestamp ?? 0);
+    if (!symbol || !date || !timeframe || !timestamp) {
+      return {
+        kind: 'failure',
+        receipt: failureReceipt(planId, step, 'INVALID_ARGUMENTS', `Missing ${sideKey} snapshot coordinates.`),
+      };
+    }
+    const snapshotId = raw.snapshotId !== undefined ? Number(raw.snapshotId) : undefined;
+    const found = ctx.executionLog.findCandle({ snapshotId, symbol, date, timeframe, timestamp });
+    if (!found) {
+      return {
+        kind: 'failure',
+        receipt: failureReceipt(
+          planId,
+          step,
+          'PRECONDITION_FAILED',
+          `The ${sideKey} referenced candle ${symbol} ${date} ${timeframe}m @ ${raw.marketTime ?? ''} was not found in the execution log.`
+        ),
+      };
+    }
+    return { kind: 'success', candle: found };
+  }
+
+  return {
+    kind: 'failure',
+    receipt: failureReceipt(planId, step, 'INVALID_ARGUMENTS', `Unknown ${sideKey} source "${source}".`),
+  };
+}
+
+registerCapability({
+  name: 'analysis.compare_candles',
+  kind: 'read',
+  description: 'Compare two explicit candle operands and return a verified, structured comparison.',
+  preconditions: ['Active session.', 'Both candle operands must be resolvable.'],
+  argSchema: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['left', 'right'],
+    properties: {
+      left: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['source'],
+        properties: {
+          source: { enum: ['chart', 'snapshot'] },
+          snapshotId: { type: 'integer' },
+          symbol: { type: 'string' },
+          date: { type: 'string' },
+          timeframe: { type: 'integer' },
+          timestamp: { type: 'integer' },
+          marketTime: { type: 'string' },
+        },
+      },
+      right: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['source'],
+        properties: {
+          source: { enum: ['chart', 'snapshot'] },
+          snapshotId: { type: 'integer' },
+          symbol: { type: 'string' },
+          date: { type: 'string' },
+          timeframe: { type: 'integer' },
+          timestamp: { type: 'integer' },
+          marketTime: { type: 'string' },
+        },
+      },
+    },
+  },
+  delegatesTo: 'ctx.executionLog.findCandle + chartRef.getRecentCandles',
+  execute: async (planId, step, ctx, token) => {
+    const c = wasCancelled(planId, step, token);
+    if (c) return c;
+
+    const state = ctx.getState();
+    if (!state.sessionActive) {
+      return failureReceipt(planId, step, 'PRECONDITION_FAILED', 'No active session to compare candles.');
+    }
+
+    const left = await resolveCompareSide(planId, step, 'left', ctx);
+    if (left.kind === 'failure') {
+      return left.receipt;
+    }
+    const right = await resolveCompareSide(planId, step, 'right', ctx);
+    if (right.kind === 'failure') {
+      return right.receipt;
+    }
+
+    const a = left.candle;
+    const b = right.candle;
+
+    const sameCandle =
+      a.timestamp === b.timestamp &&
+      a.symbol === b.symbol &&
+      a.date === b.date &&
+      a.timeframe === b.timeframe;
+
+    const openDiff = a.open - b.open;
+    const highDiff = a.high - b.high;
+    const lowDiff = a.low - b.low;
+    const closeDiff = a.close - b.close;
+    const volumeDiff = a.volume - b.volume;
+
+    const aRange = a.high - a.low;
+    const bRange = b.high - b.low;
+    const rangeDiff = aRange - bRange;
+
+    const aDir = a.close >= a.open ? 'bullish' : 'bearish';
+    const bDir = b.close >= b.open ? 'bullish' : 'bearish';
+
+    const data = {
+      left: {
+        symbol: a.symbol,
+        date: a.date,
+        timeframe: a.timeframe,
+        timestamp: a.timestamp,
+        marketTime: a.marketTime,
+        open: a.open,
+        high: a.high,
+        low: a.low,
+        close: a.close,
+        volume: a.volume,
+        direction: aDir,
+      },
+      right: {
+        symbol: b.symbol,
+        date: b.date,
+        timeframe: b.timeframe,
+        timestamp: b.timestamp,
+        marketTime: b.marketTime,
+        open: b.open,
+        high: b.high,
+        low: b.low,
+        close: b.close,
+        volume: b.volume,
+        direction: bDir,
+      },
+      deltas: {
+        open: openDiff,
+        openPercent: pct(openDiff, b.open),
+        high: highDiff,
+        highPercent: pct(highDiff, b.high),
+        low: lowDiff,
+        lowPercent: pct(lowDiff, b.low),
+        close: closeDiff,
+        closePercent: pct(closeDiff, b.close),
+        volume: volumeDiff,
+        volumePercent: pct(volumeDiff, b.volume),
+        range: rangeDiff,
+      },
+    };
+
+    const aLabel = `${a.marketTime} ${a.symbol} ${a.date} ${a.timeframe}m`;
+    const bLabel = `${b.marketTime} ${b.symbol} ${b.date} ${b.timeframe}m`;
+
+    if (sameCandle) {
+      return successReceipt(planId, step, `The left candle (${aLabel}) and the right candle (${bLabel}) are the same.`, data);
+    }
+
+    const summary = [
+      `${aDir} candle at ${a.marketTime} vs ${bDir} candle at ${b.marketTime}:`,
+      `open ${fmt(a.open)} (${openDiff >= 0 ? '+' : ''}${fmt(openDiff)}, ${data.deltas.openPercent})`,
+      `high ${fmt(a.high)} (${highDiff >= 0 ? '+' : ''}${fmt(highDiff)}, ${data.deltas.highPercent})`,
+      `low ${fmt(a.low)} (${lowDiff >= 0 ? '+' : ''}${fmt(lowDiff)}, ${data.deltas.lowPercent})`,
+      `close ${fmt(a.close)} (${closeDiff >= 0 ? '+' : ''}${fmt(closeDiff)}, ${data.deltas.closePercent})`,
+      `range ${fmt(aRange)} (diff ${rangeDiff >= 0 ? '+' : ''}${fmt(rangeDiff)})`,
+      `volume ${fmt(a.volume)} (${volumeDiff >= 0 ? '+' : ''}${fmt(volumeDiff)}, ${data.deltas.volumePercent})`,
+    ].join(' · ');
+
+    return successReceipt(planId, step, summary, data);
   },
 });

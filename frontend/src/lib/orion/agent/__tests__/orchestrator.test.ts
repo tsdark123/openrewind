@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import type { AppState } from '../../../../types';
 import type { AgentContext } from '../types';
 import { handleOrionMessage } from '../orchestrator';
+import { createExecutionContext } from '../executionContext';
 
 function baseAppState(): AppState {
   return {
@@ -73,6 +74,7 @@ function makeCtx(overrides: Partial<AgentContext> = {}): AgentContext {
       state.replayDate = date ?? state.replayDate;
       state.sessionActive = true;
     },
+    executionLog: createExecutionContext(),
     ...overrides,
   };
 }
@@ -201,5 +203,192 @@ describe('handleOrionMessage conversation', () => {
     expect(r.wasChat).toBe(true);
     expect(r.route).toBe('chat');
     expect(r.message).not.toMatch(/symbol|ticker/i);
+  });
+
+  it('mentions a toolbar reset in "what action did you just perform?" with no LLM call', async () => {
+    const ctx = makeCtx();
+    ctx.executionLog.record({
+      sequenceId: 0,
+      timestamp: Date.now(),
+      originalRequest: 'Switch to AAPL 5m.',
+      route: 'deterministic',
+      template: { kind: 'chart_action', symbol: 'AAPL', timeframeMinutes: 5 },
+      ok: true,
+      planSummary: 'Switch to AAPL 5m',
+      before: { symbol: '', date: '', timeframe: 1, isPlaying: false },
+      after: { symbol: 'AAPL', date: '2026-07-10', timeframe: 5, isPlaying: false },
+      receipts: [
+        { planId: 'p', stepId: 's', capability: 'session.switch_symbol', success: true, message: 'Switched to AAPL.', finalizedAt: Date.now() },
+        { planId: 'p', stepId: 't', capability: 'chart.set_timeframe', success: true, message: 'Timeframe set to 5m.', finalizedAt: Date.now() },
+      ],
+      returnedCandles: [],
+    });
+    ctx.executionLog.record({
+      sequenceId: 0,
+      timestamp: Date.now(),
+      originalRequest: 'Reset',
+      route: 'ui-action',
+      actionKind: 'chart_reset',
+      ok: true,
+      planSummary: 'Chart reset',
+      before: { symbol: 'AAPL', date: '2026-07-10', timeframe: 5, isPlaying: false },
+      after: { symbol: 'AAPL', date: '2026-07-10', timeframe: 5, isPlaying: false },
+      receipts: [],
+      returnedCandles: [],
+    });
+
+    const r = await handleOrionMessage({ text: 'What action did you just perform?', ctx, setupReady: false });
+    expect(r.wasChat).toBe(true);
+    expect(r.route).toBe('recent-action-summary');
+    expect(r.plan).toBeUndefined();
+    expect(r.message).toMatch(/reset/i);
+    expect(r.message).toMatch(/Switch to AAPL/);
+  });
+
+  it('routes "what action did u just perform" to recent-action-summary with no LLM call', async () => {
+    const ctx = makeCtx();
+    ctx.executionLog.record({
+      originalRequest: 'Switch to AAPL 5m.',
+      route: 'deterministic',
+      ok: true,
+      planSummary: 'Switch to AAPL 5m.',
+      template: { kind: 'chart_action', symbol: 'AAPL', timeframeMinutes: 5 },
+      before: { symbol: '', date: '', timeframe: 1, isPlaying: false },
+      after: { symbol: 'AAPL', date: '2026-07-10', timeframe: 5, isPlaying: false },
+      receipts: [
+        { planId: 'p', stepId: 's', capability: 'session.switch_symbol', success: true, message: 'Switched to AAPL.', finalizedAt: Date.now() },
+        { planId: 'p', stepId: 't', capability: 'chart.set_timeframe', success: true, message: 'Timeframe set to 5m.', finalizedAt: Date.now() },
+      ],
+      returnedCandles: [],
+    });
+
+    const r = await handleOrionMessage({ text: "what action did u just perform", ctx, setupReady: true });
+    expect(r.wasChat).toBe(true);
+    expect(r.route).toBe('recent-action-summary');
+    expect(r.message).toMatch(/Switch to AAPL/);
+    // No LLM call made because setupReady could trigger chat normally, but this
+    // route does not use the model.
+    expect(r.message).not.toMatch(/ollama|ollama/i);
+  });
+
+  it('routes "what did you just do" to recent-action-summary and rejects "what did you do yesterday"', async () => {
+    const ctx = makeCtx();
+    ctx.executionLog.record({
+      originalRequest: 'Switch to AAPL.',
+      route: 'deterministic',
+      ok: true,
+      planSummary: 'Switch to AAPL.',
+      template: { kind: 'chart_action', symbol: 'AAPL' },
+      before: { symbol: '', date: '', timeframe: 1, isPlaying: false },
+      after: { symbol: 'AAPL', date: '2026-07-10', timeframe: 1, isPlaying: false },
+      receipts: [{ planId: 'p', stepId: 's', capability: 'session.switch_symbol', success: true, message: 'Switched to AAPL.', finalizedAt: Date.now() }],
+      returnedCandles: [],
+    });
+
+    const r1 = await handleOrionMessage({ text: 'what did you just do', ctx, setupReady: true });
+    expect(r1.wasChat).toBe(true);
+    expect(r1.route).toBe('recent-action-summary');
+    expect(r1.message).toMatch(/Switch to AAPL/);
+
+    // Historical questions should not be matched as recent-action queries.
+    const r2 = await handleOrionMessage({ text: 'what did you do yesterday', ctx, setupReady: false });
+    expect(r2.message).not.toMatch(/Switch to AAPL/);
+  });
+});
+
+describe('handleOrionMessage canonical repeat', () => {
+  it('replays the latest successful action deterministically', async () => {
+    const ctx = makeCtx();
+    ctx.executionLog.record({
+      originalRequest: 'Switch to AAPL 5m.',
+      route: 'deterministic',
+      ok: true,
+      planSummary: 'Switch to AAPL 5m.',
+      template: { kind: 'chart_action', symbol: 'AAPL', timeframeMinutes: 5 },
+      before: { symbol: '', date: '', timeframe: 1, isPlaying: false },
+      after: { symbol: 'AAPL', date: '2026-07-10', timeframe: 5, isPlaying: false },
+      receipts: [
+        { planId: 'p', stepId: 's', capability: 'session.switch_symbol', success: true, message: 'Switched to AAPL.', finalizedAt: Date.now() },
+        { planId: 'p', stepId: 't', capability: 'chart.set_timeframe', success: true, message: 'Timeframe set to 5m.', finalizedAt: Date.now() },
+      ],
+      returnedCandles: [],
+    });
+
+    const r = await handleOrionMessage({ text: 'Do that again.', ctx, setupReady: true });
+    expect(r.route).toBe('deterministic');
+    expect(r.plan?.steps.map((s) => s.capability)).toEqual([
+      'session.resolve_symbol',
+      'session.switch_symbol',
+      'chart.set_timeframe',
+    ]);
+    expect(r.result?.receipts.some((rc) => rc.capability === 'session.switch_symbol' && rc.success)).toBe(true);
+    expect(ctx.getState().symbol).toBe('AAPL');
+  });
+
+  it('skips a non-replayable reset and replays the prior action', async () => {
+    const ctx = makeCtx();
+    ctx.executionLog.record({
+      originalRequest: 'Switch to AAPL 5m.',
+      route: 'deterministic',
+      ok: true,
+      planSummary: 'Switch to AAPL 5m.',
+      template: { kind: 'chart_action', symbol: 'AAPL', timeframeMinutes: 5 },
+      before: { symbol: '', date: '', timeframe: 1, isPlaying: false },
+      after: { symbol: 'AAPL', date: '2026-07-10', timeframe: 5, isPlaying: false },
+      receipts: [
+        { planId: 'p', stepId: 's', capability: 'session.switch_symbol', success: true, message: 'Switched to AAPL.', finalizedAt: Date.now() },
+        { planId: 'p', stepId: 't', capability: 'chart.set_timeframe', success: true, message: 'Timeframe set to 5m.', finalizedAt: Date.now() },
+      ],
+      returnedCandles: [],
+    });
+    ctx.executionLog.record({
+      originalRequest: 'chart_reset',
+      route: 'ui-action',
+      actionKind: 'chart_reset',
+      ok: true,
+      planSummary: 'Chart reset',
+      before: { symbol: 'AAPL', date: '2026-07-10', timeframe: 5, isPlaying: false },
+      after: { symbol: 'AAPL', date: '2026-07-10', timeframe: 5, isPlaying: false },
+      receipts: [],
+      returnedCandles: [],
+    });
+
+    const r = await handleOrionMessage({ text: 'Do that again.', ctx, setupReady: true });
+    expect(r.route).toBe('deterministic');
+    expect(r.plan?.steps.map((s) => s.capability)).toEqual([
+      'session.resolve_symbol',
+      'session.switch_symbol',
+      'chart.set_timeframe',
+    ]);
+    expect(r.result?.receipts.some((rc) => rc.capability === 'session.switch_symbol' && rc.success)).toBe(true);
+    expect(ctx.getState().symbol).toBe('AAPL');
+  });
+
+  it('clarifies when there is no replayable action', async () => {
+    const ctx = makeCtx();
+    const r = await handleOrionMessage({ text: 'Do that again.', ctx, setupReady: true });
+    expect(r.wasChat).toBe(true);
+    expect(r.route).toBe('clarification');
+    expect(r.message).toMatch(/no replayable action/i);
+  });
+
+  it('records each turn exactly once', async () => {
+    const ctx = makeCtx();
+    ctx.executionLog.record({
+      originalRequest: 'Switch to AAPL.',
+      route: 'deterministic',
+      ok: true,
+      planSummary: 'Switch to AAPL.',
+      template: { kind: 'chart_action', symbol: 'AAPL' },
+      before: { symbol: '', date: '', timeframe: 1, isPlaying: false },
+      after: { symbol: 'AAPL', date: '2026-07-10', timeframe: 1, isPlaying: false },
+      receipts: [{ planId: 'p', stepId: 's', capability: 'session.switch_symbol', success: true, message: 'Switched to AAPL.', finalizedAt: Date.now() }],
+      returnedCandles: [],
+    });
+
+    const before = ctx.executionLog.getEntries().length;
+    await handleOrionMessage({ text: 'Do that again.', ctx, setupReady: true });
+    const after = ctx.executionLog.getEntries().length;
+    expect(after).toBe(before + 1);
   });
 });

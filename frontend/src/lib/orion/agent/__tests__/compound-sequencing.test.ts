@@ -3,6 +3,7 @@ import type { AppState, CandleData } from '../../../../types';
 import type { AgentContext } from '../types';
 import { handleOrionMessage } from '../orchestrator';
 import { resolveTradingDate } from '../resolveTradingDate';
+import { createExecutionContext } from '../executionContext';
 import { parseChartCommand, toEngineTs } from '../../planner';
 import { fetchCandles } from '../../tools';
 
@@ -152,6 +153,7 @@ function makeCtx(overrides: Partial<AgentContext> = {}): AgentContext {
     send,
     dispatch,
     onSwitchSymbol,
+    executionLog: createExecutionContext(),
     ...overrides,
   };
 }

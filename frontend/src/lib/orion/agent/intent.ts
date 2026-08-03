@@ -6,12 +6,37 @@
 // deterministic compiler then turns the intent into an `AgentPlan`, validates
 // it, and executes it.
 //
-// This file is the single source of truth for the intent type, its JSON schema,
-// validation rules and the LLM extraction prompt.
+// Phase 5 adds a bounded contextReference so anaphoric requests ("do that again",
+// "same timeframe", "the previous candle") are represented structurally instead
+// of relying on a growing list of English phrase checks.
 // =============================================================================
 
 import { agentTrace } from './config';
 import { orionChat, ORION_AGENT_MODEL, type OrionChatMessage } from '../client';
+import type {
+  ChartActionIntent,
+  SemanticIntent,
+  SemanticPlayback,
+  ContextReference,
+  ContextReferenceSource,
+  ContextReferenceMode,
+  InheritableField,
+  ExecutionContextStore,
+} from './types';
+
+// Re-export the moved types so existing consumers keep working.
+export type {
+  ChartActionIntent,
+  ClarificationIntent,
+  UnsupportedIntent,
+  SemanticIntent,
+  SemanticDate,
+  SemanticPlayback,
+  DateKind,
+  PlaybackAction,
+  FinalQuery,
+  ContextReference,
+} from './types';
 
 export interface RequestContext {
   /** Actionable dimensions detected in the original request (e.g. symbol, date, timeframe). */
@@ -23,52 +48,6 @@ export interface RequestContext {
   /** Short note about what the deterministic parser produced, if anything. */
   parserNote?: string;
 }
-
-// ---------------------------------------------------------------------------
-// Semantic intent schema — one versioned type and runtime schema.
-// ---------------------------------------------------------------------------
-
-export type DateKind = 'absolute' | 'relative_trading';
-export type PlaybackAction = 'play' | 'pause' | 'play_until';
-export type FinalQuery = 'current_candle' | 'candle_at_time';
-
-export interface SemanticDate {
-  kind: DateKind;
-  value?: string; // YYYY-MM-DD; only valid for kind: 'absolute'
-  count?: number; // positive integer; only valid for kind: 'relative_trading'
-  direction?: 'backward' | 'forward'; // only valid for kind: 'relative_trading'
-}
-
-export interface SemanticPlayback {
-  action: PlaybackAction;
-  speed?: number;
-  untilTime?: string; // HH:MM; only for play_until
-}
-
-export interface ChartActionIntent {
-  kind: 'chart_action';
-  symbol?: string;
-  date?: SemanticDate;
-  timeframeMinutes?: number;
-  seekTime?: string; // HH:MM
-  relativeSeekMinutes?: number; // positive = forward, negative = backward
-  playback?: SemanticPlayback;
-  finalQuery?: FinalQuery;
-  queryTime?: string; // HH:MM; required when finalQuery is 'candle_at_time'
-  previousSymbol?: boolean;
-}
-
-export interface ClarificationIntent {
-  kind: 'clarification';
-  message: string;
-}
-
-export interface UnsupportedIntent {
-  kind: 'unsupported';
-  message: string;
-}
-
-export type SemanticIntent = ChartActionIntent | ClarificationIntent | UnsupportedIntent;
 
 // ---------------------------------------------------------------------------
 // JSON Schema used in the prompt and for runtime validation.
@@ -105,11 +84,50 @@ export const SEMANTIC_INTENT_SCHEMA: Record<string, unknown> = {
             action: { enum: ['play', 'pause', 'play_until'] },
             speed: { type: 'integer', minimum: 1 },
             untilTime: { type: 'string', description: 'HH:MM; only for play_until' },
+            direction: { enum: ['forward', 'backward'], description: 'only for play_until; default forward' },
           },
         },
-        finalQuery: { enum: ['current_candle', 'candle_at_time'] },
+        finalQuery: { enum: ['current_candle', 'candle_at_time', 'compare_candles'] },
         queryTime: { type: 'string', description: 'HH:MM; only for candle_at_time' },
         previousSymbol: { type: 'boolean' },
+        compare: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['left', 'right'],
+          properties: {
+            left: {
+              type: 'object',
+              additionalProperties: false,
+              required: ['source'],
+              properties: {
+                source: { enum: ['latest_returned_candle', 'previous_returned_candle', 'current_chart_candle', 'market_time'] },
+                marketTime: { type: 'string', description: 'HH:MM; only for market_time' },
+              },
+            },
+            right: {
+              type: 'object',
+              additionalProperties: false,
+              required: ['source'],
+              properties: {
+                source: { enum: ['latest_returned_candle', 'previous_returned_candle', 'current_chart_candle', 'market_time'] },
+                marketTime: { type: 'string', description: 'HH:MM; only for market_time' },
+              },
+            },
+          },
+        },
+        contextReference: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['source'],
+          properties: {
+            source: { enum: ['latest_successful_action', 'latest_failed_action', 'latest_returned_candle'] },
+            mode: { enum: ['repeat', 'inherit', 'use_as_target', 'anchor_relative_date'] },
+            inherit: {
+              type: 'array',
+              items: { enum: ['date', 'timeframe', 'seekTime', 'relativeSeekMinutes', 'playback', 'finalQuery'] },
+            },
+          },
+        },
       },
     },
     {
@@ -142,8 +160,10 @@ export function semanticIntentSchemaJson(): string {
 // Prompt generation
 // ---------------------------------------------------------------------------
 
-export function buildIntentExtractionPrompt(): string {
-  return [
+export function buildIntentExtractionPrompt(executionLog?: ExecutionContextStore): string {
+  const recentActions = executionLog ? executionLog.renderForPrompt({ maxActions: 3, includeCandles: true }) : null;
+
+  const sections = [
     'You are a compact intent parser for OpenRewind. Respond with one minified JSON object.',
     'Do not write prose, markdown, or the literal string "<today>".',
     '',
@@ -153,6 +173,7 @@ export function buildIntentExtractionPrompt(): string {
     'Rules:',
     '- Map company names to tickers: AAPL, MSFT, NVDA.',
     '- "prior trading session" -> date:{"kind":"relative_trading","count":1,"direction":"backward"}. No date value.',
+    '- "next trading session" -> date:{"kind":"relative_trading","count":1,"direction":"forward"}.',
     '- "fifteen-minute bars" -> timeframeMinutes:15.',
     '- "quarter past eleven" -> seekTime:"11:15".',
     '- "park the replay at X" means seekTime:X (do not pause).',
@@ -161,21 +182,50 @@ export function buildIntentExtractionPrompt(): string {
     '- "tell me what candle I\'m on" -> finalQuery:"current_candle".',
     '- "give me the bar at X" -> finalQuery:"candle_at_time", queryTime:X.',
     '- "give me the bar I land on" or "what bar is that" -> finalQuery:"current_candle". No queryTime.',
+    '- "compare this candle with the previous candle you reported" -> finalQuery:"compare_candles", compare:{"left":{"source":"latest_returned_candle"},"right":{"source":"previous_returned_candle"}}.',
+    '- "compare the current chart candle with the last candle you reported" -> finalQuery:"compare_candles", compare:{"left":{"source":"current_chart_candle"},"right":{"source":"latest_returned_candle"}}.',
+    '- "compare the 11:30 candle with the 11:00 candle" -> finalQuery:"compare_candles", compare:{"left":{"source":"market_time","marketTime":"11:30"},"right":{"source":"market_time","marketTime":"11:00"}}.',
     '- queryTime must be a clock time (HH:MM), never a phrase like "the bar" or "30 minutes earlier".',
     '- Do NOT set playback unless the user explicitly says play, pause, or play_until.',
     '- playback play_until with an end time -> {"action":"play_until","untilTime":"HH:MM"}.',
     '- If the request is genuinely missing required info, return {"kind":"clarification","message":"..."}.',
     '- If the operation cannot be represented (e.g. VWAP, backtest), return {"kind":"unsupported","message":"..."}.',
     '',
+    'Context reference rules:',
+    '- If the user refers to a prior action with "do that again", "repeat that", or "again", set contextReference:{"source":"latest_successful_action","mode":"repeat"}.',
+    '- If the user says "same timeframe", "same date as before", or "use the same X", set contextReference:{"source":"latest_successful_action","mode":"inherit","inherit":["X"]} where X is one or more of date/timeframe/seekTime/relativeSeekMinutes/playback/finalQuery.',
+    '- If the user says "one session before that" or "prior session to that", set contextReference:{"source":"latest_successful_action","mode":"anchor_relative_date"} and date:{"kind":"relative_trading","count":1,"direction":"backward"}.',
+    '- If the user says "go back to the candle we were discussing" or "the previous candle", set contextReference:{"source":"latest_returned_candle","mode":"use_as_target"}.',
+    '- Explicit user values always win over inherited values. Do not include a field in "inherit" if the user gave a new value for it.',
+    '- If the reference cannot be resolved (no prior action/candle), return clarification.',
+    '',
+  ];
+
+  if (recentActions) {
+    sections.push('RECENT ACTIONS');
+    sections.push(recentActions);
+    sections.push('');
+  }
+
+  sections.push(
     'Examples:',
     '- "set me up on NVDA for the prior trading session, fifteen-minute bars, park the replay at 11:15 and tell me what candle I\'m on" -> {"kind":"chart_action","symbol":"NVDA","date":{"kind":"relative_trading","count":1,"direction":"backward"},"timeframeMinutes":15,"seekTime":"11:15","finalQuery":"current_candle"}',
     '- "move the replay 30 minutes earlier and give me the bar" -> {"kind":"chart_action","relativeSeekMinutes":-30,"finalQuery":"current_candle"}',
     '- "take me back to the previous stock" -> {"kind":"chart_action","previousSymbol":true}',
+    '- "Do that again on AAPL" -> {"kind":"chart_action","symbol":"AAPL","contextReference":{"source":"latest_successful_action","mode":"repeat"}}',
+    '- "Use the same timeframe on NVDA" -> {"kind":"chart_action","symbol":"NVDA","contextReference":{"source":"latest_successful_action","mode":"inherit","inherit":["timeframe"]}}',
+    '- "Use the same timeframe but go to the prior trading session" -> {"kind":"chart_action","date":{"kind":"relative_trading","count":1,"direction":"backward"},"contextReference":{"source":"latest_successful_action","mode":"inherit","inherit":["timeframe"]}}',
+    '- "Go back to the candle we were discussing" -> {"kind":"chart_action","contextReference":{"source":"latest_returned_candle","mode":"use_as_target"}}',
+    '- "Compare this candle with the previous candle you reported" -> {"kind":"chart_action","finalQuery":"compare_candles","compare":{"left":{"source":"latest_returned_candle"},"right":{"source":"previous_returned_candle"}}}',
+    '- "Compare the current chart candle with the last candle you reported" -> {"kind":"chart_action","finalQuery":"compare_candles","compare":{"left":{"source":"current_chart_candle"},"right":{"source":"latest_returned_candle"}}}',
+    '- "Compare the 11:30 candle with the 11:00 candle" -> {"kind":"chart_action","finalQuery":"compare_candles","compare":{"left":{"source":"market_time","marketTime":"11:30"},"right":{"source":"market_time","marketTime":"11:00"}}}',
     '- "Move it over there." -> {"kind":"clarification","message":"Where should I move it?"}',
     '- "Add VWAP and backtest a crossover." -> {"kind":"unsupported","message":"VWAP and backtest crossover are not supported."}',
     '',
-    'Respond with minified JSON.',
-  ].join('\n');
+    'Respond with minified JSON.'
+  );
+
+  return sections.join('\n');
 }
 
 export function buildIntentRepairPrompt(validationError: string): string {
@@ -233,6 +283,35 @@ function hasUnknownFields(obj: Record<string, unknown>, allowed: Set<string>): s
   return null;
 }
 
+const CONTEXT_REFERENCE_SOURCES: Set<ContextReferenceSource> = new Set([
+  'latest_successful_action',
+  'latest_failed_action',
+  'latest_returned_candle',
+]);
+
+const CONTEXT_REFERENCE_MODES: Set<ContextReferenceMode> = new Set([
+  'repeat',
+  'inherit',
+  'use_as_target',
+  'anchor_relative_date',
+]);
+
+const COMPARE_SIDE_SOURCES: Set<import('./types').CompareSideSource> = new Set([
+  'latest_returned_candle',
+  'previous_returned_candle',
+  'current_chart_candle',
+  'market_time',
+]);
+
+const INHERITABLE_FIELDS_SET: Set<InheritableField> = new Set([
+  'date',
+  'timeframe',
+  'seekTime',
+  'relativeSeekMinutes',
+  'playback',
+  'finalQuery',
+]);
+
 export interface IntentValidationResult {
   ok: true;
   intent: SemanticIntent;
@@ -241,6 +320,99 @@ export interface IntentValidationResult {
 export interface IntentValidationError {
   ok: false;
   error: string;
+}
+
+function validateContextReference(raw: unknown): ContextReference | string {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return 'contextReference must be an object.';
+  }
+  const obj = raw as Record<string, unknown>;
+  const err = hasUnknownFields(obj, new Set(['source', 'mode', 'inherit']));
+  if (err) return err;
+
+  if (!('source' in obj)) return 'contextReference requires a source.';
+  const source = obj.source;
+  if (!CONTEXT_REFERENCE_SOURCES.has(source as ContextReferenceSource)) {
+    return `Unknown contextReference source "${String(source)}".`;
+  }
+
+  const ref: ContextReference = { source: source as ContextReferenceSource };
+
+  if ('mode' in obj) {
+    const mode = obj.mode;
+    if (!CONTEXT_REFERENCE_MODES.has(mode as ContextReferenceMode)) {
+      return `Unknown contextReference mode "${String(mode)}".`;
+    }
+    ref.mode = mode as ContextReferenceMode;
+  }
+
+  if ('inherit' in obj) {
+    const inherit = obj.inherit;
+    if (!Array.isArray(inherit) || inherit.length === 0) {
+      return 'contextReference.inherit must be a non-empty array.';
+    }
+    const fields: InheritableField[] = [];
+    for (const item of inherit) {
+      if (!INHERITABLE_FIELDS_SET.has(item as InheritableField)) {
+        return `Unknown inheritable field "${String(item)}".`;
+      }
+      fields.push(item as InheritableField);
+    }
+    ref.inherit = fields;
+  }
+
+  if (ref.mode === 'inherit' && !ref.inherit) {
+    return 'contextReference mode "inherit" requires an inherit array.';
+  }
+
+  return ref;
+}
+
+function validateCompareSide(raw: unknown, side: 'left' | 'right'): import('./types').CompareSide | string {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return `compare.${side} must be an object.`;
+  }
+  const obj = raw as Record<string, unknown>;
+  const err = hasUnknownFields(obj, new Set(['source', 'marketTime']));
+  if (err) return `compare.${side} ${err}`;
+
+  if (!('source' in obj)) return `compare.${side} requires a source.`;
+  const source = obj.source;
+  if (!COMPARE_SIDE_SOURCES.has(source as import('./types').CompareSideSource)) {
+    return `Unknown compare.${side} source "${String(source)}".`;
+  }
+
+  const sideObj: import('./types').CompareSide = { source: source as import('./types').CompareSideSource };
+
+  if (source === 'market_time') {
+    if (typeof obj.marketTime !== 'string' || !isValidTime(obj.marketTime)) {
+      return `compare.${side} market_time requires a valid HH:MM marketTime.`;
+    }
+    sideObj.marketTime = obj.marketTime;
+  } else if ('marketTime' in obj) {
+    return `compare.${side} marketTime is only valid for source "market_time".`;
+  }
+
+  return sideObj;
+}
+
+function validateCompare(raw: unknown): import('./types').CompareSides | string {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return 'compare must be an object.';
+  }
+  const obj = raw as Record<string, unknown>;
+  const err = hasUnknownFields(obj, new Set(['left', 'right']));
+  if (err) return `compare ${err}`;
+
+  if (!('left' in obj)) return 'compare requires a left side.';
+  if (!('right' in obj)) return 'compare requires a right side.';
+
+  const left = validateCompareSide(obj.left, 'left');
+  if (typeof left === 'string') return left;
+  const right = validateCompareSide(obj.right, 'right');
+  if (typeof right === 'string') return right;
+
+  return { left, right };
 }
 
 export function validateSemanticIntent(raw: unknown): IntentValidationResult | IntentValidationError {
@@ -268,7 +440,7 @@ export function validateSemanticIntent(raw: unknown): IntentValidationResult | I
 
   const chartErr = hasUnknownFields(obj, new Set([
     'kind', 'symbol', 'date', 'timeframeMinutes', 'seekTime', 'relativeSeekMinutes',
-    'playback', 'finalQuery', 'queryTime', 'previousSymbol',
+    'playback', 'finalQuery', 'queryTime', 'previousSymbol', 'contextReference', 'compare',
   ]));
   if (chartErr) return { ok: false, error: chartErr };
 
@@ -356,7 +528,7 @@ export function validateSemanticIntent(raw: unknown): IntentValidationResult | I
       return { ok: false, error: 'playback must be an object.' };
     }
     const p = pb as Record<string, unknown>;
-    const pbErr = hasUnknownFields(p, new Set(['action', 'speed', 'untilTime']));
+    const pbErr = hasUnknownFields(p, new Set(['action', 'speed', 'untilTime', 'direction']));
     if (pbErr) return { ok: false, error: pbErr };
     if (p.action !== 'play' && p.action !== 'pause' && p.action !== 'play_until') {
       return { ok: false, error: 'playback.action must be "play", "pause", or "play_until".' };
@@ -383,13 +555,24 @@ export function validateSemanticIntent(raw: unknown): IntentValidationResult | I
       playback.untilTime = untilTime;
     }
 
+    if ('direction' in p) {
+      if (action !== 'play_until') {
+        return { ok: false, error: 'playback.direction is only valid for play_until.' };
+      }
+      const direction = p.direction;
+      if (direction !== 'forward' && direction !== 'backward') {
+        return { ok: false, error: 'playback.direction must be "forward" or "backward".' };
+      }
+      playback.direction = direction;
+    }
+
     intent.playback = playback;
   }
 
   if ('finalQuery' in obj) {
     const value = obj.finalQuery;
-    if (value !== 'current_candle' && value !== 'candle_at_time') {
-      return { ok: false, error: 'finalQuery must be "current_candle" or "candle_at_time".' };
+    if (value !== 'current_candle' && value !== 'candle_at_time' && value !== 'compare_candles') {
+      return { ok: false, error: 'finalQuery must be "current_candle", "candle_at_time", or "compare_candles".' };
     }
     intent.finalQuery = value;
   }
@@ -403,10 +586,33 @@ export function validateSemanticIntent(raw: unknown): IntentValidationResult | I
     }
   }
 
+  if ('contextReference' in obj) {
+    const validation = validateContextReference(obj.contextReference);
+    if (typeof validation === 'string') {
+      return { ok: false, error: validation };
+    }
+    intent.contextReference = validation;
+  }
+
+  if ('compare' in obj) {
+    const validation = validateCompare(obj.compare);
+    if (typeof validation === 'string') {
+      return { ok: false, error: validation };
+    }
+    intent.compare = validation;
+  }
+
   if (intent.finalQuery === 'candle_at_time' && !intent.queryTime) {
     // The model tried "candle_at_time" with a non-clock phrase like "the bar I land on".
     // Fall back to current_candle.
     intent.finalQuery = 'current_candle';
+  }
+
+  if (intent.finalQuery === 'compare_candles') {
+    const hasExplicitCompare = intent.compare && intent.compare.left && intent.compare.right;
+    if (!hasExplicitCompare && (!intent.contextReference || intent.contextReference.source !== 'latest_returned_candle')) {
+      return { ok: false, error: 'compare_candles requires either an explicit compare object or a latest_returned_candle contextReference.' };
+    }
   }
 
   // Contradictory / nonsensical combinations.
@@ -428,7 +634,8 @@ export function validateSemanticIntent(raw: unknown): IntentValidationResult | I
     !intent.seekTime &&
     !intent.relativeSeekMinutes &&
     !intent.playback &&
-    !intent.finalQuery
+    !intent.finalQuery &&
+    !intent.contextReference
   ) {
     return { ok: false, error: 'chart_action must include at least one actionable field.' };
   }
@@ -439,6 +646,13 @@ export function validateSemanticIntent(raw: unknown): IntentValidationResult | I
 // ---------------------------------------------------------------------------
 // LLM extraction
 // ---------------------------------------------------------------------------
+
+export interface IntentExtractionOptions {
+  /** Bounded verified runtime memory to render into the prompt. */
+  executionLog?: ExecutionContextStore;
+  /** Optional deterministic-parser context for diagnostics. */
+  requestContext?: RequestContext;
+}
 
 export type IntentExtractionResult =
   | { ok: true; intent: ChartActionIntent; elapsed: number }
@@ -456,11 +670,14 @@ function parseIntentJson(content: string): unknown {
   }
 }
 
-export async function extractSemanticIntent(text: string): Promise<IntentExtractionResult> {
+export async function extractSemanticIntent(
+  text: string,
+  opts: IntentExtractionOptions = {}
+): Promise<IntentExtractionResult> {
   const start = Date.now();
   agentTrace('llm intent start', { text, model: ORION_AGENT_MODEL });
 
-  const system = buildIntentExtractionPrompt();
+  const system = buildIntentExtractionPrompt(opts.executionLog);
   const messages: OrionChatMessage[] = [
     { role: 'system', content: system },
     { role: 'user', content: text },
@@ -476,7 +693,7 @@ export async function extractSemanticIntent(text: string): Promise<IntentExtract
         tier: 'agent',
         messages,
         format: 'json',
-        options: { temperature: 0, seed: 42, num_predict: 128 },
+        options: { temperature: 0, seed: 42, num_predict: 160 },
       });
     } catch (e) {
       const err = e instanceof Error ? e.message : String(e);
@@ -515,7 +732,7 @@ export async function extractSemanticIntent(text: string): Promise<IntentExtract
       return { ok: false, kind: 'unsupported', message: intent.message, elapsed: Date.now() - start };
     }
 
-    return { ok: true, intent: intent as ChartActionIntent, elapsed: Date.now() - start };
+    return { ok: true, intent, elapsed: Date.now() - start };
   }
 
   return { ok: false, kind: 'invalid', message: 'Could not extract a valid intent.', elapsed: Date.now() - start };
