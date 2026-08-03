@@ -282,4 +282,6 @@ export interface AgentContext {
   onSwitchSymbol: (symbol: string, date?: string) => void | Promise<void>;
   /** Optional callback for progress / side messages during a plan. */
   onMessage?: (text: string) => void;
+  /** Previous orchestrator execution result, if any, so chat can answer truthfully. */
+  lastResult?: AgentExecutionResult;
 }

@@ -1,15 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Send, Zap, Terminal } from 'lucide-react';
+import { Send, Terminal } from 'lucide-react';
 import { CoreSpinLoader } from './core-spin-loader';
 import { cn } from '../../lib/utils';
-import { classifyOrionIntent, type OrionIntent } from '../../lib/orion/router';
-import { ORION_AGENT_MODEL, ensureModel, orionChat, pullOrionModel } from '../../lib/orion/client';
-import { orionController } from '../../lib/orion/controller';
-import { parseChartCommand, parseChartCommandWithLLM } from '../../lib/orion/planner';
+import { ensureModel, pullOrionModel } from '../../lib/orion/client';
 import { handleOrionMessage } from '../../lib/orion/agent/orchestrator';
-import type { AgentContext } from '../../lib/orion/agent/types';
-import { commonSenseReply, suggestCommand } from '../../lib/orion/commonSense';
+import type { AgentContext, AgentExecutionResult } from '../../lib/orion/agent/types';
 import {
   DEFAULT_GREETING,
   GLOBAL_THREAD_KEY,
@@ -21,7 +17,6 @@ import {
   type ChatMessage,
   type OrionThreads,
 } from '../../lib/orionThreads';
-import { buildWorldState, renderWorldStateForPrompt } from '../../lib/orion/worldState';
 import type { AppAction, AppState, PerformanceLog } from '../../types';
 import type { ChartHandle } from '../Chart';
 
@@ -69,7 +64,6 @@ export function OrionTerminal({
   send,
   dispatch,
 }: OrionTerminalProps) {
-  const { symbol, replayDate } = appState;
   const threadKey = GLOBAL_THREAD_KEY;
 
   const [threads, setThreads] = useState<OrionThreads>({});
@@ -93,6 +87,7 @@ export function OrionTerminal({
   const bottomRef = useRef<HTMLDivElement>(null);
 
   const appStateRef = useRef(appState);
+  const lastResultRef = useRef<AgentExecutionResult | undefined>(undefined);
   useEffect(() => {
     appStateRef.current = appState;
   }, [appState]);
@@ -119,9 +114,6 @@ export function OrionTerminal({
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, isTyping]);
 
-  const [agentModelStatus, setAgentModelStatus] = useState<'unknown' | 'ready' | 'pulling' | 'missing'>('unknown');
-  const [agentPullPercent, setAgentPullPercent] = useState(0);
-  const [lastIntent, setLastIntent] = useState<OrionIntent>('chat');
   const [setupStage, setSetupStage] = useState<'idle' | 'pulling' | 'ready' | 'error'>('idle');
 
   useEffect(() => {
@@ -203,187 +195,31 @@ export function OrionTerminal({
     historyIndexRef.current = -1;
     setIsTyping(true);
 
-    let cmd = parseChartCommand(trimmed, availableTickers, undefined, appState.replayDate);
-    console.log('[orion-trace] parsed command:', JSON.parse(JSON.stringify(cmd)));
-
-    if (cmd.intent === 'unknown' && setupStage === 'ready') {
-      try {
-        const world = buildWorldState(appState, chartRef, performanceLog);
-        const smart = await parseChartCommandWithLLM(trimmed, availableTickers, world);
-        if (smart && smart.intent !== 'unknown') {
-          cmd = smart;
-        }
-      } catch (err) {
-        console.warn('[Orion] LLM chart parse failed:', err);
-      }
-    }
-
-    if (cmd.intent !== 'unknown') {
-      if (availableTickers.length === 0) {
-        setThreads((prev) =>
-          appendMessage(prev, threadKey, {
-            sender: 'ai',
-            text: "The OpenRewind chart engine is not connected, so I can't control the chart right now.",
-          })
-        );
-        setIsTyping(false);
-        return;
-      }
-
-      const agentCtx: AgentContext = {
-        getState: () => appStateRef.current,
-        chartRef,
-        performanceLog,
-        apiBase,
-        dataDir,
-        availableTickers,
-        send,
-        dispatch,
-        onSwitchSymbol,
-      };
-      try {
-        const outcome = await handleOrionMessage({
-          text: trimmed,
-          ctx: agentCtx,
-          setupReady: setupStage === 'ready',
-        });
-        console.log('[orion-trace] orchestrator result:', outcome);
-        setThreads((prev) => appendMessage(prev, threadKey, { sender: 'ai', text: outcome.message }));
-      } catch (err) {
-        const detail = err instanceof Error ? err.message : String(err);
-        setThreads((prev) => appendMessage(prev, threadKey, { sender: 'ai', text: `Orion couldn't run that: ${detail}` }));
-      } finally {
-        setIsTyping(false);
-      }
-      return;
-    }
-
-    if (setupStage !== 'ready') {
-      const common = commonSenseReply(trimmed, false);
-      if (common) {
-        setThreads((prev) => appendMessage(prev, threadKey, { sender: 'ai', text: common }));
-        setIsTyping(false);
-        return;
-      }
-      const suggestion = suggestCommand(trimmed);
-      const text = suggestion
-        ? `"${trimmed}" is not recognized as a request. Did you mean "${suggestion}"?`
-        : `"${trimmed}" is not recognized as a request. Try 'help' to see available commands.`;
-      setThreads((prev) => appendMessage(prev, threadKey, { sender: 'ai', text }));
-      setIsTyping(false);
-      return;
-    }
-
-    const decision = classifyOrionIntent(trimmed);
-    setLastIntent(decision.intent);
-
-    const wantsAgent = decision.intent === 'agent';
-    let effectiveTier: 'chat' | 'agent' = decision.intent;
-    let modeNotice: string | null = null;
-
-    if (wantsAgent && agentModelStatus !== 'ready') {
-      if (agentModelStatus === 'unknown' || agentModelStatus === 'missing') {
-        setAgentModelStatus('pulling');
-        setAgentPullPercent(0);
-        void (async () => {
-          try {
-            await pullOrionModel(ORION_AGENT_MODEL, (pct) => {
-              if (pct >= 0) setAgentPullPercent(pct);
-            });
-            setAgentModelStatus('ready');
-          } catch (e) {
-            console.warn('[Orion] Agent model pull failed:', e);
-            setAgentModelStatus('missing');
-          }
-        })();
-      }
-      effectiveTier = 'chat';
-      modeNotice = 'Warming up agent brain in the background… responding with the chat model for now.';
-    }
-
-    if (wantsAgent && agentModelStatus === 'ready') {
-      if (orionController.status !== 'idle') {
-        setThreads((prev) =>
-          appendMessage(prev, threadKey, { sender: 'ai', text: 'Orion is already running a task. Press Esc to cancel it first.' })
-        );
-        setIsTyping(false);
-        return;
-      }
-      try {
-        const result = await orionController.runAgentTask(trimmed);
-        if (!result.ok) {
-          setThreads((prev) =>
-            appendMessage(prev, threadKey, { sender: 'ai', text: `Orion task could not start: ${result.reason ?? 'unknown'}.` })
-          );
-        } else {
-          const latest = await loadOrionThreads();
-          setThreads(latest);
-        }
-      } catch (err) {
-        const detail = err instanceof Error ? err.message : String(err);
-        setThreads((prev) => appendMessage(prev, threadKey, { sender: 'ai', text: `Orion task failed: ${detail}` }));
-      } finally {
-        setIsTyping(false);
-      }
-      return;
-    }
+    const agentCtx: AgentContext = {
+      getState: () => appStateRef.current,
+      chartRef,
+      performanceLog,
+      apiBase,
+      dataDir,
+      availableTickers,
+      send,
+      dispatch,
+      onSwitchSymbol,
+      lastResult: lastResultRef.current,
+    };
 
     try {
-      const world = buildWorldState(appState, chartRef, performanceLog);
-      const telemetry = renderWorldStateForPrompt(world);
-      const threadScope =
-        threadKey === GLOBAL_THREAD_KEY
-          ? 'This is the GLOBAL thread — the user may ask about any symbol/date; answer using the JOURNAL section, not the current SESSION.'
-          : `This thread is scoped to ${symbol || 'the current symbol'}${replayDate ? ' on ' + replayDate : ''}. Anchor your answers to that session; do not confuse it with prior symbols.`;
-
-      const agentSystemAddendum =
-        effectiveTier === 'agent'
-          ? [
-              '',
-              'AGENT MODE',
-              'You are in agent mode. In a future turn you will be able to call tools that navigate the chart and execute trades. For now, if the user asks you to do something you cannot yet perform, briefly acknowledge the task, describe the plan you would run, and note that autonomous execution is arriving in the next update.',
-            ].join('\n')
-          : '';
-
-      const systemPrompt = [
-        "You are Orion, an observant, offline AI trading coach embedded in OpenRewind. You watch the user's replay unfold in real time.",
-        threadScope,
-        'Use the WORLD STATE below to answer accurately about what is happening right now and what the user has done.',
-        'When the user asks about a specific trade, only cite records whose symbol matches the question. Never label a trade with a symbol you cannot verify from the snapshot.',
-        'Be concise: 2-4 short sentences unless the user asks for detail. Use plain English only. Never use markdown, LaTeX, code blocks, bullet points, or asterisks.',
-        'Do not provide regulated investment advice; focus on execution quality, risk management, and what the user just did on the chart.',
-        '',
-        'WORLD STATE',
-        '-----------',
-        telemetry,
-        agentSystemAddendum,
-      ].join('\n');
-
-      const history = nextMessages.map((m) => ({
-        role: m.sender === 'ai' ? ('assistant' as const) : ('user' as const),
-        content: m.text,
-      }));
-
-      const response = await orionChat({
-        tier: effectiveTier,
-        messages: [{ role: 'system', content: systemPrompt }, ...history],
+      const outcome = await handleOrionMessage({
+        text: trimmed,
+        ctx: agentCtx,
+        setupReady: setupStage === 'ready',
       });
-
-      if (effectiveTier === 'agent' && agentModelStatus !== 'ready') {
-        setAgentModelStatus('ready');
-      }
-
-      const reply = response.content || 'No response content.';
-      const finalText = modeNotice ? `${modeNotice}\n\n${reply}` : reply;
-      setThreads((prev) => appendMessage(prev, threadKey, { sender: 'ai', text: finalText }));
+      lastResultRef.current = outcome.result ?? undefined;
+      console.log('[orion-trace] orchestrator result:', outcome);
+      setThreads((prev) => appendMessage(prev, threadKey, { sender: 'ai', text: outcome.message }));
     } catch (err) {
-      const code = (err as { code?: string })?.code;
       const detail = err instanceof Error ? err.message : String(err);
-      const message =
-        code === 'MODEL_MISSING'
-          ? `Orion needs the ${effectiveTier === 'agent' ? ORION_AGENT_MODEL : 'chat'} model pulled locally. Pull it via Ollama and retry.`
-          : `Orion is offline — start Ollama locally and ensure the model is pulled. (${detail})`;
-      setThreads((prev) => appendMessage(prev, threadKey, { sender: 'ai', text: message }));
+      setThreads((prev) => appendMessage(prev, threadKey, { sender: 'ai', text: `Orion couldn't run that: ${detail}` }));
     } finally {
       setIsTyping(false);
     }
@@ -496,25 +332,9 @@ export function OrionTerminal({
           orion@openrewind
         </span>
 
-        {(lastIntent === 'agent' || agentModelStatus === 'pulling' || agentModelStatus === 'ready') && (
-          <span
-            className={cn(
-              'ml-auto flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px] font-medium',
-              agentModelStatus === 'ready'
-                ? 'bg-[#ff3700]/15 text-[#ff3700]'
-                : lightMode
-                  ? 'bg-gray-100 text-gray-600'
-                  : 'bg-[#2a2e39] text-[#787b86]'
-            )}
-          >
-            <Zap className="h-3 w-3" />
-            {agentModelStatus === 'pulling'
-              ? `agent ${agentPullPercent}%`
-              : agentModelStatus === 'ready'
-                ? 'agent'
-                : 'agent…'}
-          </span>
-        )}
+        <span className={cn('ml-auto text-[10px] font-medium', lightMode ? 'text-gray-500' : 'text-[#787b86]')}>
+          {setupStage === 'ready' ? 'ready' : setupStage === 'pulling' ? 'loading…' : 'offline'}
+        </span>
       </div>
 
       {/* Terminal output */}

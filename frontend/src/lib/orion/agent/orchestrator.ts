@@ -105,13 +105,13 @@ function shortInterjectionReply(text: string): string | null {
 function isConversation(text: string): boolean {
   const t = text.trim().toLowerCase();
   if (t.length <= 4) return true;
-  if (/^(hi|hello|hey|um|uh|hmm|ok|okay|yes|no|what|why|how|tell me|show me|are you|is it|can you|could you|will you|would you|should i)\b/.test(t)) return true;
+  if (/^(hi|hello|hey|um|uh|hmm|ok|okay|yes|no|what|why|how|tell me|are you|is it|can you|could you|will you|would you|should i)\b/.test(t)) return true;
   return false;
 }
 
 function looksLikeSwitch(text: string): boolean {
   const t = text.toLowerCase();
-  return /\b(switch|go to|load|open|change to|show)\b/.test(t);
+  return /\b(switch|go to|load|open|change to|show|pull)\b/.test(t);
 }
 
 function looksLikePlayOrPause(text: string): boolean {
@@ -149,14 +149,18 @@ async function runChat(text: string, ctx: AgentContext, setupReady: boolean, sta
   agentTrace('llm chat start', text);
   try {
     const world = buildWorldStateForChat(ctx);
-    const threadScope = ctx.getState().sessionActive
-      ? `This message is about the current session: ${ctx.getState().symbol} ${ctx.getState().replayDate}.`
-      : 'There is no active session; the user may be asking general questions.';
+    const last = ctx.lastResult;
+    const recentContext = last
+      ? `RECENT ACTION\n${last.ok ? 'Succeeded' : 'Failed'}: ${last.receipts.filter((r) => r.success || r.success === false).map((r) => r.message).join('; ')}`
+      : 'No prior action recorded in this turn.';
     const systemPrompt = [
       'You are Orion, an observant, offline AI trading coach embedded in OpenRewind.',
-      threadScope,
+      `The WORLD STATE below is a live snapshot of the current session, not a completed/ended session. Do not claim the session has ended unless sessionActive is explicitly false.`,
+      'Only state facts that are present in the WORLD STATE or RECENT ACTION. Do not invent trades, profits, losses, or state changes.',
       'Be concise: 2-4 short sentences unless asked for detail. Use plain English only.',
       'Do not provide regulated investment advice.',
+      '',
+      recentContext,
       '',
       'WORLD STATE',
       '-----------',
@@ -185,7 +189,19 @@ async function runChat(text: string, ctx: AgentContext, setupReady: boolean, sta
 // Resolve path
 // ---------------------------------------------------------------------------
 
-function makeResolvePlan(text: string): AgentPlan {
+const SWITCH_STOP_WORDS = new Set([
+  'the', 'a', 'an', 'to', 'and', 'or', 'for', 'of', 'in', 'on', 'at', 'from', 'with',
+  'switch', 'go', 'load', 'open', 'show', 'pull', 'up', 'change', 'pick', 'select',
+  'me', 'please', 'stock', 'stocks', 'ticker', 'symbol', 'company', 'shares',
+]);
+
+function extractSymbolCandidate(text: string): string {
+  const tokens = text.split(/[^a-zA-Z0-9-]+/).filter(Boolean);
+  const first = tokens.find((t) => !SWITCH_STOP_WORDS.has(t.toLowerCase()));
+  return first ?? text.trim();
+}
+
+function makeResolvePlan(query: string): AgentPlan {
   return {
     id: makePlanId(),
     kind: 'action',
@@ -194,7 +210,7 @@ function makeResolvePlan(text: string): AgentPlan {
       {
         id: 'resolve-1',
         capability: 'session.resolve_symbol',
-        args: { name: text },
+        args: { name: query },
         required: true,
       },
     ],
@@ -206,7 +222,8 @@ async function resolveAndMaybeSwitch(
   ctx: AgentContext,
   token: CancellationToken
 ): Promise<OrchestratorResult | null> {
-  const resolvePlan = makeResolvePlan(text);
+  const query = extractSymbolCandidate(text);
+  const resolvePlan = makeResolvePlan(query);
   resolvePlan.id = makePlanId();
   const resolveResult = await executeAgentPlan(resolvePlan, ctx, token);
 
@@ -321,7 +338,7 @@ export async function handleOrionMessage(opts: OrchestratorOptions): Promise<Orc
   // 2. Conversation heuristics / classifier.
   const routeChat = isConversation(text);
   const classification = classifyOrionIntent(text);
-  if (routeChat || (classification.intent === 'chat' && !looksLikePlayOrPause(text))) {
+  if (routeChat || (classification.intent === 'chat' && !looksLikePlayOrPause(text) && !looksLikeSwitch(text))) {
     agentTrace('route', 'chat', { elapsed: elapsed(routeStart) });
     const message = await runChat(text, ctx, setupReady, routeStart);
     return { ok: true, message, wasChat: true, route: 'chat' };

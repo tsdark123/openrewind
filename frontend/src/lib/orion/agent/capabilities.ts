@@ -167,7 +167,13 @@ registerCapability({
         resolvedTicker: r.resolvedTicker,
       });
     }
-    return failureReceipt(planId, step, 'SYMBOL_UNAVAILABLE', r.message);
+    // Ticker-shaped unknown candidates get a concise unavailable message;
+    // company-name/phrase fallbacks use the generic matcher wording.
+    const query = name.trim();
+    if (/^[A-Z0-9-]{1,8}$/.test(query)) {
+      return failureReceipt(planId, step, 'SYMBOL_UNAVAILABLE', `${query} isn't available in the current OpenRewind dataset.`);
+    }
+    return failureReceipt(planId, step, 'SYMBOL_UNAVAILABLE', `No known ticker or company name matched "${query}".`);
   },
 });
 
