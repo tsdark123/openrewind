@@ -23,7 +23,7 @@ import { agentTrace } from './agent/config';
 export type OrionModelTier = 'chat' | 'agent';
 
 export const ORION_CHAT_MODEL = 'llama3.2';
-export const ORION_AGENT_MODEL = 'llama3.1:8b';
+export const ORION_AGENT_MODEL = 'llama3.2:latest';
 
 // 10 minutes as a duration string — Ollama's keep_alive accepts either a
 // duration ("10m", "1h") or a seconds integer. We use the string form so
@@ -32,6 +32,26 @@ export const AGENT_KEEP_ALIVE = '10m';
 // 0 == unload immediately. Used when the agent finishes a task and we want
 // to free VRAM/RAM on modest hardware.
 export const AGENT_KEEP_ALIVE_IDLE = '0s';
+
+// ---------------------------------------------------------------------------
+// Planner warm-up state
+// ---------------------------------------------------------------------------
+// One warm-up call per application session. It is launched non-blocking from
+// App boot, but agent orionChat calls may await it so the model is already in
+// memory for the first real request. React StrictMode double-mounts are
+// deduplicated by the module-level promise.
+
+interface WarmupResult {
+  ok: boolean;
+  elapsed: number;
+}
+
+let agentWarmupPromise: Promise<WarmupResult> | null = null;
+let agentWarmupGeneration = 0;
+
+function maybeGetWarmupPromise(): Promise<WarmupResult> | null {
+  return agentWarmupPromise;
+}
 
 export interface OrionChatMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
@@ -57,7 +77,15 @@ export interface OrionChatOptions {
   messages: OrionChatMessage[];
   tools?: Array<Record<string, unknown>>;
   keepAlive?: string;
-  stream?: false; // streaming lands with the automation driver in PR-4
+  format?: 'json' | string;
+  options?: {
+    temperature?: number;
+    seed?: number;
+    num_predict?: number;
+    num_ctx?: number;
+  };
+  /** Internal: bypass the warm-up wait for the agent model. */
+  skipWarmup?: boolean;
 }
 
 export interface OrionChatResponse {
@@ -74,6 +102,9 @@ export function isTauri(): boolean {
 }
 
 export function getOllamaBaseUrl(): string {
+  const envProcess = (globalThis as typeof globalThis & { process?: { env?: Record<string, string> } }).process;
+  const envBase = envProcess?.env?.OLLAMA_BASE_URL;
+  if (envBase) return envBase;
   return isTauri() ? 'http://127.0.0.1:11434' : '/ollama';
 }
 
@@ -208,6 +239,18 @@ export async function orionChat(opts: OrionChatOptions): Promise<OrionChatRespon
   const model = opts.tier === 'agent' ? ORION_AGENT_MODEL : ORION_CHAT_MODEL;
   agentTrace('orionChat start', { tier: opts.tier, model });
 
+  // Agent calls coordinate with the one-shot background warm-up so the model
+  // is loaded before we begin. A failed or stale warm-up is ignored so the
+  // real request can still attempt inference. Deterministic and chat tiers
+  // never await the warm-up.
+  if (opts.tier === 'agent' && !opts.skipWarmup) {
+    const warmup = maybeGetWarmupPromise();
+    if (warmup) {
+      agentTrace('orionChat awaiting planner warm-up');
+      await warmup.catch(() => {});
+    }
+  }
+
   const ensured = await ensureModel(model);
   if (!ensured.ready) {
     // The agent model may not be installed yet. Let the caller decide
@@ -226,6 +269,12 @@ export async function orionChat(opts: OrionChatOptions): Promise<OrionChatRespon
   };
   if (opts.tools && opts.tools.length > 0) {
     body.tools = opts.tools;
+  }
+  if (opts.format) {
+    body.format = opts.format;
+  }
+  if (opts.options) {
+    body.options = opts.options;
   }
 
   const res = await ollamaFetch('/api/chat', {
@@ -247,10 +296,59 @@ export async function orionChat(opts: OrionChatOptions): Promise<OrionChatRespon
 }
 
 /**
- * Fire-and-forget hint to Ollama telling it to unload the agent model.
- * Called by the automation driver when a task completes so idle laptops
- * aren't stuck holding 8B parameters in memory.
+ * One-shot planner warm-up. Runs a minimal agent /api/chat call in the
+ * background so llama3.2:latest is loaded into memory. StrictMode duplicate
+ * mount calls are deduplicated by returning the in-flight module promise.
+ * The response is never shown to the user.
  */
+export function warmOrionAgent(): Promise<WarmupResult> {
+  if (agentWarmupPromise) {
+    agentTrace('planner warm-up duplicate skipped');
+    console.log('[planner-warmup] duplicate attempt, returning existing promise');
+    return agentWarmupPromise;
+  }
+
+  const thisGen = ++agentWarmupGeneration;
+  const start = Date.now();
+  agentTrace('planner warm-up start', { generation: thisGen });
+  console.log('[planner-warmup] start', { generation: thisGen });
+
+  agentWarmupPromise = (async (): Promise<WarmupResult> => {
+    try {
+      const callStart = Date.now();
+      await orionChat({
+        tier: 'agent',
+        messages: [{ role: 'user', content: 'ok' }],
+        keepAlive: AGENT_KEEP_ALIVE,
+        options: { temperature: 0, seed: 42, num_predict: 1 },
+        skipWarmup: true,
+      });
+      const elapsed = Date.now() - callStart;
+      if (thisGen !== agentWarmupGeneration) {
+        agentTrace('planner warm-up end', { generation: thisGen, elapsed, stale: true });
+        console.log('[planner-warmup] stale success ignored', { generation: thisGen, elapsed });
+        return { ok: false, elapsed };
+      }
+      agentTrace('planner warm-up end', { generation: thisGen, elapsed, success: true });
+      console.log('[planner-warmup] end', { generation: thisGen, elapsed, success: true });
+      return { ok: true, elapsed };
+    } catch (e) {
+      const elapsed = Date.now() - start;
+      const err = e instanceof Error ? e.message : String(e);
+      if (thisGen !== agentWarmupGeneration) {
+        agentTrace('planner warm-up end', { generation: thisGen, elapsed, stale: true, error: err });
+        console.log('[planner-warmup] stale failure ignored', { generation: thisGen, elapsed, error: err });
+        return { ok: false, elapsed };
+      }
+      agentTrace('planner warm-up end', { generation: thisGen, elapsed, success: false, error: err });
+      console.log('[planner-warmup] end', { generation: thisGen, elapsed, success: false, error: err });
+      return { ok: false, elapsed };
+    }
+  })();
+
+  return agentWarmupPromise;
+}
+
 export async function releaseAgentModel(): Promise<void> {
   try {
     await ollamaFetch('/api/generate', {

@@ -17,7 +17,7 @@
 
 import type { AgentContext, AgentPlan, AgentExecutionResult, CancellationToken } from './types';
 import { createCancellationSource, type CancellationSource } from './types';
-import { parseChartCommand, type ChartCommand } from '../planner';
+import { parseChartCommand, extractDateInput, type ChartCommand } from '../planner';
 import { SYMBOL_ALIASES } from '../symbolAliases';
 import { classifyOrionIntent } from '../router';
 import { orionChat } from '../client';
@@ -26,6 +26,9 @@ import { commonSenseReply } from '../commonSense';
 import type { SymbolResolution } from './resolveSymbol';
 import { chartCommandToPlan } from './planner-adapter';
 import { executeAgentPlan } from './executor';
+import { extractSemanticIntent } from './intent';
+import { compileChartActionIntent } from './intentCompiler';
+import { validateAgentPlan } from './validatePlan';
 import { agentTrace } from './config';
 
 export interface OrchestratorOptions {
@@ -47,7 +50,7 @@ export interface OrchestratorResult {
   /** Execution result, if an action plan ran. */
   result?: AgentExecutionResult;
   /** Route chosen for diagnostics. */
-  route: 'chat' | 'deterministic' | 'resolve' | 'natural-language' | 'unrecognized' | 'error';
+  route: 'chat' | 'deterministic' | 'resolve' | 'llm-plan' | 'clarification' | 'unsupported' | 'unrecognized' | 'error';
 }
 
 let planCounter = 0;
@@ -226,6 +229,7 @@ function makeResolvePlan(query: string): AgentPlan {
 async function resolveAndMaybeSwitch(
   text: string,
   ctx: AgentContext,
+  cmd: ChartCommand,
   token: CancellationToken
 ): Promise<OrchestratorResult | null> {
   const query = extractSymbolCandidate(text);
@@ -274,6 +278,11 @@ async function resolveAndMaybeSwitch(
     ],
   };
 
+  if (!isDeterministicPlanComplete(switchPlan, text, cmd, ctx.getState().replayDate)) {
+    agentTrace('route', 'resolve-incomplete', { text });
+    return null;
+  }
+
   const switchResult = await executeAgentPlan(switchPlan, ctx, token);
 
   // Combine receipts for the caller.
@@ -312,6 +321,156 @@ async function resolveAndMaybeSwitch(
 // Main entry
 // ---------------------------------------------------------------------------
 
+type ActionDimension = 'symbol' | 'date' | 'timeframe' | 'absoluteTime' | 'relativeSeek' | 'playbackControl' | 'candleQuery' | 'previousSymbol';
+
+function planCoversDimensions(plan: AgentPlan): Set<ActionDimension> {
+  const covered = new Set<ActionDimension>();
+  for (const step of plan.steps) {
+    const cap = step.capability;
+    if (cap === 'session.resolve_symbol' || cap === 'session.switch_symbol') covered.add('symbol');
+    if (cap === 'session.resolve_trading_date' || cap === 'session.resolve_calendar_date') covered.add('date');
+    if (cap === 'session.switch_symbol' && (step.args?.date || step.args?.$ref)) covered.add('date');
+    if (cap === 'chart.set_timeframe') covered.add('timeframe');
+    if (cap === 'playback.seek_to_time') {
+      covered.add('absoluteTime');
+      covered.add('playbackControl');
+    }
+    if (cap === 'playback.play_until') {
+      covered.add('playbackControl');
+      if (step.args?.untilTime) covered.add('absoluteTime');
+    }
+    if (cap === 'playback.seek_relative') {
+      covered.add('relativeSeek');
+      covered.add('playbackControl');
+    }
+    if (cap === 'playback.play' || cap === 'playback.pause') covered.add('playbackControl');
+    if (cap === 'chart.get_current_candle' || cap === 'chart.get_candle_at_time' || cap === 'chart.candle_query') {
+      covered.add('candleQuery');
+      if (cap === 'chart.get_candle_at_time' && step.args?.time) covered.add('absoluteTime');
+    }
+    if (cap === 'session.switch_to_previous_symbol') {
+      covered.add('previousSymbol');
+      covered.add('symbol');
+    }
+  }
+  return covered;
+}
+
+
+function textRequestsTimeframe(t: string): boolean {
+  const hasContext = /\b(?:timeframe|time frame|tf|bars?|chart)\b/i.test(t);
+  const numberWord = '(?:\\d+|one|two|three|four|five|six|seven|eight|nine|ten|fifteen|thirty|sixty)';
+  const unit = '(?:m|min|minute|minutes|h|hour|hours|d|day|days)';
+  const explicit = new RegExp(`\\b${numberWord}\\s*(?:-?${unit})?(?:\\s*(?:bar(?:s)?|timeframe|tf))?\\b`, 'i');
+  return hasContext ? explicit.test(t) : /\b\d+\s*m\b/i.test(t);
+}
+
+function textRequestsDate(t: string): boolean {
+  return (
+    /\b(?:prior|previous|last)\s+(?:trading\s+)?(?:session|day)s?\b/i.test(t) ||
+    /\b(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:trading\s+)?(?:session|day)s?\s+(?:ago|back|before)\b/i.test(t) ||
+    /\b(?:yesterday|today|tomorrow)\b/i.test(t) ||
+    /\b\d{4}-\d{1,2}-\d{1,2}\b/.test(t) ||
+    /\b\d{1,2}\/\d{1,2}\/\d{4}\b/.test(t)
+  );
+}
+
+function textRequestsAbsoluteTime(t: string): boolean {
+  return (
+    /\b\d{1,2}:\d{2}\b/.test(t) ||
+    /\b\d{1,2}\s*(?:am|pm)\b/i.test(t) ||
+    /\b(?:noon|midnight|market\s+open|market\s+close)\b/i.test(t) ||
+    /\b(?:quarter|half)\s+(?:past|to)\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\b/i.test(t) ||
+    /\bo\'clock\b/i.test(t)
+  );
+}
+
+function textRequestsRelativeSeek(t: string): boolean {
+  if (/\b(?:take me back|previous symbol|previous stock|stock i was just on|was just on)\b/i.test(t)) return false;
+  return (
+    /\b(?:\d+|half)\s*(?:an?\s+)?(?:minute|minutes|hour|hours|hr|hrs|min|mins)\s+(?:ago|earlier|later|before|after)\b/i.test(t) ||
+    /\b(?:earlier|later)\b/i.test(t) ||
+    /\b(?:go|move|skip|jump)\s+back\b/i.test(t) ||
+    /\brewind\s+(?:\d+|half|a few)?\s*(?:minute|minutes|hour|hours)?/i.test(t)
+  );
+}
+
+function textRequestsPlaybackControl(t: string): boolean {
+  return /\b(?:play|pause|rewind|fast[-\s]?forward|fastforward|speed up|slow down|set\s+speed)\b/i.test(t);
+}
+
+function textRequestsCandleQuery(t: string): boolean {
+  if (/\b(?:candle|bar|ohlc)\b/i.test(t)) return true;
+  if (/\b(?:price|worth|value)\b/i.test(t)) {
+    return /\b(?:what|tell|give|show|which|the)\s+(?:price|worth|value)\b/i.test(t) ||
+      /\b(?:price|worth|value)\s+(?:at|of)\b/i.test(t);
+  }
+  return false;
+}
+
+function textRequestsPreviousSymbol(t: string): boolean {
+  return /\b(?:take me back|previous symbol|previous stock|stock i was just on|was just on)\b/i.test(t);
+}
+
+function getRequestedDimensions(text: string, cmd: ChartCommand, baseDate?: string): Set<ActionDimension> {
+  const t = text;
+  const dims = new Set<ActionDimension>();
+
+  if (cmd.symbol || cmd.intent === 'switch' || looksLikeSwitch(text)) {
+    dims.add('symbol');
+  }
+  if (cmd.date || cmd.dateInput || extractDateInput(text, baseDate)) {
+    dims.add('date');
+  } else if (textRequestsDate(t)) {
+    dims.add('date');
+  }
+  if (cmd.timeframe !== undefined) {
+    dims.add('timeframe');
+  } else if (textRequestsTimeframe(t)) {
+    dims.add('timeframe');
+  }
+  if (cmd.startTime || cmd.endTime) {
+    dims.add('absoluteTime');
+  } else if (textRequestsAbsoluteTime(t)) {
+    dims.add('absoluteTime');
+  }
+  if (cmd.relativeMinutes !== undefined) {
+    dims.add('relativeSeek');
+  } else if (textRequestsRelativeSeek(t)) {
+    dims.add('relativeSeek');
+  }
+  if (cmd.speed !== undefined || ['play', 'pause', 'rewind', 'fast_forward', 'set_speed', 'seek'].includes(cmd.intent)) {
+    dims.add('playbackControl');
+  } else if (textRequestsPlaybackControl(t)) {
+    dims.add('playbackControl');
+  }
+  if (cmd.intent === 'candle_query') {
+    dims.add('candleQuery');
+    if (cmd.startTime || cmd.endTime) dims.add('absoluteTime');
+  } else if (textRequestsCandleQuery(t)) {
+    dims.add('candleQuery');
+  }
+  if (textRequestsPreviousSymbol(t)) {
+    dims.add('previousSymbol');
+  }
+  return dims;
+}
+
+function isDeterministicPlanComplete(plan: AgentPlan, text: string, cmd: ChartCommand, baseDate?: string): boolean {
+  const requested = getRequestedDimensions(text, cmd, baseDate);
+  const covered = planCoversDimensions(plan);
+  agentTrace('deterministic completeness', { requested: Array.from(requested), covered: Array.from(covered) });
+  for (const dim of requested) {
+    if (!covered.has(dim)) {
+      agentTrace('deterministic incomplete', { dim, text });
+      return false;
+    }
+  }
+  return true;
+}
+
+
+
 function supportedIntent(intent: string): boolean {
   return ['switch', 'play', 'pause', 'set_timeframe', 'seek', 'fast_forward', 'rewind', 'candle_query'].includes(intent);
 }
@@ -345,7 +504,10 @@ export async function handleOrionMessage(opts: OrchestratorOptions): Promise<Orc
   const routeChat = isConversation(text);
   const classification = classifyOrionIntent(text);
   if (
-    (routeChat || (classification.intent === 'chat' && !looksLikePlayOrPause(text) && !looksLikeSwitch(text))) &&
+    routeChat &&
+    classification.intent === 'chat' &&
+    !looksLikePlayOrPause(text) &&
+    !looksLikeSwitch(text) &&
     !looksLikeChartQuery(text)
   ) {
     agentTrace('route', 'chat', { elapsed: elapsed(routeStart) });
@@ -360,7 +522,7 @@ export async function handleOrionMessage(opts: OrchestratorOptions): Promise<Orc
 
   if (isFastPathReady(cmd)) {
     const plan = chartCommandToPlan(cmd);
-    if (plan) {
+    if (plan && isDeterministicPlanComplete(plan, text, cmd, ctx.getState().replayDate)) {
       plan.id = plan.id || makePlanId();
       const result = await executeAgentPlan(plan, ctx, token);
       agentTrace('route', 'deterministic', { elapsed: elapsed(routeStart), result: result.ok });
@@ -373,17 +535,70 @@ export async function handleOrionMessage(opts: OrchestratorOptions): Promise<Orc
         route: 'deterministic',
       };
     }
+    if (plan) {
+      agentTrace('route', 'deterministic-incomplete', { elapsed: elapsed(routeStart) });
+    }
   }
 
   // 4. Incomplete or unresolved switch: let resolve_symbol handle it.
-  if (cmd.intent === 'switch' || (cmd.intent === 'unknown' && looksLikeSwitch(text))) {
+  if ((cmd.intent === 'switch' && !cmd.symbol) || (cmd.intent === 'unknown' && looksLikeSwitch(text))) {
     const resolveStart = now();
-    const resolved = await resolveAndMaybeSwitch(text, ctx, token);
+    const resolved = await resolveAndMaybeSwitch(text, ctx, cmd, token);
     agentTrace('route', 'resolve', { elapsed: elapsed(resolveStart) });
     if (resolved) return resolved;
   }
 
-  // 5. Fallback to chat.
+  // 5. Compact semantic-intent extraction for unfamiliar or compound actionable language.
+  if (setupReady && (classification.intent === 'agent' || !routeChat)) {
+    const llmStart = now();
+    agentTrace('route', 'llm-intent-start', { elapsed: elapsed(routeStart) });
+    const semantic = await extractSemanticIntent(text);
+    agentTrace('llm intent end', { elapsed: elapsed(llmStart), result: semantic.ok ? 'intent' : semantic.kind });
+
+    if (semantic.ok) {
+      const plan = compileChartActionIntent(semantic.intent, {
+        anchorDate: ctx.getState().replayDate || new Date().toISOString().slice(0, 10),
+      });
+      const validation = validateAgentPlan(plan);
+      if (!validation.ok) {
+        agentTrace('route', 'error', { elapsed: elapsed(routeStart), error: validation.error });
+        return { ok: false, message: `I could not build a valid plan: ${validation.error}`, wasChat: false, route: 'error' };
+      }
+      plan.id = plan.id || makePlanId();
+      const result = await executeAgentPlan(plan, ctx, token);
+      agentTrace('route', 'llm-plan', { elapsed: elapsed(routeStart), result: result.ok });
+      return {
+        ok: result.ok,
+        message: composeResponse(result, ctx),
+        wasChat: false,
+        plan,
+        result,
+        route: 'llm-plan',
+      };
+    }
+
+    const { kind, message } = semantic;
+    if (kind === 'clarification') {
+      agentTrace('route', 'clarification', { elapsed: elapsed(routeStart) });
+      return { ok: true, message, wasChat: true, route: 'clarification' };
+    }
+
+    if (kind === 'unsupported') {
+      agentTrace('route', 'unsupported', { elapsed: elapsed(routeStart) });
+      return { ok: false, message, wasChat: false, route: 'unsupported' };
+    }
+
+    if (kind === 'invalid') {
+      agentTrace('route', 'error', { elapsed: elapsed(routeStart), error: message });
+      return { ok: false, message, wasChat: false, route: 'error' };
+    }
+
+    // offline / model unreachable
+    agentTrace('route', 'error', { elapsed: elapsed(routeStart), error: message });
+    return { ok: false, message, wasChat: false, route: 'error' };
+  }
+
+  // 6. Final chat fallback.
   agentTrace('route', 'fallback-chat', { elapsed: elapsed(routeStart) });
   const message = await runChat(text, ctx, setupReady, routeStart);
   return { ok: true, message, wasChat: true, route: 'chat' };

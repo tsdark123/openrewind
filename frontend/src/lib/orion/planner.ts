@@ -250,7 +250,7 @@ function parse24hTime(hour: number, minute: number, meridian?: string): ParsedTi
   return { hour: h, minute: m };
 }
 
-function extractTimes(text: string): ParsedTime[] {
+export function extractTimes(text: string): ParsedTime[] {
   const matches: { time: ParsedTime; index: number }[] = [];
   const seen = new Set<string>();
 

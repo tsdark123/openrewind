@@ -25,6 +25,13 @@ import { resolveTradingDate } from './resolveTradingDate';
 import { fetchCandles } from '../tools';
 import { clampTimeframe, toEngineTs, toEtTime, formatTime } from '../planner';
 
+// Tracks previous sessions so session.switch_to_previous_symbol can restore them.
+const sessionHistory: Array<{ symbol: string; date: string }> = [];
+
+export function clearSessionHistory(): void {
+  sessionHistory.length = 0;
+}
+
 // ---------------------------------------------------------------------------
 // Capability definition shape
 // ---------------------------------------------------------------------------
@@ -161,7 +168,7 @@ registerCapability({
   kind: 'read',
   description: 'Returns a compact canonical snapshot of current OpenRewind state.',
   preconditions: ['None — always available.'],
-  argSchema: { type: 'object', properties: {} },
+  argSchema: { type: 'object', properties: {}, additionalProperties: false },
   delegatesTo: 'buildWorldState(state, chartRef, performanceLog)',
   execute: async (planId, step, ctx, token) => {
     const c = wasCancelled(planId, step, token);
@@ -253,12 +260,17 @@ registerCapability({
     }
 
     const before = ctx.getState();
+    if (before.sessionActive && before.symbol) {
+      sessionHistory.push({ symbol: before.symbol, date: before.replayDate });
+    }
     try {
       await Promise.resolve(ctx.onSwitchSymbol(symbol, date));
     } catch (e) {
+      sessionHistory.pop();
       return failureReceipt(planId, step, 'ENGINE_ERROR', `Switch to ${symbol} threw: ${e instanceof Error ? e.message : String(e)}`);
     }
     if (token?.cancelled) {
+      sessionHistory.pop();
       return wasCancelled(planId, step, token)!;
     }
 
@@ -303,11 +315,51 @@ registerCapability({
   kind: 'mutate',
   description: 'Switch back to the previous valid symbol/date. Requires a semantic action history.',
   preconditions: ['A previous valid session must be recorded in history.'],
-  argSchema: { type: 'object', properties: {} },
-  delegatesTo: 'semantic action history (Phase 5)',
-  execute: async (planId, step, ctx) => {
-    void ctx;
-    return failureReceipt(planId, step, 'PRECONDITION_FAILED', 'session.switch_to_previous_symbol is not implemented in V1.');
+  argSchema: { type: 'object', properties: {}, additionalProperties: false },
+  delegatesTo: 'sessionHistory stack',
+  execute: async (planId, step, ctx, token) => {
+    const c = wasCancelled(planId, step, token);
+    if (c) return c;
+
+    if (sessionHistory.length === 0) {
+      return failureReceipt(planId, step, 'PRECONDITION_FAILED', 'No previous session to switch to.');
+    }
+
+    const previous = sessionHistory[sessionHistory.length - 1];
+    if (!ctx.availableTickers.includes(previous.symbol)) {
+      return failureReceipt(planId, step, 'SYMBOL_UNAVAILABLE', `Previous session ${previous.symbol} is no longer available.`);
+    }
+    if (!ctx.onSwitchSymbol) {
+      return failureReceipt(planId, step, 'PRECONDITION_FAILED', 'Symbol-switch bridge is not wired.');
+    }
+
+    try {
+      await Promise.resolve(ctx.onSwitchSymbol(previous.symbol, previous.date));
+    } catch (e) {
+      return failureReceipt(planId, step, 'ENGINE_ERROR', `Switch to previous ${previous.symbol} threw: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    if (token?.cancelled) {
+      return wasCancelled(planId, step, token)!;
+    }
+
+    const ok = await waitForState(
+      ctx,
+      (s) => s.symbol === previous.symbol && s.sessionActive && s.replayDate === previous.date,
+      3000,
+      80
+    );
+    if (!ok) {
+      return failureReceipt(planId, step, 'ACKNOWLEDGMENT_TIMEOUT', `Did not switch back to ${previous.symbol} ${previous.date}.`);
+    }
+
+    sessionHistory.pop();
+    const after = ctx.getState();
+    return successReceipt(
+      planId,
+      step,
+      `Switched back to ${after.symbol} on ${after.replayDate}.`,
+      { symbol: after.symbol, date: after.replayDate, totalCandles: after.totalCandles }
+    );
   },
 });
 
@@ -376,7 +428,11 @@ registerCapability({
   kind: 'mutate',
   description: 'Set the active chart timeframe (1m, 5m, 15m, 1h, 4h, daily).',
   preconditions: ['Active session.', 'Engine connected.'],
-  argSchema: { type: 'object', properties: { timeframe: { type: 'number' } }, required: ['timeframe'] },
+  argSchema: {
+    type: 'object',
+    properties: { timeframe: { type: 'integer' } },
+    required: ['timeframe'],
+  },
   delegatesTo: 'send({ cmd: "set_timeframe", minutes }) + dispatch SET_TIMEFRAME',
   execute: async (planId, step, ctx, token) => {
     const c = wasCancelled(planId, step, token);
@@ -418,7 +474,7 @@ registerCapability({
   kind: 'mutate',
   description: 'Seek forward or backward by a relative number of minutes.',
   preconditions: ['Active session.', 'Engine connected.'],
-  argSchema: { type: 'object', properties: { minutes: { type: 'number' } }, required: ['minutes'] },
+  argSchema: { type: 'object', properties: { minutes: { type: 'integer' } }, required: ['minutes'] },
   delegatesTo: 'get current cursor, compute target timestamp, send seek',
   execute: async (planId, step, ctx, token) => {
     const c = wasCancelled(planId, step, token);
@@ -511,9 +567,10 @@ registerCapability({
   argSchema: {
     type: 'object',
     properties: {
-      speed: { type: 'number' },
+      speed: { type: 'integer' },
       direction: { type: 'string', enum: ['forward', 'backward'] },
       until: { type: 'number' },
+      untilTime: { type: 'string' },
     },
   },
   delegatesTo: 'send({ cmd: "set_speed" }), send({ cmd: "play", speed, until }) + dispatch SET_PLAYING',
@@ -608,7 +665,7 @@ registerCapability({
   kind: 'mutate',
   description: 'Pause auto-playback.',
   preconditions: ['Active session.', 'Engine connected.'],
-  argSchema: { type: 'object', properties: {} },
+  argSchema: { type: 'object', properties: {}, additionalProperties: false },
   delegatesTo: 'send({ cmd: "pause" }) + dispatch SET_PLAYING',
   execute: async (planId, step, ctx, token) => {
     const c = wasCancelled(planId, step, token);
@@ -645,7 +702,7 @@ registerCapability({
   kind: 'read',
   description: 'Return the most recent candle for the active session.',
   preconditions: ['Active session.', 'Chart loaded.'],
-  argSchema: { type: 'object', properties: {} },
+  argSchema: { type: 'object', properties: {}, additionalProperties: false },
   delegatesTo: 'chartRef.current.getRecentCandles(1)[0]',
   execute: async (planId, step, ctx, token) => {
     const c = wasCancelled(planId, step, token);

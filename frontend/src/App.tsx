@@ -15,6 +15,7 @@ import { useWebSocket } from './hooks/useWebSocket';
 import { endSession, loadPerformanceLog } from './lib/journal';
 import { orionController } from './lib/orion/controller';
 import { fetchCandles } from './lib/orion/tools';
+import { warmOrionAgent } from './lib/orion/client';
 import { useDataSource, getEngineDataDir } from './lib/dataSourceContext';
 import { engineUrl, sessionStartBody } from './lib/engine';
 import { threadKeyForContext, appendMessage, loadOrionThreads, writeOrionThreads } from './lib/orionThreads';
@@ -461,16 +462,23 @@ export default function App() {
   useEffect(() => {
     loadPerformanceLog().then((log) => dispatch({ type: 'SET_PERFORMANCE_LOG', log }));
 
-    // Boot the local Ollama service automatically when running as a Tauri app.
-    if (isTauri) {
-      const tauri = (window as any).__TAURI_INTERNALS__;
-      tauri
-        ?.invoke?.('ensure_ollama_running')
-        .catch((err: unknown) => {
+    const bootOllamaAndWarm = async () => {
+      // Boot the local Ollama service automatically when running as a Tauri app.
+      if (isTauri) {
+        const tauri = (window as any).__TAURI_INTERNALS__;
+        await tauri?.invoke?.('ensure_ollama_running').catch((err: unknown) => {
           console.warn('[Orion] Could not auto-start Ollama:', err);
         });
-    }
-    return () => {}; // no cleanup needed — fetchTickers is idempotent
+      }
+
+      // One-shot planner warm-up. Non-blocking for the UI; agent calls may
+      // await it so the first semantic request after launch is snappy. The
+      // client deduplicates React StrictMode double mounts and ignores failure.
+      warmOrionAgent().catch(() => {});
+    };
+
+    bootOllamaAndWarm();
+    return () => {}; // no cleanup needed — warmOrionAgent deduplicates by module state
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);  // run once on mount; onDataSynced and the connected effect handle subsequent refreshes
 

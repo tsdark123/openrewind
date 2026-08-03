@@ -27,8 +27,8 @@ const AGENT_VERBS = [
   'run', 'execute', 'backtest', 'simulate', 'replay',
   'trade', 'buy', 'sell', 'short', 'long', 'enter', 'exit', 'close',
   'play', 'pause', 'rewind', 'seek', 'skip', 'advance',
-  'drive', 'take over', 'take control', 'automate',
-  'set speed', 'speed up', 'slow down',
+  'drive', 'take over', 'take control', 'automate', 'take me back',
+  'set speed', 'speed up', 'slow down', 'set me up', 'set up', 'park the',
   'place order', 'place a', 'submit',
 ];
 
@@ -57,6 +57,16 @@ const AGENT_HINT_PHRASES = [
   'opening range', 'mean reversion', 'breakout',
   'market open', 'market close',
   'let orion', 'have orion', 'orion, ',
+  'set me up', 'set up',
+  'take me back',
+  'previous symbol',
+  'park the',
+  'quarter past',
+  'half an hour',
+  'fifteen-minute',
+  'fifteen minute',
+  'bar',
+  'give me the',
 ];
 
 export function classifyOrionIntent(rawMessage: string): IntentClassification {

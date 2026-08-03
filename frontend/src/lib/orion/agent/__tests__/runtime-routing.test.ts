@@ -191,7 +191,7 @@ describe('Switch-like raw ticker extraction and failure preservation', () => {
     expect(r.message).toMatch(/WXYZ.*isn't available/);
   });
 
-  it('Switch to AAPL. stays deterministic and fast with no model call', async () => {
+  it('regression: Switch to AAPL. stays deterministic with zero model calls', async () => {
     const ctx = makeCtx();
     const r = await handleOrionMessage({ text: 'Switch to AAPL.', ctx, setupReady: true });
     expect(r.route).toBe('deterministic');
