@@ -13,6 +13,7 @@
 import type {
   AgentPlan,
   AgentContext,
+  AgentStep,
   CancellationToken,
   ExecutionReceipt,
   AgentExecutionResult,
@@ -48,6 +49,38 @@ function requiredStepStatus(plan: AgentPlan, stepId: string): boolean {
   return step ? isRequiredStep(step) : true;
 }
 
+interface ArgRef { $ref: string; path?: string }
+
+function isArgRef(value: unknown): value is ArgRef {
+  return typeof value === 'object' && value !== null && '$ref' in value && typeof (value as ArgRef).$ref === 'string';
+}
+
+function getPath(obj: unknown, path?: string): unknown {
+  if (!path) return obj;
+  let current: unknown = obj;
+  for (const key of path.split('.')) {
+    if (current && typeof current === 'object' && key in current) {
+      current = (current as Record<string, unknown>)[key];
+    } else {
+      return undefined;
+    }
+  }
+  return current;
+}
+
+function resolveArgs(step: AgentStep, priorReceipts: ExecutionReceipt[]): AgentStep {
+  const resolved: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(step.args)) {
+    if (isArgRef(value)) {
+      const ref = priorReceipts.find((r) => r.stepId === value.$ref);
+      resolved[key] = ref ? getPath(ref.data, value.path) : undefined;
+    } else {
+      resolved[key] = value;
+    }
+  }
+  return { ...step, args: resolved };
+}
+
 export async function executeAgentPlan(
   plan: AgentPlan,
   ctx: AgentContext,
@@ -68,6 +101,7 @@ export async function executeAgentPlan(
   agentTrace('execute start', plan.id, plan.summary, plan.steps.length);
   const receiptsById = new Map<string, ExecutionReceipt>();
   const receipts: ExecutionReceipt[] = [];
+  let stoppedAtStepId: string | null = null;
 
   for (const step of plan.steps) {
     // Cancellation check before the step.
@@ -76,6 +110,21 @@ export async function executeAgentPlan(
       receipts.push(receipt);
       receiptsById.set(step.id, receipt);
       agentTrace('step cancelled', step.id);
+      continue;
+    }
+
+    // Once a required step has failed, every later step is skipped rather than
+    // executed. This produces explicit DEPENDENCY_FAILED receipts for audit.
+    if (stoppedAtStepId) {
+      const receipt = failureReceipt(
+        plan.id,
+        step,
+        'DEPENDENCY_FAILED',
+        `Skipped because required step ${stoppedAtStepId} failed.`
+      );
+      receipts.push(receipt);
+      receiptsById.set(step.id, receipt);
+      agentTrace('step skipped after failure', step.id, stoppedAtStepId);
       continue;
     }
 
@@ -98,15 +147,7 @@ export async function executeAgentPlan(
       receiptsById.set(step.id, receipt);
       agentTrace('step dependency failed', step.id, depFailure);
       if (isRequiredStep(step)) {
-        return {
-          ok: false,
-          planId: plan.id,
-          receipts,
-          stoppedAtStepId: step.id,
-          errorCode: 'DEPENDENCY_FAILED',
-          errorMessage: `Required step ${step.id} could not run because ${depFailure} failed.`,
-          finalWorldState: buildWorldState(ctx.getState(), ctx.chartRef, ctx.performanceLog),
-        };
+        stoppedAtStepId = step.id;
       }
       continue;
     }
@@ -118,22 +159,15 @@ export async function executeAgentPlan(
       receiptsById.set(step.id, receipt);
       agentTrace('unknown capability', step.capability);
       if (isRequiredStep(step)) {
-        return {
-          ok: false,
-          planId: plan.id,
-          receipts,
-          stoppedAtStepId: step.id,
-          errorCode: 'UNKNOWN_CAPABILITY',
-          errorMessage: `Unknown capability ${step.capability}.`,
-          finalWorldState: buildWorldState(ctx.getState(), ctx.chartRef, ctx.performanceLog),
-        };
+        stoppedAtStepId = step.id;
       }
       continue;
     }
 
+    const resolvedStep = resolveArgs(step, receipts);
     let receipt: ExecutionReceipt;
     try {
-      receipt = await cap.execute(plan.id, step, ctx, token);
+      receipt = await cap.execute(plan.id, resolvedStep, ctx, token);
     } catch (e) {
       const err = e instanceof Error ? e.message : String(e);
       receipt = failureReceipt(plan.id, step, 'INTERNAL_ERROR', `Capability threw: ${err}`);
@@ -152,15 +186,8 @@ export async function executeAgentPlan(
     agentTrace('step receipt', step.id, receipt.success, receipt.message);
 
     if (!receipt.success && isRequiredStep(step)) {
-      return {
-        ok: false,
-        planId: plan.id,
-        receipts,
-        stoppedAtStepId: step.id,
-        errorCode: receipt.errorCode ?? 'INTERNAL_ERROR',
-        errorMessage: receipt.message,
-        finalWorldState: buildWorldState(ctx.getState(), ctx.chartRef, ctx.performanceLog),
-      };
+      stoppedAtStepId = step.id;
+      continue;
     }
 
     // Refresh state after mutating capabilities so dependent steps see the new world.
@@ -186,8 +213,17 @@ export async function executeAgentPlan(
   };
 
   if (!success) {
-    result.errorCode = 'PLAN_EXECUTION_FAILED';
-    result.errorMessage = 'One or more required steps failed.';
+    const failed = receipts.find((r) => !r.success && requiredStepStatus(plan, r.stepId));
+    result.stoppedAtStepId = stoppedAtStepId ?? failed?.stepId;
+
+    const stoppedReceipt = stoppedAtStepId ? receipts.find((r) => r.stepId === stoppedAtStepId) : undefined;
+    if (stoppedReceipt && !stoppedReceipt.success) {
+      result.errorCode = stoppedReceipt.errorCode;
+      result.errorMessage = `Plan stopped at ${stoppedAtStepId}: ${stoppedReceipt.message}.`;
+    } else {
+      result.errorCode = 'PLAN_EXECUTION_FAILED';
+      result.errorMessage = 'One or more required steps failed.';
+    }
   }
 
   agentTrace('execute end', plan.id, success, receipts.length);

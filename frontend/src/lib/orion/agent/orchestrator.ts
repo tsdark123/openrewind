@@ -21,7 +21,7 @@ import { parseChartCommand, type ChartCommand } from '../planner';
 import { SYMBOL_ALIASES } from '../symbolAliases';
 import { classifyOrionIntent } from '../router';
 import { orionChat } from '../client';
-import { buildWorldState, renderWorldStateForPrompt } from '../worldState';
+import { buildWorldState, renderWorldStateForPrompt, type WorldState } from '../worldState';
 import { commonSenseReply } from '../commonSense';
 import type { SymbolResolution } from './resolveSymbol';
 import { chartCommandToPlan } from './planner-adapter';
@@ -116,7 +116,13 @@ function looksLikeSwitch(text: string): boolean {
 
 function looksLikePlayOrPause(text: string): boolean {
   const t = text.toLowerCase();
-  return /\b(play|pause|stop|resume|go)\b/.test(t);
+  return /\b(play|pause|stop|resume|go|rewind|fast[- ]?forward|fastforward)\b/.test(t);
+}
+
+function looksLikeChartQuery(text: string): boolean {
+  const t = text.toLowerCase();
+  return /\b(price|candle|cost|worth|value|ohlcv)\b/.test(t) &&
+    (/\b\d{1,2}:\d{2}|\b\d{1,2}\s*(am|pm)\b|\bmarket\s+(open|close)\b|\bnoon\b|\bmidnight\b/).test(t);
 }
 
 function buildWorldStateForChat(ctx: AgentContext): string {
@@ -307,7 +313,7 @@ async function resolveAndMaybeSwitch(
 // ---------------------------------------------------------------------------
 
 function supportedIntent(intent: string): boolean {
-  return ['switch', 'play', 'pause', 'set_timeframe', 'seek', 'fast_forward', 'rewind'].includes(intent);
+  return ['switch', 'play', 'pause', 'set_timeframe', 'seek', 'fast_forward', 'rewind', 'candle_query'].includes(intent);
 }
 
 function isFastPathReady(cmd: ChartCommand): boolean {
@@ -338,7 +344,10 @@ export async function handleOrionMessage(opts: OrchestratorOptions): Promise<Orc
   // 2. Conversation heuristics / classifier.
   const routeChat = isConversation(text);
   const classification = classifyOrionIntent(text);
-  if (routeChat || (classification.intent === 'chat' && !looksLikePlayOrPause(text) && !looksLikeSwitch(text))) {
+  if (
+    (routeChat || (classification.intent === 'chat' && !looksLikePlayOrPause(text) && !looksLikeSwitch(text))) &&
+    !looksLikeChartQuery(text)
+  ) {
     agentTrace('route', 'chat', { elapsed: elapsed(routeStart) });
     const message = await runChat(text, ctx, setupReady, routeStart);
     return { ok: true, message, wasChat: true, route: 'chat' };
@@ -380,10 +389,54 @@ export async function handleOrionMessage(opts: OrchestratorOptions): Promise<Orc
   return { ok: true, message, wasChat: true, route: 'chat' };
 }
 
+function formatHumanDate(iso: string): string {
+  const months = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+  const parts = iso.split('-').map((s) => parseInt(s, 10));
+  if (parts.length !== 3) return iso;
+  const month = months[parts[1] - 1] ?? iso;
+  return `${month} ${parts[2]}`;
+}
+
+function composeCompoundSummary(result: AgentExecutionResult, final: WorldState): string | null {
+  const play = result.receipts.find((r) => r.success && r.capability === 'playback.play_until');
+  const switched = result.receipts.find((r) => r.success && r.capability === 'session.switch_symbol');
+  if (!play || !switched || !final.session.sessionActive) return null;
+
+  const seek = result.receipts.find((r) => r.success && r.capability === 'playback.seek_to_time');
+  const tf = result.receipts.find((r) => r.success && r.capability === 'chart.set_timeframe');
+
+  const playData = (play.data as { speed?: number; finalTime?: string } | undefined) ?? {};
+  const seekData = (seek?.data as { time?: string } | undefined) ?? {};
+  const tfData = (tf?.data as { timeframe?: number } | undefined) ?? {};
+
+  const speed = playData.speed ?? final.session.speed;
+  const startTime = seekData.time;
+  const endTime = playData.finalTime;
+  const timeframe = tfData.timeframe;
+
+  const fragments: string[] = [];
+  fragments.push(`Loaded ${final.session.symbol} on ${formatHumanDate(final.session.date)}`);
+  if (timeframe && timeframe > 0) fragments.push(`switched to ${timeframe}-minute candles`);
+  if (startTime && endTime && speed) {
+    fragments.push(`replayed from ${startTime} to ${endTime} at ${speed}x and stopped at ${endTime}`);
+  } else if (endTime && speed) {
+    fragments.push(`played until ${endTime} at ${speed}x and stopped at ${endTime}`);
+  } else if (endTime) {
+    fragments.push(`played until ${endTime} and stopped at ${endTime}`);
+  } else {
+    fragments.push(play.message);
+  }
+  return fragments.join(', ') + '.';
+}
+
 function composeResponse(result: AgentExecutionResult, ctx: AgentContext): string {
   if (result.ok) {
     const successMessages = result.receipts.filter((r) => r.success).map((r) => r.message);
-    const final = result.finalWorldState as ReturnType<typeof buildWorldState>;
+    const final = result.finalWorldState as WorldState;
+
+    const compound = final ? composeCompoundSummary(result, final) : null;
+    if (compound) return compound;
+
     if (final && final.session.symbol) {
       return successMessages[successMessages.length - 1] ?? `Done. ${final.session.symbol} is active.`;
     }

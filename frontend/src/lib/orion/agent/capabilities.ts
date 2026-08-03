@@ -23,7 +23,7 @@ import { buildWorldState } from '../worldState';
 import { resolveSymbol } from './resolveSymbol';
 import { resolveTradingDate } from './resolveTradingDate';
 import { fetchCandles } from '../tools';
-import { clampTimeframe } from '../planner';
+import { clampTimeframe, toEngineTs, toEtTime, formatTime } from '../planner';
 
 // ---------------------------------------------------------------------------
 // Capability definition shape
@@ -88,6 +88,50 @@ export function capabilitySchemasForPrompt(): Array<Record<string, unknown>> {
 function wasCancelled(planId: string, step: AgentStep, token?: CancellationToken): ExecutionReceipt | null {
   if (!token?.cancelled) return null;
   return failureReceipt(planId, step, 'CANCELLED', 'Plan was cancelled.');
+}
+
+function parseTimeString(input: string): { hour: number; minute: number } | null {
+  const t = input.trim().toLowerCase();
+  const m1 = t.match(/\b(\d{1,2}):(\d{2})(?::\d{2})?\s*(am|pm)?\b/);
+  if (m1) {
+    let h = parseInt(m1[1], 10);
+    const min = parseInt(m1[2], 10);
+    const meridian = m1[3];
+    if (meridian === 'am' && h === 12) h = 0;
+    if (meridian === 'pm' && h !== 12) h += 12;
+    if (h >= 0 && h < 24 && min >= 0 && min < 60) return { hour: h, minute: min };
+  }
+  const m2 = t.match(/\b(\d{1,2})\s*(am|pm)\b/);
+  if (m2) {
+    let h = parseInt(m2[1], 10);
+    const meridian = m2[2];
+    if (meridian === 'am' && h === 12) h = 0;
+    if (meridian === 'pm' && h !== 12) h += 12;
+    if (h >= 0 && h < 24) return { hour: h, minute: 0 };
+  }
+  return null;
+}
+
+function currentCandleTimestamp(ctx: AgentContext): number | undefined {
+  const candle = ctx.chartRef?.current?.getRecentCandles(1)[0];
+  return candle?.timestamp;
+}
+
+function waitForCandleAt(ctx: AgentContext, target: number, timeoutMs = 3000, intervalMs = 50): Promise<boolean> {
+  const start = Date.now();
+  const check = () => {
+    const ts = currentCandleTimestamp(ctx);
+    return ts !== undefined && ts >= target && ts - target <= 600;
+  };
+  if (check()) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const timer = setInterval(() => {
+      if (check() || Date.now() - start > timeoutMs) {
+        clearInterval(timer);
+        resolve(check());
+      }
+    }, intervalMs);
+  });
 }
 
 async function waitForState(
@@ -218,7 +262,12 @@ registerCapability({
       return wasCancelled(planId, step, token)!;
     }
 
-    const ok = await waitForState(ctx, (s) => s.symbol === symbol && s.sessionActive, 3000, 80);
+    const ok = await waitForState(
+      ctx,
+      (s) => s.symbol === symbol && s.sessionActive && (date === undefined || s.replayDate === date),
+      3000,
+      80
+    );
     if (!ok) {
       const after = ctx.getState();
       const stillOn = after.sessionActive ? `${after.symbol} ${after.replayDate}` : 'no active session';
@@ -374,8 +423,33 @@ registerCapability({
   execute: async (planId, step, ctx, token) => {
     const c = wasCancelled(planId, step, token);
     if (c) return c;
-    void ctx;
-    return failureReceipt(planId, step, 'PRECONDITION_FAILED', 'playback.seek_relative is not connected in Phase 2.');
+
+    if (!ctx.getState().sessionActive) {
+      return failureReceipt(planId, step, 'PRECONDITION_FAILED', 'No active session to seek in.');
+    }
+
+    const minutes = Number(step.args.minutes ?? 0);
+    if (Number.isNaN(minutes)) {
+      return failureReceipt(planId, step, 'INVALID_ARGUMENTS', 'Need a number of minutes to seek.');
+    }
+
+    const currentTs = currentCandleTimestamp(ctx);
+    if (currentTs === undefined) {
+      return failureReceipt(planId, step, 'PRECONDITION_FAILED', 'No current candle to seek from.');
+    }
+
+    const target = currentTs + minutes * 60;
+    ctx.send({ cmd: 'seek', timestamp: target });
+
+    const ok = await waitForCandleAt(ctx, target, 3000, 50);
+    if (!ok) {
+      return failureReceipt(planId, step, 'ACKNOWLEDGMENT_TIMEOUT', `Did not confirm seek to ${new Date(target * 1000).toISOString()}.`);
+    }
+    const candle = currentCandleTimestamp(ctx) ?? target;
+    return successReceipt(planId, step, `Sought ${minutes > 0 ? 'forward' : 'backward'} ${Math.abs(minutes)} minutes.`, {
+      target,
+      timestamp: candle,
+    });
   },
 });
 
@@ -393,8 +467,35 @@ registerCapability({
   execute: async (planId, step, ctx, token) => {
     const c = wasCancelled(planId, step, token);
     if (c) return c;
-    void ctx;
-    return failureReceipt(planId, step, 'PRECONDITION_FAILED', 'playback.seek_to_time is not connected in Phase 2.');
+
+    if (!ctx.getState().sessionActive) {
+      return failureReceipt(planId, step, 'PRECONDITION_FAILED', 'No active session to seek in.');
+    }
+
+    const time = String(step.args.time ?? '');
+    const parsed = parseTimeString(time);
+    if (!parsed) {
+      return failureReceipt(planId, step, 'INVALID_ARGUMENTS', `Could not parse time "${time}".`);
+    }
+
+    const date = ctx.getState().replayDate;
+    if (!date) {
+      return failureReceipt(planId, step, 'PRECONDITION_FAILED', 'No active session date to seek on.');
+    }
+
+    const target = toEngineTs(date, parsed.hour, parsed.minute);
+    ctx.send({ cmd: 'seek', timestamp: target });
+
+    const ok = await waitForCandleAt(ctx, target, 3000, 50);
+    if (!ok) {
+      return failureReceipt(planId, step, 'ACKNOWLEDGMENT_TIMEOUT', `Did not confirm seek to ${time}.`);
+    }
+    const candle = currentCandleTimestamp(ctx) ?? target;
+    return successReceipt(planId, step, `Seeked to ${time}.`, {
+      time,
+      timestamp: candle,
+      target,
+    });
   },
 });
 
@@ -426,7 +527,16 @@ registerCapability({
 
     const speed = Math.max(1, Math.min(100, Number(step.args.speed ?? 1)));
     const direction = step.args.direction === 'backward' ? 'backward' : 'forward';
-    const until = step.args.until !== undefined ? Number(step.args.until) : undefined;
+    let until: number | undefined;
+    if (step.args.until !== undefined) {
+      until = Number(step.args.until);
+    } else if (step.args.untilTime !== undefined) {
+      const parsed = parseTimeString(String(step.args.untilTime));
+      if (parsed) {
+        const date = ctx.getState().replayDate;
+        if (date) until = toEngineTs(date, parsed.hour, parsed.minute);
+      }
+    }
 
     const before = ctx.getState();
 
@@ -437,8 +547,8 @@ registerCapability({
     ctx.send({ cmd: 'play', direction, speed, ...(until !== undefined ? { until } : {}) });
     ctx.dispatch({ type: 'SET_PLAYING', isPlaying: true });
 
-    const ok = await waitForState(ctx, (s) => s.isPlaying === true && s.speed === speed, 3000, 50);
-    if (!ok) {
+    const started = await waitForState(ctx, (s) => s.isPlaying === true && s.speed === speed, 3000, 50);
+    if (!started) {
       const after = ctx.getState();
       return failureReceipt(planId, step, 'ACKNOWLEDGMENT_TIMEOUT', `Playback did not confirm at ${speed}x.`, {
         requestedSpeed: speed,
@@ -446,8 +556,43 @@ registerCapability({
         actualSpeed: after.speed,
       });
     }
+
+    // If the caller requested a stop time, wait for the engine to stop.
+    if (until !== undefined) {
+      const stopped = await waitForState(ctx, (s) => s.isPlaying === false, 120000, 100);
+      if (!stopped) {
+        const after = ctx.getState();
+        return failureReceipt(planId, step, 'ACKNOWLEDGMENT_TIMEOUT', `Playback did not stop at the target time.`, {
+          requestedUntil: until,
+          actualIsPlaying: after.isPlaying,
+        });
+      }
+
+      // Make sure the chart has actually arrived at or passed the target.
+      const atTarget = await waitForCandleAt(ctx, until, 3000, 50);
+      if (!atTarget) {
+        return failureReceipt(planId, step, 'ACKNOWLEDGMENT_TIMEOUT', `Playback stopped but the chart did not reach the target time.`, {
+          requestedUntil: until,
+        });
+      }
+    }
+
     const after = ctx.getState();
-    return successReceipt(planId, step, `Playing ${direction} at ${speed}x.`, { speed, direction, until }, [
+    const finalCandle = currentCandleTimestamp(ctx);
+    let finalTime = '';
+    if (until !== undefined && after.replayDate) {
+      const et = toEtTime(finalCandle ?? until, after.replayDate);
+      finalTime = formatTime(et);
+    }
+    const message = until !== undefined
+      ? `Played ${direction} at ${speed}x and stopped at ${finalTime}.`
+      : `Playing ${direction} at ${speed}x.`;
+
+    const data: Record<string, unknown> = { speed, direction, until };
+    if (finalCandle !== null) data.finalTimestamp = finalCandle;
+    if (finalTime) data.finalTime = finalTime;
+
+    return successReceipt(planId, step, message, data, [
       { key: 'isPlaying', before: before.isPlaying, after: after.isPlaying },
       { key: 'speed', before: before.speed, after: after.speed },
     ]);
@@ -510,7 +655,8 @@ registerCapability({
     if (!candle) {
       return failureReceipt(planId, step, 'PRECONDITION_FAILED', 'No current candle available.');
     }
-    return successReceipt(planId, step, 'Current candle retrieved.', {
+    const message = `The candle has close ${candle.close}, open ${candle.open}, high ${candle.high}, low ${candle.low}, volume ${candle.volume}.`;
+    return successReceipt(planId, step, message, {
       timestamp: candle.timestamp,
       open: candle.open,
       high: candle.high,
@@ -535,7 +681,44 @@ registerCapability({
   execute: async (planId, step, ctx, token) => {
     const c = wasCancelled(planId, step, token);
     if (c) return c;
-    void ctx;
-    return failureReceipt(planId, step, 'PRECONDITION_FAILED', 'chart.get_candle_at_time is not connected in Phase 2.');
+
+    if (!ctx.getState().sessionActive) {
+      return failureReceipt(planId, step, 'PRECONDITION_FAILED', 'No active session to read a candle from.');
+    }
+
+    const time = String(step.args.time ?? '');
+    const parsed = parseTimeString(time);
+    if (!parsed) {
+      return failureReceipt(planId, step, 'INVALID_ARGUMENTS', `Could not parse time "${time}".`);
+    }
+
+    const symbol = ctx.getState().symbol;
+    const date = ctx.getState().replayDate;
+    const timeframe = ctx.getState().timeframe;
+    if (!symbol || !date) {
+      return failureReceipt(planId, step, 'PRECONDITION_FAILED', 'No active symbol/date to read a candle from.');
+    }
+
+    const target = toEngineTs(date, parsed.hour, parsed.minute);
+    try {
+      const res = await fetchCandles({ symbol, date, timeframe, limit: 5000, dataDir: ctx.dataDir }, ctx.apiBase);
+      if (res.missing || res.candles.length === 0) {
+        return failureReceipt(planId, step, 'NO_DATA_FOR_DATE', `No candles for ${symbol} ${date} at ${timeframe}m.`);
+      }
+
+      const idx = res.candles.findIndex((c) => c.timestamp >= target);
+      const candle = idx >= 0 ? res.candles[idx] : res.candles[res.candles.length - 1];
+      const explanation = `For "price" at this time, the OHLCV is open ${candle.open}, high ${candle.high}, low ${candle.low}, close ${candle.close}.`;
+      return successReceipt(planId, step, explanation, {
+        timestamp: candle.timestamp,
+        open: candle.open,
+        high: candle.high,
+        low: candle.low,
+        close: candle.close,
+        volume: candle.volume,
+      });
+    } catch (e) {
+      return failureReceipt(planId, step, 'ENGINE_ERROR', `Failed to fetch candles: ${e instanceof Error ? e.message : String(e)}`);
+    }
   },
 });

@@ -28,16 +28,30 @@ export type ChartIntent =
   | 'set_timeframe'
   | 'step_forward'
   | 'step_backward'
+  | 'candle_query'
   | 'unknown';
 
 export interface ParsedTime { hour: number; minute: number; }
 
 export const SUPPORTED_TIMEFRAMES = [1, 5, 15, 60, 240, 1440] as const;
 
+export interface DateInputSpec {
+  kind: 'explicit' | 'relative_calendar' | 'relative_trading' | 'today';
+  /** Number of sessions/days to walk. */
+  count?: number;
+  direction?: 'backward' | 'forward';
+  /** Anchor/base date (YYYY-MM-DD). */
+  from?: string;
+  /** Explicit YYYY-MM-DD for 'explicit'. */
+  date?: string;
+}
+
 export interface ChartCommand {
   intent: ChartIntent;
   symbol?: string;
   date?: string;
+  /** Structured date request when the parser cannot produce a concrete calendar date. */
+  dateInput?: DateInputSpec;
   startTime?: ParsedTime;
   endTime?: ParsedTime;
   speed?: number;
@@ -176,6 +190,34 @@ function parseDate(input: string, base?: string): string | undefined {
   return parseRelativeDate(input, base);
 }
 
+function numberWord(n: string): number | undefined {
+  const map: Record<string, number> = {
+    one: 1, two: 2, three: 3, four: 4, five: 5,
+    six: 6, seven: 7, eight: 8, nine: 9, ten: 10,
+  };
+  const digit = parseInt(n, 10);
+  if (!Number.isNaN(digit)) return digit;
+  return map[n.toLowerCase()];
+}
+
+export function extractDateInput(text: string, baseDate?: string): DateInputSpec | undefined {
+  const t = text.toLowerCase();
+  const anchor = baseDate || new Date().toISOString().slice(0, 10);
+
+  const tradingMatch = /\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+trading\s+(?:session|day)s?\s+(ago|back|before)\b/.exec(t);
+  if (tradingMatch) {
+    const n = numberWord(tradingMatch[1]);
+    if (n !== undefined) {
+      return { kind: 'relative_trading', count: n, direction: 'backward', from: anchor };
+    }
+  }
+
+  const explicit = parseDate(text, baseDate);
+  if (explicit) return { kind: 'explicit', date: explicit };
+
+  return undefined;
+}
+
 function extractSymbolAndDate(
   text: string,
   availableTickers: string[],
@@ -209,29 +251,44 @@ function parse24hTime(hour: number, minute: number, meridian?: string): ParsedTi
 }
 
 function extractTimes(text: string): ParsedTime[] {
-  const result: ParsedTime[] = [];
+  const matches: { time: ParsedTime; index: number }[] = [];
   const seen = new Set<string>();
 
-  const add = (h: number, m: number, meridian?: string) => {
+  const add = (h: number, m: number, index: number, meridian?: string) => {
     const t = parse24hTime(h, m, meridian);
     if (!t) return;
     const key = `${t.hour}:${t.minute}`;
     if (seen.has(key)) return;
     seen.add(key);
-    result.push(t);
+    matches.push({ time: t, index });
   };
 
   // "2:30pm", "14:00", etc.
   for (const m of text.matchAll(/\b(\d{1,2}):(\d{2})(?::\d{2})?\s*(am|pm)?\b/gi)) {
-    add(parseInt(m[1], 10), parseInt(m[2], 10), m[3]);
+    add(parseInt(m[1], 10), parseInt(m[2], 10), m.index ?? 0, m[3]);
   }
 
   // "2pm", "2 pm" — speed markers like "10x" are ignored because they lack am/pm.
   for (const m of text.matchAll(/\b(\d{1,2})\s*(am|pm)\b/gi)) {
-    add(parseInt(m[1], 10), 0, m[2]);
+    add(parseInt(m[1], 10), 0, m.index ?? 0, m[2]);
   }
 
-  return result;
+  const marketOpen = /\bmarket\s+open\b/i.exec(text);
+  if (marketOpen && marketOpen.index !== undefined) add(9, 30, marketOpen.index, undefined);
+
+  const marketClose = /\bmarket\s+close\b/i.exec(text);
+  if (marketClose && marketClose.index !== undefined) add(16, 0, marketClose.index, undefined);
+
+  const noon = /\b(noon|midday)\b/i.exec(text);
+  if (noon && noon.index !== undefined) add(12, 0, noon.index, undefined);
+
+  const midnight = /\bmidnight\b/i.exec(text);
+  if (midnight && midnight.index !== undefined) add(0, 0, midnight.index, undefined);
+
+  // Sort by the position the expression appeared in the original text so that
+  // "from X to Y" yields X as startTime and Y as endTime.
+  matches.sort((a, b) => a.index - b.index);
+  return matches.map((m) => m.time);
 }
 
 function extractSpeed(text: string): number | undefined {
@@ -347,6 +404,7 @@ function detectDirection(text: string, relative?: number): 'forward' | 'backward
 function detectIntent(text: string, e: {
   symbol?: string;
   date?: string;
+  dateInput?: DateInputSpec;
   times: ParsedTime[];
   speed?: number;
   relative?: number;
@@ -361,8 +419,14 @@ function detectIntent(text: string, e: {
   if (/\b(previous|step back|back one|rewind one)\b/i.test(t)) return 'step_backward';
   if (/\b(jump|seek)\b/i.test(t)) return 'seek';
 
-  // Any explicit or inferred timeframe request takes precedence.
-  if (e.timeframe !== undefined) return 'set_timeframe';
+  // Any explicit or inferred timeframe request takes precedence only when
+  // the user is not already naming a symbol/playback sequence.
+  if (e.timeframe !== undefined && !e.symbol) return 'set_timeframe';
+
+  // Candle/price queries at a specific time.
+  if (e.times.length > 0 && /\b(price|candle|cost|worth|value|ohlcv)\b/i.test(text) && !/\b(play|rewind|fast[- ]?forward|seek|switch|go to|show me)\b/i.test(t)) {
+    return 'candle_query';
+  }
 
   // Time-based motion without explicit verb can be inferred from direction.
   if (e.times.length > 0 || e.relative !== undefined) {
@@ -396,17 +460,19 @@ export function parseChartCommand(
   baseDate?: string
 ): ChartCommand {
   const { symbol, date } = extractSymbolAndDate(text, availableTickers, symbolAliases, baseDate);
+  const dateInput = extractDateInput(text, baseDate);
   const times = extractTimes(text);
   const speed = extractSpeed(text);
   const relative = extractRelativeMinutes(text);
   const direction = detectDirection(text, relative);
   const timeframe = extractTimeframe(text);
-  const intent = detectIntent(text, { symbol, date, times, speed, relative, direction, timeframe });
+  const intent = detectIntent(text, { symbol, date: date || undefined, dateInput, times, speed, relative, direction, timeframe });
 
   return {
     intent,
     symbol,
     date,
+    dateInput,
     startTime: times.length >= 2 ? times[0] : undefined,
     endTime: times.length >= 1 ? times[times.length - 1] : undefined,
     speed,
@@ -440,7 +506,7 @@ export function toEngineTs(date: string, hour: number, minute: number): number {
   return Math.floor(Date.UTC(y, mo - 1, d, hour, minute, 0) / 1000) + offsetHours * 60 * 60;
 }
 
-function toEtTime(ts: number, date: string): { hour: number; minute: number } {
+export function toEtTime(ts: number, date: string): { hour: number; minute: number } {
   const [y, mo, d] = date.split('-').map((n) => parseInt(n, 10));
 
   const firstSunday = (year: number, month0: number) => {
@@ -461,7 +527,7 @@ function toEtTime(ts: number, date: string): { hour: number; minute: number } {
   return { hour: etDate.getUTCHours(), minute: etDate.getUTCMinutes() };
 }
 
-function formatTime(t: { hour: number; minute: number }): string {
+export function formatTime(t: { hour: number; minute: number }): string {
   return `${String(t.hour).padStart(2, '0')}:${String(t.minute).padStart(2, '0')}`;
 }
 
