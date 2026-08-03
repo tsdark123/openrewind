@@ -8,6 +8,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
+    "test:agent": "vitest run src/lib/orion/agent",
     "tauri:dev": "cd .. && pnpm tauri dev",
     "tauri:build": "cd .. && pnpm tauri build"
   },
@@ -31,6 +32,7 @@
     "tailwindcss": "^3.4.16",
     "tailwindcss-animate": "^1.0.7",
     "typescript": "^5.6.3",
-    "vite": "^6.0.3"
+    "vite": "^6.0.3",
+    "vitest": "^4.1.10"
   }
 }

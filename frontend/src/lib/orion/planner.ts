@@ -15,6 +15,7 @@ import type { ChartHandle } from '../../components/Chart';
 import { buildWorldState, type WorldState } from './worldState';
 import { fetchCandles } from './tools';
 import { orionChat } from './client';
+import { SYMBOL_ALIASES as ALIASES } from './symbolAliases';
 
 export type ChartIntent =
   | 'switch'
@@ -72,13 +73,6 @@ export interface PlanResult {
 // ---------------------------------------------------------------------------
 // Entity extraction
 // ---------------------------------------------------------------------------
-
-const ALIASES: Record<string, string> = {
-  apple: 'AAPL', tesla: 'TSLA', netflix: 'NFLX', amazon: 'AMZN',
-  microsoft: 'MSFT', google: 'GOOGL', alphabet: 'GOOGL', meta: 'META',
-  facebook: 'META', nvidia: 'NVDA', amd: 'AMD', intel: 'INTC',
-  broadcom: 'AVGO', oracle: 'ORCL', salesforce: 'CRM', paypal: 'PYPL',
-};
 
 const SKIP = new Set([
   'switch', 'change', 'go', 'to', 'the', 'a', 'an', 'my', 'on', 'im', "i'm", 'current',
