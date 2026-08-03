@@ -18,6 +18,7 @@
 // =============================================================================
 
 import { fetch as tauriFetch } from '@tauri-apps/plugin-http';
+import { agentTrace } from './agent/config';
 
 export type OrionModelTier = 'chat' | 'agent';
 
@@ -110,6 +111,8 @@ const OLLAMA_CHECK_TIMEOUT = 5000;
 export async function ensureModel(model: string): Promise<{ ready: boolean; error?: string }> {
   if (ensuredModels.has(model)) return { ready: true };
 
+  const start = Date.now();
+  agentTrace('ensureModel start', { runtime: isTauri() ? 'tauri' : 'browser', baseUrl: getOllamaBaseUrl(), model });
   console.log('[orion-client] runtime:', isTauri() ? 'tauri' : 'browser', 'baseUrl:', getOllamaBaseUrl(), 'ensureModel:', model);
 
   // /api/show is cheap: it 200s when the model exists, 404s otherwise.
@@ -126,6 +129,7 @@ export async function ensureModel(model: string): Promise<{ ready: boolean; erro
     );
     if (res.ok) {
       ensuredModels.add(model);
+      agentTrace('ensureModel end', { model, ready: true, elapsed: Date.now() - start });
       console.log('[orion-client] ensureModel result:', { model, ready: true });
       return { ready: true };
     }
@@ -200,7 +204,9 @@ export async function pullOrionModel(
  * the `content` field so the sidepanel can show a normal chat bubble.
  */
 export async function orionChat(opts: OrionChatOptions): Promise<OrionChatResponse> {
+  const start = Date.now();
   const model = opts.tier === 'agent' ? ORION_AGENT_MODEL : ORION_CHAT_MODEL;
+  agentTrace('orionChat start', { tier: opts.tier, model });
 
   const ensured = await ensureModel(model);
   if (!ensured.ready) {
@@ -235,6 +241,8 @@ export async function orionChat(opts: OrionChatOptions): Promise<OrionChatRespon
   const toolCalls: OrionToolCall[] = Array.isArray(data?.message?.tool_calls)
     ? (data.message.tool_calls as OrionToolCall[])
     : [];
+  const total = Date.now() - start;
+  agentTrace('orionChat end', { tier: opts.tier, model, total, firstToken: total, contentLength: content.length });
   return { content, toolCalls, raw: data };
 }
 

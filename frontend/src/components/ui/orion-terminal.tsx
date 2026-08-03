@@ -6,7 +6,9 @@ import { cn } from '../../lib/utils';
 import { classifyOrionIntent, type OrionIntent } from '../../lib/orion/router';
 import { ORION_AGENT_MODEL, ensureModel, orionChat, pullOrionModel } from '../../lib/orion/client';
 import { orionController } from '../../lib/orion/controller';
-import { parseChartCommand, executeChartCommand, parseChartCommandWithLLM, type PlannerContext } from '../../lib/orion/planner';
+import { parseChartCommand, parseChartCommandWithLLM } from '../../lib/orion/planner';
+import { handleOrionMessage } from '../../lib/orion/agent/orchestrator';
+import type { AgentContext } from '../../lib/orion/agent/types';
 import { commonSenseReply, suggestCommand } from '../../lib/orion/commonSense';
 import {
   DEFAULT_GREETING,
@@ -228,8 +230,7 @@ export function OrionTerminal({
         return;
       }
 
-      const plannerCtx: PlannerContext = {
-        appState,
+      const agentCtx: AgentContext = {
         getState: () => appStateRef.current,
         chartRef,
         performanceLog,
@@ -239,12 +240,15 @@ export function OrionTerminal({
         send,
         dispatch,
         onSwitchSymbol,
-        onMessage: (text) => setThreads((prev) => appendMessage(prev, threadKey, { sender: 'ai', text })),
       };
       try {
-        const result = await executeChartCommand(cmd, plannerCtx);
-        console.log('[orion-trace] executeChartCommand result:', result);
-        setThreads((prev) => appendMessage(prev, threadKey, { sender: 'ai', text: result.message }));
+        const outcome = await handleOrionMessage({
+          text: trimmed,
+          ctx: agentCtx,
+          setupReady: setupStage === 'ready',
+        });
+        console.log('[orion-trace] orchestrator result:', outcome);
+        setThreads((prev) => appendMessage(prev, threadKey, { sender: 'ai', text: outcome.message }));
       } catch (err) {
         const detail = err instanceof Error ? err.message : String(err);
         setThreads((prev) => appendMessage(prev, threadKey, { sender: 'ai', text: `Orion couldn't run that: ${detail}` }));

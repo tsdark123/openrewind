@@ -1,3 +1,6 @@
+import type { AppState, AppAction, PerformanceLog } from '../../../types';
+import type { ChartHandle } from '../../../components/Chart';
+
 // =============================================================================
 // Orion Agent Interface V1 — shared types
 //
@@ -108,6 +111,8 @@ export type AgentErrorCode =
   | 'ACKNOWLEDGMENT_TIMEOUT'
   | 'DEPENDENCY_FAILED'
   | 'CANCELLED'
+  | 'INVALID_PLAN'
+  | 'PLAN_EXECUTION_FAILED'
   | 'INTERNAL_ERROR';
 
 // ---------------------------------------------------------------------------
@@ -247,4 +252,34 @@ export function receiptIsSuccess<T>(
   r: ExecutionReceipt<T>
 ): r is ExecutionReceiptSuccess<T> {
   return r.success;
+}
+
+// ---------------------------------------------------------------------------
+// Runtime context passed to the executor and individual capabilities.
+// ---------------------------------------------------------------------------
+
+export interface AgentContext {
+  /** Live state accessor; always reflects the latest committed state. */
+  getState: () => AppState;
+  /** Mutable ref to the chart imperative handle. */
+  chartRef: { current: ChartHandle | null } | null;
+  /** Persisted performance log for WorldState. */
+  performanceLog: PerformanceLog;
+  /** Engine REST base URL. */
+  apiBase: string;
+  /** Optional local data directory; omitted in managed mode. */
+  dataDir?: string;
+  /** List of currently available tickers. */
+  availableTickers: string[];
+  /** WebSocket command sender. */
+  send: (payload: Record<string, unknown>) => void;
+  /** React reducer dispatch. */
+  dispatch: (action: AppAction) => void;
+  /**
+   * App-level symbol switch handler (App.tsx `handleSymbolChange`).
+   * The executor must not create its own session-start POST.
+   */
+  onSwitchSymbol: (symbol: string, date?: string) => void | Promise<void>;
+  /** Optional callback for progress / side messages during a plan. */
+  onMessage?: (text: string) => void;
 }
