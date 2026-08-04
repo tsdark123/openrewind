@@ -454,6 +454,27 @@ export function textRequestsCandleQuery(t: string): boolean {
   return hasNearbyCandleSignal(d);
 }
 
+const ANAPHORA_TOKENS: ReadonlySet<string> = new Set([
+  'same',
+  'that',
+  'it',
+  'this',
+  'again',
+  'previous',
+  'prior',
+]);
+
+const CONTEXT_ACTION_VERBS: ReadonlySet<string> = new Set(['do', 'run', 'perform']);
+
+export function textRequestsContextReference(t: string, hasPriorAction = false): boolean {
+  const d = detectAnalysisConcepts(t);
+  const hasAnaphora = d.tokens.some((tok) => ANAPHORA_TOKENS.has(tok));
+  if (!hasAnaphora) return false;
+
+  if (d.concepts.size > 0) return true;
+  return hasPriorAction && d.tokens.some((tok) => CONTEXT_ACTION_VERBS.has(tok));
+}
+
 export function textRequestsSummary(t: string): boolean {
   const d = detectAnalysisConcepts(t);
   const summaryCues = new Set(['summary', 'overview', 'recap', 'did', 'do', 'does', 'done', 'doing', 'how', 'what']);
