@@ -321,7 +321,7 @@ export const Chart = forwardRef<ChartHandle, ChartProps>(function Chart({
 
     // Initialize indicator series FIRST (so they render behind candles)
     const emaSeries = chart.addLineSeries({
-      color: '#2962ff',
+      color: '#3b6fff',
       lineWidth: 1,
       priceLineVisible: false,
       lastValueVisible: true,
@@ -1026,7 +1026,7 @@ export const Chart = forwardRef<ChartHandle, ChartProps>(function Chart({
     if (indicators.macd && !macdSeriesRef.current) {
       // Create MACD line series
       const macdSeries = chart.addLineSeries({
-        color: '#2962ff',
+        color: '#3b6fff',
         lineWidth: 1,
         priceLineVisible: false,
         lastValueVisible: true,

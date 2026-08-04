@@ -21,6 +21,7 @@ import type { AppAction, AppState, PerformanceLog } from '../../types';
 import type { ChartHandle } from '../Chart';
 
 const ORION_MODEL = ((import.meta as any).env?.VITE_ORION_AGENT_MODEL as string | undefined) ?? 'llama3.2';
+const MIN_BOOT_MS = 1200; // show the spinner for at least this long on fast boots
 
 const WELCOME_TEXT = `[SYSTEM INITIALIZED] - Orion Terminal v1.0
 
@@ -126,10 +127,23 @@ export function OrionTerminal({
     const startOrionBoot = async () => {
       bootAttemptIdRef.current += 1;
       const attemptId = bootAttemptIdRef.current;
+      const bootStart = Date.now();
       console.log('[orion-terminal] boot attempt', attemptId, 'started');
       setSetupStage('pulling');
       setBootStatus(`Checking ${ORION_MODEL}...`);
       setBootProgress(0);
+
+      const finalize = async (stage: 'ready' | 'error') => {
+        const remaining = MIN_BOOT_MS - (Date.now() - bootStart);
+        if (remaining > 0) {
+          await new Promise((resolve) => setTimeout(resolve, remaining));
+        }
+        if (attemptId !== bootAttemptIdRef.current) {
+          console.log('[orion-terminal] boot attempt', attemptId, 'ignored (stale)');
+          return;
+        }
+        setSetupStage(stage);
+      };
 
       try {
         const check = await ensureModel(ORION_MODEL);
@@ -142,7 +156,7 @@ export function OrionTerminal({
 
         console.log('[orion-terminal] boot attempt', attemptId, 'accepted');
         if (check.ready) {
-          setSetupStage('ready');
+          await finalize('ready');
           return;
         }
 
@@ -157,20 +171,20 @@ export function OrionTerminal({
               console.log('[orion-terminal] boot attempt', attemptId, 'pull ignored (stale)');
               return;
             }
-            setSetupStage('ready');
+            await finalize('ready');
           } catch (e) {
             if (attemptId !== bootAttemptIdRef.current) return;
             console.log('[orion-terminal] boot attempt', attemptId, 'pull failed:', e);
-            setSetupStage('error');
+            await finalize('error');
           }
           return;
         }
 
-        setSetupStage('error');
+        await finalize('error');
       } catch (e) {
         if (attemptId !== bootAttemptIdRef.current) return;
         console.log('[orion-terminal] boot attempt', attemptId, 'error:', e);
-        setSetupStage('error');
+        await finalize('error');
       }
     };
 
@@ -299,14 +313,14 @@ export function OrionTerminal({
             href={part}
             target="_blank"
             rel="noopener noreferrer"
-            className="text-[#ff3700] hover:underline hover:text-[#ff3700]/80 transition-colors"
+            className="text-[#3b6fff] hover:underline hover:text-[#3b6fff]/80 transition-colors"
           >
             {part}
           </a>
         );
       } else if (emailRegex.test(part)) {
         return (
-          <a key={index} href={`mailto:${part}`} className="text-[#ff3700] hover:underline hover:text-[#ff3700]/80 transition-colors">
+          <a key={index} href={`mailto:${part}`} className="text-[#3b6fff] hover:underline hover:text-[#3b6fff]/80 transition-colors">
             {part}
           </a>
         );
@@ -320,8 +334,8 @@ export function OrionTerminal({
       initial={{ x: 20, opacity: 0 }}
       animate={{ x: 0, opacity: 1 }}
       className={cn(
-        'relative flex w-96 flex-shrink-0 flex-col border-l',
-        lightMode ? 'bg-white border-gray-200' : 'bg-[#0a0a0a] border-[#2a2e39]',
+        'relative flex w-[26rem] flex-shrink-0 flex-col border-l',
+        lightMode ? 'bg-white border-gray-200' : 'bg-orion-terminal border-[#2a2e39]',
         className
       )}
     >
@@ -329,10 +343,10 @@ export function OrionTerminal({
       <div
         className={cn(
           'flex items-center gap-2 border-b px-3 py-2.5',
-          lightMode ? 'border-gray-200 bg-white' : 'border-[#2a2e39] bg-[#151515]'
+          lightMode ? 'border-gray-200 bg-white' : 'border-[#2a2e39] bg-orion-terminal'
         )}
       >
-        <Terminal className={cn('h-4 w-4 text-[#ff3700]')} />
+        <Terminal className={cn('h-4 w-4 text-[#3b6fff]')} />
         <span className={cn('text-sm font-semibold font-mono', lightMode ? 'text-gray-900' : 'text-[#d1d4dc]')}>
           orion@openrewind
         </span>
@@ -348,9 +362,9 @@ export function OrionTerminal({
         onClick={() => inputRef.current?.focus()}
         className={cn(
           'relative flex-1 overflow-y-auto p-4 font-mono text-xs cursor-text',
-          lightMode ? 'bg-[#f8f9fa] text-gray-900' : 'bg-[#0a0a0a] text-[#d1d4dc]'
+          lightMode ? 'bg-[#f8f9fa] text-gray-900' : 'bg-orion-terminal text-[#d1d4dc]'
         )}
-        style={{ scrollbarWidth: 'thin', scrollbarColor: lightMode ? '#d1d5db #f3f4f6' : '#ff3700 #1f2937' }}
+        style={{ scrollbarWidth: 'thin', scrollbarColor: lightMode ? '#d1d5db #f3f4f6' : '#3b6fff #1f2937' }}
       >
         <div className="space-y-3">
           {messages.map((msg, i) => (
@@ -363,7 +377,7 @@ export function OrionTerminal({
             >
               {msg.sender === 'user' && (
                 <div className="flex gap-2">
-                  <span className="text-[#ff3700] font-semibold">{PROMPT}</span>
+                  <span className="text-[#3b6fff] font-semibold">{PROMPT}</span>
                   <span className={cn(lightMode ? 'text-gray-900' : 'text-white')}>{msg.text}</span>
                 </div>
               )}
@@ -384,7 +398,7 @@ export function OrionTerminal({
             <motion.div
               initial={{ opacity: 0, y: 4 }}
               animate={{ opacity: 1, y: 0 }}
-              className="text-[#ff3700] font-semibold"
+              className="text-[#3b6fff] font-semibold"
             >
               orion&gt;{' '}
               <span className="inline-flex gap-1 text-[#d1d4dc]">
@@ -397,7 +411,7 @@ export function OrionTerminal({
 
           {/* Active input line */}
           <div className="flex gap-2 items-center">
-            <span className="text-[#ff3700] font-semibold">{PROMPT}</span>
+            <span className="text-[#3b6fff] font-semibold">{PROMPT}</span>
             <input
               ref={inputRef}
               type="text"
@@ -407,7 +421,7 @@ export function OrionTerminal({
               placeholder="Ask Orion or type help"
               disabled={isTyping}
               className={cn(
-                'flex-1 bg-transparent outline-none caret-[#ff3700]',
+                'flex-1 bg-transparent outline-none caret-[#3b6fff]',
                 lightMode ? 'text-gray-900 placeholder:text-gray-400' : 'text-white placeholder:text-[#787b86]'
               )}
               autoFocus
@@ -419,7 +433,7 @@ export function OrionTerminal({
               disabled={!input.trim() || isTyping}
               className={cn(
                 'flex h-7 w-7 items-center justify-center rounded transition-colors',
-                input.trim() && !isTyping ? 'text-[#ff3700] hover:bg-[#ff3700]/10' : 'text-[#787b86]'
+                input.trim() && !isTyping ? 'text-[#3b6fff] hover:bg-[#3b6fff]/10' : 'text-[#787b86]'
               )}
             >
               <Send className="h-3.5 w-3.5" />
@@ -434,7 +448,7 @@ export function OrionTerminal({
       <div
         className={cn(
           'px-4 py-2 text-[10px] font-mono border-t',
-          lightMode ? 'bg-white border-gray-200 text-gray-500' : 'bg-[#151515] border-[#2a2e39] text-[#787b86]'
+          lightMode ? 'bg-white border-gray-200 text-gray-500' : 'bg-orion-terminal border-[#2a2e39] text-[#787b86]'
         )}
       >
         <div className="flex justify-between items-center">
@@ -452,12 +466,12 @@ export function OrionTerminal({
             transition={{ duration: 0.4, ease: 'easeInOut' }}
             className={cn(
               'absolute inset-0 z-50 flex flex-col items-center justify-center gap-4 p-6',
-              lightMode ? 'bg-[#f8f9fa]' : 'bg-[#0a0a0a]'
+              lightMode ? 'bg-[#f8f9fa]' : 'bg-orion-terminal'
             )}
           >
             {setupStage === 'error' ? (
               <div className="flex flex-col items-center gap-3 max-w-[85%] text-center">
-                <div className={cn('text-xs font-mono uppercase tracking-widest', lightMode ? 'text-red-600' : 'text-[#ff3700]')}>Orion offline</div>
+                <div className={cn('text-xs font-mono uppercase tracking-widest text-[#3b6fff]')}>Orion offline</div>
                 <div className={cn('text-[10px] font-mono leading-relaxed', lightMode ? 'text-gray-600' : 'text-[#787b86]')}>
                   Ollama is not running or the <span className={lightMode ? 'text-gray-900' : 'text-[#d1d4dc]'}>{ORION_MODEL}</span> model is missing.
                   <br />

@@ -56,7 +56,7 @@ export function LocalDataScreen({ onBack, onEnterWorkspace, lightMode = false }:
     >
       <div className="flex items-center justify-between border-b px-6 py-4">
         <div className="flex items-center gap-3">
-          <HardDrive className={`h-5 w-5 ${lightMode ? 'text-[#2962ff]' : 'text-[#2962ff]'}`} />
+          <HardDrive className={`h-5 w-5 ${lightMode ? 'text-[#3b6fff]' : 'text-[#3b6fff]'}`} />
           <h1 className={`text-lg font-semibold ${lightMode ? 'text-gray-900' : 'text-[#d1d4dc]'}`}>
             Local Data
           </h1>

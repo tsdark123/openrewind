@@ -17,7 +17,7 @@ export function DataSourceMenu({ onManaged, onLocal, isResolving, lightMode = fa
   return (
     <div
       className={`fixed inset-0 z-[90] flex flex-col items-center justify-center ${
-        lightMode ? 'bg-white' : 'bg-[#121416]'
+        lightMode ? 'bg-white' : 'bg-[#0a0a0a]'
       }`}
       aria-label="Choose data source"
     >
@@ -48,7 +48,7 @@ export function DataSourceMenu({ onManaged, onLocal, isResolving, lightMode = fa
           disabled={isResolving}
           className={`${cardBase} ${lightMode ? cardLight : cardDark} text-left`}
         >
-          <HardDrive className={`mb-4 h-8 w-8 ${lightMode ? 'text-[#2962ff]' : 'text-[#2962ff]'}`} />
+          <HardDrive className={`mb-4 h-8 w-8 ${lightMode ? 'text-[#3b6fff]' : 'text-[#3b6fff]'}`} />
           <h2 className={`mb-2 text-lg font-medium ${lightMode ? textLight : textDark}`}>Local Data</h2>
           <p className={`text-sm ${lightMode ? 'text-gray-500' : 'text-[#787b86]'}`}>
             Import your own one-minute CSV files and replay them in the desktop app.

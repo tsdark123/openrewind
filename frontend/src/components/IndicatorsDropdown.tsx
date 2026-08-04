@@ -49,7 +49,7 @@ export function IndicatorsDropdown({ isOpen, onClose, indicators, onToggle, ligh
           onClick={() => onToggle('ema20')}
           className={`flex w-full items-center gap-2 rounded px-2 py-1.5 text-[11px] transition-colors ${lightMode ? 'text-gray-900 hover:bg-gray-100' : 'text-[#d1d4dc] hover:bg-[#2a2e39]'}`}
         >
-          <div className={`h-3.5 w-3.5 rounded border flex items-center justify-center ${indicators.ema20 ? 'bg-[#2962ff] border-[#2962ff]' : (lightMode ? 'border-gray-300' : 'border-[#363a45]')}`}>
+          <div className={`h-3.5 w-3.5 rounded border flex items-center justify-center ${indicators.ema20 ? 'bg-[#3b6fff] border-[#3b6fff]' : (lightMode ? 'border-gray-300' : 'border-[#363a45]')}`}>
             {indicators.ema20 && <svg className="h-2.5 w-2.5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
             </svg>}
@@ -103,7 +103,7 @@ export function IndicatorsDropdown({ isOpen, onClose, indicators, onToggle, ligh
           onClick={() => onToggle('macd')}
           className={`flex w-full items-center gap-2 rounded px-2 py-1.5 text-[11px] transition-colors ${lightMode ? 'text-gray-900 hover:bg-gray-100' : 'text-[#d1d4dc] hover:bg-[#2a2e39]'}`}
         >
-          <div className={`h-3.5 w-3.5 rounded border flex items-center justify-center ${indicators.macd ? 'bg-[#2962ff] border-[#2962ff]' : (lightMode ? 'border-gray-300' : 'border-[#363a45]')}`}>
+          <div className={`h-3.5 w-3.5 rounded border flex items-center justify-center ${indicators.macd ? 'bg-[#3b6fff] border-[#3b6fff]' : (lightMode ? 'border-gray-300' : 'border-[#363a45]')}`}>
             {indicators.macd && <svg className="h-2.5 w-2.5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
             </svg>}

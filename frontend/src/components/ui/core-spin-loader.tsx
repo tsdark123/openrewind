@@ -23,8 +23,8 @@ export function CoreSpinLoader() {
         <div
           className="
             absolute inset-0 rounded-full blur-xl animate-pulse
-            bg-[#ff3700]/15
-            dark:bg-[#ff3700]/10
+            bg-[#3b6fff]/15
+            dark:bg-[#3b6fff]/10
           "
         />
 
@@ -32,8 +32,8 @@ export function CoreSpinLoader() {
         <div
           className="
             absolute inset-0 rounded-full border border-dashed
-            border-[#ff3700]/40
-            dark:border-[#ff3700]/20
+            border-[#3b6fff]/40
+            dark:border-[#3b6fff]/20
             animate-[spin_10s_linear_infinite]
           "
         />
@@ -42,10 +42,10 @@ export function CoreSpinLoader() {
         <div
           className="
             absolute inset-1 rounded-full border-2 border-transparent
-            border-t-[#ff3700]
-            dark:border-t-[#ff3700]
-            shadow-[0_0_6px_rgba(255,55,0,0.5)]
-            dark:shadow-[0_0_10px_rgba(255,55,0,0.4)]
+            border-t-[#3b6fff]
+            dark:border-t-[#3b6fff]
+            shadow-[0_0_6px_rgba(59,111,255,0.5)]
+            dark:shadow-[0_0_10px_rgba(59,111,255,0.4)]
             animate-[spin_2s_linear_infinite]
           "
         />
@@ -54,10 +54,10 @@ export function CoreSpinLoader() {
         <div
           className="
             absolute inset-3 rounded-full border-2 border-transparent
-            border-b-[#ff3700]
-            dark:border-b-[#ff3700]
-            shadow-[0_0_6px_rgba(255,55,0,0.4)]
-            dark:shadow-[0_0_10px_rgba(255,55,0,0.4)]
+            border-b-[#3b6fff]
+            dark:border-b-[#3b6fff]
+            shadow-[0_0_6px_rgba(59,111,255,0.4)]
+            dark:shadow-[0_0_10px_rgba(59,111,255,0.4)]
             animate-[spin_3s_linear_infinite_reverse]
           "
         />
@@ -66,8 +66,8 @@ export function CoreSpinLoader() {
         <div
           className="
             absolute inset-5 rounded-full border border-transparent
-            border-l-[#ff3700]/60
-            dark:border-l-[#ff3700]/50
+            border-l-[#3b6fff]/60
+            dark:border-l-[#3b6fff]/50
             animate-[spin_1s_ease-in-out_infinite]
           "
         />
@@ -78,10 +78,10 @@ export function CoreSpinLoader() {
             className="
               absolute top-0 left-1/2 -translate-x-1/2
               w-1 h-1 rounded-full
-              bg-[#ff3700]
-              dark:bg-[#ff3700]
-              shadow-[0_0_4px_rgba(255,55,0,0.9)]
-              dark:shadow-[0_0_6px_rgba(255,55,0,0.8)]
+              bg-[#3b6fff]
+              dark:bg-[#3b6fff]
+              shadow-[0_0_4px_rgba(59,111,255,0.9)]
+              dark:shadow-[0_0_6px_rgba(59,111,255,0.8)]
             "
           />
         </div>
@@ -90,10 +90,10 @@ export function CoreSpinLoader() {
         <div
           className="
             absolute w-2 h-2 rounded-full animate-pulse
-            bg-[#ff3700]
-            dark:bg-[#ff3700]
-            shadow-[0_0_6px_rgba(255,55,0,0.6)]
-            dark:shadow-[0_0_10px_rgba(255,55,0,0.8)]
+            bg-[#3b6fff]
+            dark:bg-[#3b6fff]
+            shadow-[0_0_6px_rgba(59,111,255,0.6)]
+            dark:shadow-[0_0_10px_rgba(59,111,255,0.8)]
           "
         />
       </div>
@@ -104,8 +104,8 @@ export function CoreSpinLoader() {
           key={loadingText}
           className="
             text-[10px] font-medium tracking-[0.3em] uppercase
-            text-[#ff3700]
-            dark:text-[#ff3700]/70
+            text-[#3b6fff]
+            dark:text-[#3b6fff]/70
             animate-in fade-in slide-in-from-bottom-2 duration-500
           "
         >
