@@ -16,7 +16,7 @@ import {
   type WindowCompareResult,
 } from '../analysis';
 
-const TEST_TIMEOUT = 600_000;
+const TEST_TIMEOUT = 120_000;
 const API_BASE = 'http://127.0.0.1:9000';
 
 interface ChartBuffer {
@@ -346,8 +346,13 @@ function writeRuntimeReport(failures: string[], ground: Record<string, unknown>)
   }
   lines.push('');
 
-  const reportPath = path.resolve(process.cwd(), '..', 'docs', 'ORION_RUNTIME_6A3_REPORT.md');
-  fs.mkdirSync(path.dirname(reportPath), { recursive: true });
+  if (process.env.ORION_WRITE_RUNTIME_REPORT !== '1') {
+    console.log('[runtime-trace] report not written (set ORION_WRITE_RUNTIME_REPORT=1 to persist)');
+    return;
+  }
+
+  const os = require('os');
+  const reportPath = path.join(os.tmpdir(), `orion-runtime-6a3-report-${Date.now()}.md`);
   fs.writeFileSync(reportPath, lines.join('\n'), 'utf-8');
   console.log('[runtime-trace] report written to', reportPath);
 }

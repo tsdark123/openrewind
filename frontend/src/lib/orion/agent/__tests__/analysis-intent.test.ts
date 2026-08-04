@@ -188,7 +188,8 @@ describe('compileChartActionIntent for analysis', () => {
     expect(plan.steps[0].capability).toBe('analysis.window_ohlc');
     expect(plan.steps[1].capability).toBe('analysis.window_volume');
     for (const step of plan.steps) {
-      expect(step.required).toBe(true);
+      expect(step.required).toBe(false);
+      expect(step.dependsOn).toEqual([]);
     }
   });
 
@@ -229,11 +230,9 @@ describe('compileChartActionIntent for analysis', () => {
     expect(plan.steps.some((s) => s.capability === 'chart.set_timeframe')).toBe(true);
     const analysisStep = plan.steps.find((s) => s.capability === 'analysis.window_change');
     expect(analysisStep).toBeDefined();
-    expect(analysisStep!.dependsOn).toBeDefined();
-    const depId = analysisStep!.dependsOn![0];
-    const depStep = plan.steps.find((s) => s.id === depId);
-    expect(depStep).toBeDefined();
-    expect(depStep!.capability).toMatch(/^(session\.|chart\.set_timeframe$)/);
+    // Analysis steps are optional and not chained to each other or prior steps.
+    expect(analysisStep!.required).toBe(false);
+    expect(analysisStep!.dependsOn).toEqual([]);
   });
 });
 

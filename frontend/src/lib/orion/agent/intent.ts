@@ -282,6 +282,7 @@ export function buildIntentExtractionPrompt(executionLog?: ExecutionContextStore
     '- "tell me what candle I\'m on" -> finalQuery:"current_candle".',
     '- "give me the bar at X" -> finalQuery:"candle_at_time", queryTime:X.',
     '- "give me the bar I land on" or "what bar is that" -> finalQuery:"current_candle". No queryTime.',
+    '- Questions about candle body, wick, anatomy, shape, kind, or type use analysisRequests with kind:"candle_shape", NOT finalQuery.',
     '- "compare this candle with the previous candle you reported" -> finalQuery:"compare_candles", compare:{"left":{"source":"latest_returned_candle"},"right":{"source":"previous_returned_candle"}}.',
     '- "compare the current chart candle with the last candle you reported" -> finalQuery:"compare_candles", compare:{"left":{"source":"current_chart_candle"},"right":{"source":"latest_returned_candle"}}.',
     '- "compare the 11:30 candle with the 11:00 candle" -> finalQuery:"compare_candles", compare:{"left":{"source":"market_time","marketTime":"11:30"},"right":{"source":"market_time","marketTime":"11:00"}}.',

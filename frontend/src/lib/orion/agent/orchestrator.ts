@@ -623,8 +623,6 @@ export function sanitizeIntentGrounding(
     sanitized = validation.intent;
   }
 
-  const hadCandleShapeFinalQuery = sanitized.finalQuery === 'current_candle';
-
   // Symbol
   if (sanitized.symbol !== undefined) {
     if (allowed.has('symbol')) {
@@ -771,6 +769,26 @@ export function sanitizeIntentGrounding(
     }
   }
 
+  // Fallback: a model that emits a candle query for a clearly candle-shape
+  // request should be corrected to analysisRequests before we discard it.
+  if (
+    sanitized.finalQuery &&
+    !sanitized.finalQuery.startsWith('compare') &&
+    !sanitized.analysisRequests?.length &&
+    textRequestsCandleShape(text)
+  ) {
+    const marketTime = sanitized.queryTime;
+    sanitized.analysisRequests = [
+      marketTime
+        ? { kind: 'candle_shape', source: 'market_time', marketTime }
+        : { kind: 'candle_shape', source: 'current_chart_candle' },
+    ];
+    trace.stripped = trace.stripped.filter((s) => !s.startsWith('finalQuery:'));
+    trace.kept.push('analysisRequests:1 (candle_shape fallback)');
+    delete sanitized.finalQuery;
+    delete sanitized.queryTime;
+  }
+
   // Final query
   if (sanitized.finalQuery) {
     const fq = sanitized.finalQuery;
@@ -799,21 +817,6 @@ export function sanitizeIntentGrounding(
       delete sanitized.finalQuery;
       trace.stripped.push(`finalQuery:${fq}`);
     }
-  }
-
-  // Fallback: if the model emitted a candle query for a clearly analysis-shaped
-  // candle-shape request (e.g. "what kind of candle am I on"), convert it to a
-  // candle_shape analysis so the request does not evaporate entirely.
-  if (
-    hadCandleShapeFinalQuery &&
-    sanitized.finalQuery === undefined &&
-    !sanitized.analysisRequests?.length &&
-    textRequestsAnalysis(text) &&
-    textRequestsCandleShape(text)
-  ) {
-    sanitized.analysisRequests = [{ kind: 'candle_shape', source: 'current_chart_candle' }];
-    trace.stripped = trace.stripped.filter((s) => s !== 'finalQuery:current_candle');
-    trace.kept.push('analysisRequests:1 (candle_shape fallback)');
   }
 
   // A sanitized intent must still be meaningful. A date without a symbol is
@@ -1330,17 +1333,20 @@ function composeCompoundSummary(result: AgentExecutionResult, final: WorldState)
 
 function composeResponse(result: AgentExecutionResult, ctx: AgentContext): string {
   if (result.ok) {
-    const successMessages = result.receipts.filter((r) => r.success).map((r) => r.message);
-    const failedAnalysis = result.receipts.filter(
-      (r) => !r.success && typeof r.capability === 'string' && r.capability.startsWith('analysis.')
-    );
     const final = result.finalWorldState as WorldState;
 
     const compound = final ? composeCompoundSummary(result, final) : null;
     if (compound) return compound;
 
-    if (failedAnalysis.length > 0) {
-      const parts = [...successMessages];
+    const analysisReceipts = result.receipts.filter(
+      (r) => r.success && typeof r.capability === 'string' && r.capability.startsWith('analysis.')
+    );
+    const failedAnalysis = result.receipts.filter(
+      (r) => !r.success && typeof r.capability === 'string' && r.capability.startsWith('analysis.')
+    );
+
+    if (analysisReceipts.length > 0 || failedAnalysis.length > 0) {
+      const parts = analysisReceipts.map((r) => r.message);
       for (const r of failedAnalysis) {
         const name = r.capability.replace(/^analysis\./, '');
         parts.push(`${name} failed: ${r.message}`);
@@ -1348,6 +1354,7 @@ function composeResponse(result: AgentExecutionResult, ctx: AgentContext): strin
       return parts.join(' ');
     }
 
+    const successMessages = result.receipts.filter((r) => r.success).map((r) => r.message);
     if (final && final.session.symbol) {
       return successMessages[successMessages.length - 1] ?? `Done. ${final.session.symbol} is active.`;
     }
