@@ -104,6 +104,21 @@ export type DateKind = 'absolute' | 'relative_trading' | 'relative_calendar';
 export type PlaybackAction = 'play' | 'pause' | 'play_until';
 export type FinalQuery = 'current_candle' | 'candle_at_time' | 'compare_candles';
 
+export type AnalysisWindow =
+  | { kind: 'whole_session' }
+  | { kind: 'up_to_cursor' }
+  | { kind: 'time_range'; fromTime: string; toTime: string };
+
+export type SessionPolicy = 'engine_returned_candles_for_requested_date' | 'chart_buffer_up_to_cursor';
+
+export type AnalysisRequest =
+  | { kind: 'window_ohlc'; window?: AnalysisWindow }
+  | { kind: 'window_change'; window?: AnalysisWindow }
+  | { kind: 'window_volume'; window?: AnalysisWindow }
+  | { kind: 'window_compare'; left?: AnalysisWindow; right?: AnalysisWindow }
+  | { kind: 'candle_shape'; source: 'current_chart_candle' | 'market_time'; marketTime?: string }
+  | { kind: 'window_summary'; window?: AnalysisWindow };
+
 export type CompareSideSource =
   | 'latest_returned_candle'
   | 'previous_returned_candle'
@@ -136,6 +151,7 @@ export const INHERITABLE_FIELDS = [
   'relativeSeekMinutes',
   'playback',
   'finalQuery',
+  'analysisRequests',
 ] as const;
 export type InheritableField = (typeof INHERITABLE_FIELDS)[number];
 
@@ -199,6 +215,8 @@ export interface ChartActionIntent {
   previousSymbol?: boolean;
   contextReference?: ContextReference;
   compare?: CompareSides;
+  /** 1–4 deterministic chart-analysis requests. */
+  analysisRequests?: AnalysisRequest[];
 }
 
 export interface ClarificationIntent {

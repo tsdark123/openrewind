@@ -41,6 +41,7 @@ import {
   looksLikeSwitch,
   textRequestsCandleQuery,
   textRequestsPlaybackControl,
+  textRequestsAnalysis,
 } from './dimensions';
 import { SYMBOL_ALIASES } from '../symbolAliases';
 import { classifyOrionIntent } from '../router';
@@ -477,6 +478,9 @@ function planCoversDimensions(plan: AgentPlan): Set<ActionDimension> {
       covered.add('candleQuery');
       if (cap === 'chart.get_candle_at_time' && step.args?.time) covered.add('absoluteTime');
     }
+    if (/^analysis\./.test(cap) && cap !== 'analysis.compare_candles') {
+      covered.add('analysisRequest');
+    }
     if (cap === 'session.switch_to_previous_symbol') {
       covered.add('previousSymbol');
       covered.add('symbol');
@@ -751,6 +755,17 @@ export function sanitizeIntentGrounding(
     }
   }
 
+  // Analysis requests
+  if (sanitized.analysisRequests && sanitized.analysisRequests.length > 0) {
+    if (allowed.has('analysisRequest') || anaphoric) {
+      trace.kept.push(`analysisRequests:${sanitized.analysisRequests.length}`);
+    } else {
+      const count = sanitized.analysisRequests.length;
+      delete sanitized.analysisRequests;
+      trace.stripped.push(`analysisRequests:${count}`);
+    }
+  }
+
   // Final query
   if (sanitized.finalQuery) {
     const fq = sanitized.finalQuery;
@@ -792,6 +807,7 @@ export function sanitizeIntentGrounding(
     sanitized.relativeSeekMinutes !== undefined ||
     sanitized.playback !== undefined ||
     sanitized.finalQuery !== undefined ||
+    (sanitized.analysisRequests && sanitized.analysisRequests.length > 0) ||
     (sanitized.date && (sanitized.symbol !== undefined || state.symbol));
 
   if (!hasAction) {
@@ -954,6 +970,10 @@ async function routeMessage(
   // 3. Conversation heuristics / classifier.
   let routeChat = isConversation(text);
   let classification = classifyOrionIntent(text);
+  if (textRequestsAnalysis(text)) {
+    routeChat = false;
+    classification = { intent: 'agent', confidence: 1, reasons: ['analysis request'] };
+  }
   // Candle comparison is a read-only query, but it is not chat.
   if (/\bcompare\b.*\bcandle\b/i.test(text)) {
     classification = { intent: 'agent', confidence: 1, reasons: ['candle comparison override'] };
@@ -968,7 +988,8 @@ async function routeMessage(
     classification.intent === 'chat' &&
     !looksLikePlayOrPause(text) &&
     !looksLikeSwitch(text) &&
-    !looksLikeChartQuery(text)
+    !looksLikeChartQuery(text) &&
+    !textRequestsAnalysis(text)
   ) {
     agentTrace('route', 'chat', { text });
     const message = await runChat(text, ctx, setupReady, now());
@@ -1279,10 +1300,22 @@ function composeCompoundSummary(result: AgentExecutionResult, final: WorldState)
 function composeResponse(result: AgentExecutionResult, ctx: AgentContext): string {
   if (result.ok) {
     const successMessages = result.receipts.filter((r) => r.success).map((r) => r.message);
+    const failedAnalysis = result.receipts.filter(
+      (r) => !r.success && typeof r.capability === 'string' && r.capability.startsWith('analysis.')
+    );
     const final = result.finalWorldState as WorldState;
 
     const compound = final ? composeCompoundSummary(result, final) : null;
     if (compound) return compound;
+
+    if (failedAnalysis.length > 0) {
+      const parts = [...successMessages];
+      for (const r of failedAnalysis) {
+        const name = r.capability.replace(/^analysis\./, '');
+        parts.push(`${name} failed: ${r.message}`);
+      }
+      return parts.join(' ');
+    }
 
     if (final && final.session.symbol) {
       return successMessages[successMessages.length - 1] ?? `Done. ${final.session.symbol} is active.`;

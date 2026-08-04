@@ -8,15 +8,10 @@
 // =============================================================================
 
 import type { CandleData } from '../../../types';
+import type { SessionPolicy } from './types';
 import { toEtTime, formatTime } from '../planner';
 
-export type AnalysisWindow =
-  | { kind: 'whole_session' }
-  | { kind: 'up_to_cursor' }
-  | { kind: 'time_range'; fromTime: string; toTime: string };
-
 export type BodyDirection = 'up' | 'down' | 'flat';
-export type SessionPolicy = 'engine_returned_candles_for_requested_date' | 'chart_buffer_up_to_cursor';
 
 export interface ResolvedWindowMeta {
   kind: 'whole_session' | 'up_to_cursor' | 'time_range';

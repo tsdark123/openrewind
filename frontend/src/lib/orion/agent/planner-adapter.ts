@@ -385,7 +385,7 @@ export function chartCommandToActionTemplate(cmd: ChartCommand): ChartActionInte
     if (cmd.intent === 'play' || cmd.intent === 'fast_forward') {
       template.playback = {
         action: 'play_until',
-        speed: cmd.speed,
+        ...(cmd.speed !== undefined ? { speed: cmd.speed } : {}),
         untilTime: parseTimeToString(cmd.endTime),
         direction: cmd.direction === 'backward' ? 'backward' : 'forward',
       };

@@ -25,10 +25,9 @@ import { resolveSymbol } from './resolveSymbol';
 import { resolveTradingDate } from './resolveTradingDate';
 import { fetchCandles } from '../tools';
 import { clampTimeframe, toEngineTs, toEtTime, formatTime } from '../planner';
+import type { AnalysisWindow, SessionPolicy } from './types';
 import {
-  type AnalysisWindow,
   type ResolvedWindowMeta,
-  type SessionPolicy,
   validateCandles,
   computeWindowOhlc,
   computeWindowChange,
@@ -1520,7 +1519,7 @@ registerCapability({
     additionalProperties: false,
     required: ['source'],
     properties: {
-      source: { enum: ['current_chart_candle', 'market_time'] },
+      source: { type: 'string', enum: ['current_chart_candle', 'market_time'] },
       marketTime: { type: 'string' },
     },
   },

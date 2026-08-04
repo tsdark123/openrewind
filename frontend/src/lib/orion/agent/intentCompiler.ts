@@ -16,7 +16,7 @@
 import type {
   AgentPlan, AgentStep, ChartActionIntent, CandleSnapshot, SemanticPlayback,
   ExecutionContextEntry, InheritableField, CompareSide, ResolvedCompare,
-  ResolvedCompareSide,
+  ResolvedCompareSide, AnalysisRequest, AnalysisWindow,
 } from './types';
 import type { AgentContext } from './types';
 import { getCapability } from './capabilities';
@@ -50,6 +50,73 @@ export type ContextResolutionResult = ContextResolutionSuccess | ContextResoluti
 
 function today(): string {
   return new Date().toISOString().slice(0, 10);
+}
+
+function analysisRequestWindow(req: AnalysisRequest): AnalysisWindow | undefined {
+  if (req.kind === 'window_compare') return req.left;
+  return (req as { window?: AnalysisWindow }).window;
+}
+
+function defaultAnalysisWindow(): AnalysisWindow {
+  return { kind: 'whole_session' };
+}
+
+function mergeAnalysisRequests(
+  base: AnalysisRequest[] | undefined,
+  current: AnalysisRequest[] | undefined
+): { ok: true; requests: AnalysisRequest[] } | { ok: false; error: string } {
+  if (!current) return { ok: true, requests: base ?? [] };
+  if (!base) {
+    // No previous analysis to inherit from; current must be complete.
+    for (let i = 0; i < current.length; i++) {
+      const r = current[i];
+      if (r.kind === 'candle_shape') continue; // source is required, no window needed
+      if (r.kind === 'window_compare') {
+        if (!r.left || !r.right) {
+          return { ok: false, error: `analysisRequests[${i}] is missing left/right windows and no prior analysis exists to inherit from.` };
+        }
+      } else if (!r.window) {
+        return { ok: false, error: `analysisRequests[${i}] is missing a window and no prior analysis exists to inherit from.` };
+      }
+    }
+    return { ok: true, requests: current };
+  }
+
+  const lastBase = base[base.length - 1];
+  const baseWindow = lastBase ? analysisRequestWindow(lastBase) : undefined;
+
+  const resolved: AnalysisRequest[] = [];
+  for (let i = 0; i < current.length; i++) {
+    const cur = current[i];
+    const baseReq = i < base.length ? base[i] : lastBase;
+    const inheritedWindow = baseReq ? analysisRequestWindow(baseReq) : baseWindow;
+
+    if (cur.kind === 'window_compare') {
+      const left = cur.left ??
+        (baseReq?.kind === 'window_compare' ? baseReq.left : inheritedWindow) ??
+        defaultAnalysisWindow();
+      const right = cur.right ??
+        (baseReq?.kind === 'window_compare' ? baseReq.right : inheritedWindow) ??
+        defaultAnalysisWindow();
+      resolved.push({ kind: 'window_compare', left, right });
+      continue;
+    }
+
+    if (cur.kind === 'candle_shape') {
+      resolved.push({
+        kind: 'candle_shape',
+        source: cur.source,
+        marketTime: cur.marketTime,
+      });
+      continue;
+    }
+
+    const kind = cur.kind;
+    if (!kind) return { ok: false, error: `analysisRequests[${i}] has no kind and cannot be resolved.` };
+    const window = cur.window ?? inheritedWindow ?? defaultAnalysisWindow();
+    resolved.push({ kind, window } as AnalysisRequest);
+  }
+  return { ok: true, requests: resolved };
 }
 
 function isMutating(capability: string): boolean {
@@ -248,6 +315,7 @@ export function resolveContextReference(
     relativeSeekMinutes: 'relativeSeekMinutes',
     playback: 'playback',
     finalQuery: 'finalQuery',
+    analysisRequests: 'analysisRequests',
   };
 
   function mergeField<K extends keyof ChartActionIntent>(key: K): void {
@@ -318,6 +386,24 @@ export function resolveContextReference(
     return { ok: false, error: `Unknown contextReference mode "${ref.mode}".` };
   }
 
+  // Merge any inherited analysis requests, allowing partial follow-ups
+  // ("same thing but first hour", "what about volume?") to resolve against
+  // the prior action's analysisRequests.
+  const shouldInheritAnalysis =
+    ref.mode === 'repeat' ||
+    (ref.mode === 'inherit' && ref.inherit?.includes('analysisRequests'));
+  if (shouldInheritAnalysis && source.analysisRequests) {
+    const mergedAnalysis = mergeAnalysisRequests(source.analysisRequests, merged.analysisRequests);
+    if (!mergedAnalysis.ok) {
+      return { ok: false, error: mergedAnalysis.error };
+    }
+    if (mergedAnalysis.requests.length > 0) {
+      merged.analysisRequests = mergedAnalysis.requests;
+    } else if (merged.analysisRequests && merged.analysisRequests.length === 0) {
+      delete merged.analysisRequests;
+    }
+  }
+
   // After resolution the contextReference is consumed and must not be stored.
   delete merged.contextReference;
 
@@ -331,6 +417,7 @@ export function compileChartActionIntent(
   const anchorDate = options.anchorDate ?? today();
   const steps: AgentStep[] = [];
   let lastStepId: string | undefined;
+  let lastMutatingStepId: string | undefined;
 
   // Helper to push a step and chain it onto the previous one.
   function pushStep(step: AgentStep): void {
@@ -339,6 +426,9 @@ export function compileChartActionIntent(
     }
     steps.push(step);
     lastStepId = step.id;
+    if (isMutating(step.capability)) {
+      lastMutatingStepId = step.id;
+    }
   }
 
   // 1. Previous symbol (no args, relies on session history).
@@ -497,6 +587,23 @@ export function compileChartActionIntent(
     });
   }
 
+  // 9. Deterministic chart analysis requests.
+  if (intent.analysisRequests && intent.analysisRequests.length > 0) {
+    const seen = new Set<string>();
+    let emitted = 0;
+    for (const request of intent.analysisRequests) {
+      const key = canonicalRequestKey(request);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const step = compileAnalysisStep(emitted, request);
+      if (lastMutatingStepId && !step.dependsOn) {
+        step.dependsOn = [lastMutatingStepId];
+      }
+      pushStep(step);
+      emitted++;
+    }
+  }
+
   // Compact summary.
   const fragments: string[] = [];
   if (intent.previousSymbol) fragments.push('previous symbol');
@@ -508,6 +615,9 @@ export function compileChartActionIntent(
   if (intent.relativeSeekMinutes !== undefined) fragments.push(`${intent.relativeSeekMinutes}m relative`);
   if (intent.playback) fragments.push(intent.playback.action);
   if (intent.finalQuery) fragments.push(intent.finalQuery);
+  if (intent.analysisRequests) {
+    fragments.push(`analysis x${intent.analysisRequests.length}`);
+  }
   const summary = fragments.length > 0 ? fragments.join(' · ') : 'Chart action';
 
   return {
@@ -517,6 +627,48 @@ export function compileChartActionIntent(
     steps,
     meta: { planner: 'compact-intent' },
   };
+}
+
+function canonicalRequestKey(request: AnalysisRequest): string {
+  if (request.kind === 'window_compare') {
+    return JSON.stringify({ kind: request.kind, left: request.left, right: request.right });
+  }
+  if (request.kind === 'candle_shape') {
+    return JSON.stringify({ kind: request.kind, source: request.source, marketTime: request.marketTime });
+  }
+  return JSON.stringify({ kind: request.kind, window: (request as { window: AnalysisWindow }).window });
+}
+
+function compileAnalysisStep(index: number, request: AnalysisRequest): AgentStep {
+  switch (request.kind) {
+    case 'window_ohlc':
+    case 'window_change':
+    case 'window_volume':
+    case 'window_summary':
+      return {
+        id: `step-analysis-${index + 1}`,
+        capability: `analysis.${request.kind}`,
+        args: { window: request.window ?? defaultAnalysisWindow() },
+        required: false,
+      };
+    case 'window_compare':
+      return {
+        id: `step-analysis-${index + 1}`,
+        capability: 'analysis.window_compare',
+        args: {
+          left: request.left ?? defaultAnalysisWindow(),
+          right: request.right ?? defaultAnalysisWindow(),
+        },
+        required: false,
+      };
+    case 'candle_shape':
+      return {
+        id: `step-analysis-${index + 1}`,
+        capability: 'analysis.candle_shape',
+        args: { source: request.source, ...(request.marketTime ? { marketTime: request.marketTime } : {}) },
+        required: false,
+      };
+  }
 }
 
 function compilePlaybackStep(playback: SemanticPlayback): AgentStep {

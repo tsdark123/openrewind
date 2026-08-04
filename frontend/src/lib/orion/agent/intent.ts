@@ -19,6 +19,7 @@ import {
   ALL_ACTION_DIMENSIONS,
   INHERIT_FIELD_TO_DIMENSION,
   getRequestedDimensions,
+  textRequestsAnalysis,
 } from './dimensions';
 import type {
   ChartActionIntent,
@@ -29,6 +30,8 @@ import type {
   ContextReferenceMode,
   InheritableField,
   ExecutionContextStore,
+  AnalysisRequest,
+  AnalysisWindow,
 } from './types';
 
 // Re-export the moved types so existing consumers keep working.
@@ -43,6 +46,8 @@ export type {
   PlaybackAction,
   FinalQuery,
   ContextReference,
+  AnalysisRequest,
+  AnalysisWindow,
 } from './types';
 
 export interface RequestContext {
@@ -65,6 +70,78 @@ export interface RequestContext {
 // ---------------------------------------------------------------------------
 // JSON Schema used in the prompt and for runtime validation.
 // ---------------------------------------------------------------------------
+
+export const ANALYSIS_WINDOW_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['kind'],
+  properties: {
+    kind: { enum: ['whole_session', 'up_to_cursor', 'time_range'] },
+    fromTime: { type: 'string', description: 'HH:MM; only for time_range' },
+    toTime: { type: 'string', description: 'HH:MM; only for time_range' },
+  },
+};
+
+export const ANALYSIS_REQUEST_SCHEMA: Record<string, unknown> = {
+  oneOf: [
+    {
+      type: 'object',
+      additionalProperties: false,
+      required: ['kind'],
+      properties: {
+        kind: { const: 'window_ohlc' },
+        window: ANALYSIS_WINDOW_SCHEMA,
+      },
+    },
+    {
+      type: 'object',
+      additionalProperties: false,
+      required: ['kind'],
+      properties: {
+        kind: { const: 'window_change' },
+        window: ANALYSIS_WINDOW_SCHEMA,
+      },
+    },
+    {
+      type: 'object',
+      additionalProperties: false,
+      required: ['kind'],
+      properties: {
+        kind: { const: 'window_volume' },
+        window: ANALYSIS_WINDOW_SCHEMA,
+      },
+    },
+    {
+      type: 'object',
+      additionalProperties: false,
+      required: ['kind'],
+      properties: {
+        kind: { const: 'window_compare' },
+        left: ANALYSIS_WINDOW_SCHEMA,
+        right: ANALYSIS_WINDOW_SCHEMA,
+      },
+    },
+    {
+      type: 'object',
+      additionalProperties: false,
+      required: ['kind'],
+      properties: {
+        kind: { const: 'candle_shape' },
+        source: { enum: ['current_chart_candle', 'market_time'], description: 'Defaults to current_chart_candle if omitted.' },
+        marketTime: { type: 'string', description: 'HH:MM; only when source is market_time' },
+      },
+    },
+    {
+      type: 'object',
+      additionalProperties: false,
+      required: ['kind'],
+      properties: {
+        kind: { const: 'window_summary' },
+        window: ANALYSIS_WINDOW_SCHEMA,
+      },
+    },
+  ],
+};
 
 export const SEMANTIC_INTENT_SCHEMA: Record<string, unknown> = {
   oneOf: [
@@ -103,6 +180,12 @@ export const SEMANTIC_INTENT_SCHEMA: Record<string, unknown> = {
         finalQuery: { enum: ['current_candle', 'candle_at_time', 'compare_candles'] },
         queryTime: { type: 'string', description: 'HH:MM; only for candle_at_time' },
         previousSymbol: { type: 'boolean' },
+        analysisRequests: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 4,
+          items: ANALYSIS_REQUEST_SCHEMA,
+        },
         compare: {
           type: 'object',
           additionalProperties: false,
@@ -137,7 +220,7 @@ export const SEMANTIC_INTENT_SCHEMA: Record<string, unknown> = {
             mode: { enum: ['repeat', 'inherit', 'use_as_target', 'anchor_relative_date'] },
             inherit: {
               type: 'array',
-              items: { enum: ['date', 'timeframe', 'seekTime', 'relativeSeekMinutes', 'playback', 'finalQuery'] },
+              items: { enum: ['date', 'timeframe', 'seekTime', 'relativeSeekMinutes', 'playback', 'finalQuery', 'analysisRequests'] },
             },
           },
         },
@@ -202,12 +285,23 @@ export function buildIntentExtractionPrompt(executionLog?: ExecutionContextStore
     '- "compare this candle with the previous candle you reported" -> finalQuery:"compare_candles", compare:{"left":{"source":"latest_returned_candle"},"right":{"source":"previous_returned_candle"}}.',
     '- "compare the current chart candle with the last candle you reported" -> finalQuery:"compare_candles", compare:{"left":{"source":"current_chart_candle"},"right":{"source":"latest_returned_candle"}}.',
     '- "compare the 11:30 candle with the 11:00 candle" -> finalQuery:"compare_candles", compare:{"left":{"source":"market_time","marketTime":"11:30"},"right":{"source":"market_time","marketTime":"11:00"}}.',
+    '- "what was the range in the first hour" -> analysisRequests:[{"kind":"window_ohlc","window":{"kind":"time_range","fromTime":"09:30","toTime":"10:30"}}].',
+    '- "how much did it move from 11 to noon" -> analysisRequests:[{"kind":"window_change","window":{"kind":"time_range","fromTime":"11:00","toTime":"12:00"}}].',
+    '- "what was total volume this morning" -> analysisRequests:[{"kind":"window_volume","window":{"kind":"time_range","fromTime":"09:30","toTime":"12:00"}}].',
+    '- "compare morning volume with afternoon volume" -> analysisRequests:[{"kind":"window_compare","left":{"kind":"time_range","fromTime":"09:30","toTime":"12:00"},"right":{"kind":"time_range","fromTime":"12:00","toTime":"16:00"}}].',
+    '- "what kind of candle am I on" -> analysisRequests:[{"kind":"candle_shape","source":"current_chart_candle"}].',
+    '- "describe the 11:30 candle" -> analysisRequests:[{"kind":"candle_shape","source":"market_time","marketTime":"11:30"}].',
+    '- "how did AAPL do today" -> analysisRequests:[{"kind":"window_summary","window":{"kind":"whole_session"}}].',
+    '- "give me the move, total volume and candle anatomy from 10 to noon" -> analysisRequests:[{"kind":"window_change","window":{"kind":"time_range","fromTime":"10:00","toTime":"12:00"}},{"kind":"window_volume","window":{"kind":"time_range","fromTime":"10:00","toTime":"12:00"}},{"kind":"candle_shape","source":"market_time","marketTime":"12:00"}].',
+    '- "up to where I am now" or "so far" -> window:{"kind":"up_to_cursor"}.',
+    '- up to 4 analysisRequests are allowed in one turn, but never more than 4 and never none.',
+    '- Do NOT include computed numbers in analysisRequests (no open, high, low, close, volume, percent change, etc.). Only request the operation and the window.',
     '- seekTime, queryTime and playback.untilTime must be valid clock times (00:00-23:59). If the user gives an invalid or out-of-range time (e.g. 25:00), return clarification. Do not guess a time.',
     '- queryTime must be a clock time (HH:MM), never a phrase like "the bar" or "30 minutes earlier".',
     '- Do NOT set playback unless the user explicitly says play, pause, or play_until.',
     '- playback play_until with an end time -> {"action":"play_until","untilTime":"HH:MM"}.',
     '- If the request is genuinely missing required info, return {"kind":"clarification","message":"..."}.',
-    '- If the operation cannot be represented (e.g. VWAP, backtest), return {"kind":"unsupported","message":"..."}.',
+    '- If the operation cannot be represented (e.g. VWAP, backtest, trend, volatility, support/resistance), return {"kind":"unsupported","message":"..."}.',
     '',
     'Context reference rules:',
     '- If the user refers to a prior action with "do that again", "repeat that", or "again", set contextReference:{"source":"latest_successful_action","mode":"repeat"}.',
@@ -239,6 +333,12 @@ export function buildIntentExtractionPrompt(executionLog?: ExecutionContextStore
     '- "Compare this candle with the previous candle you reported" -> {"kind":"chart_action","finalQuery":"compare_candles","compare":{"left":{"source":"latest_returned_candle"},"right":{"source":"previous_returned_candle"}}}',
     '- "Compare the current chart candle with the last candle you reported" -> {"kind":"chart_action","finalQuery":"compare_candles","compare":{"left":{"source":"current_chart_candle"},"right":{"source":"latest_returned_candle"}}}',
     '- "Compare the 11:30 candle with the 11:00 candle" -> {"kind":"chart_action","finalQuery":"compare_candles","compare":{"left":{"source":"market_time","marketTime":"11:30"},"right":{"source":"market_time","marketTime":"11:00"}}}',
+    '- "what was the range in the first hour" -> {"kind":"chart_action","analysisRequests":[{"kind":"window_ohlc","window":{"kind":"time_range","fromTime":"09:30","toTime":"10:30"}}]}',
+    '- "how did it do up to now" -> {"kind":"chart_action","analysisRequests":[{"kind":"window_summary","window":{"kind":"up_to_cursor"}}]}',
+    '- "compare morning and afternoon and tell me which had more volume" -> {"kind":"chart_action","analysisRequests":[{"kind":"window_compare","left":{"kind":"time_range","fromTime":"09:30","toTime":"12:00"},"right":{"kind":"time_range","fromTime":"12:00","toTime":"16:00"}},{"kind":"window_volume","window":{"kind":"time_range","fromTime":"09:30","toTime":"16:00"}}]}',
+    '- "do that analysis on NVDA" -> {"kind":"chart_action","symbol":"NVDA","contextReference":{"source":"latest_successful_action","mode":"repeat"}}',
+    '- "same thing but first hour" -> {"kind":"chart_action","contextReference":{"source":"latest_successful_action","mode":"inherit","inherit":["analysisRequests"]},"analysisRequests":[{"kind":"window_ohlc","window":{"kind":"time_range","fromTime":"09:30","toTime":"10:30"}}]}',
+    '- "what about volume?" -> {"kind":"chart_action","contextReference":{"source":"latest_successful_action","mode":"inherit","inherit":["analysisRequests"]},"analysisRequests":[{"kind":"window_volume"}]}',
     '- "Jump to 25:00." -> {"kind":"clarification","message":"25:00 is not a valid clock time. Use HH:MM (00:00-23:59)."}',
     '- "Move it over there." -> {"kind":"clarification","message":"Where should I move it?"}',
     '- "Add VWAP and backtest a crossover." -> {"kind":"unsupported","message":"VWAP and backtest crossover are not supported."}',
@@ -436,6 +536,110 @@ function validateCompare(raw: unknown): import('./types').CompareSides | string 
   return { left, right };
 }
 
+function validateAnalysisWindow(raw: unknown): AnalysisWindow | string {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return 'window must be an object.';
+  }
+  const obj = raw as Record<string, unknown>;
+  const err = hasUnknownFields(obj, new Set(['kind', 'fromTime', 'toTime']));
+  if (err) return `window ${err}`;
+
+  const kind = obj.kind;
+  if (kind !== 'whole_session' && kind !== 'up_to_cursor' && kind !== 'time_range') {
+    return `window.kind must be one of whole_session, up_to_cursor, time_range.`;
+  }
+
+  if (kind === 'time_range') {
+    if (typeof obj.fromTime !== 'string' || !isValidTime(obj.fromTime)) {
+      return 'time_range window requires a valid HH:MM fromTime.';
+    }
+    if (typeof obj.toTime !== 'string' || !isValidTime(obj.toTime)) {
+      return 'time_range window requires a valid HH:MM toTime.';
+    }
+    return { kind: 'time_range', fromTime: obj.fromTime, toTime: obj.toTime };
+  }
+
+  return { kind };
+}
+
+function validateAnalysisRequest(raw: unknown, index: number): AnalysisRequest | string {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return `analysisRequests[${index}] must be an object.`;
+  }
+  const obj = raw as Record<string, unknown>;
+  const kind = obj.kind;
+  if (
+    kind !== 'window_ohlc' &&
+    kind !== 'window_change' &&
+    kind !== 'window_volume' &&
+    kind !== 'window_compare' &&
+    kind !== 'candle_shape' &&
+    kind !== 'window_summary'
+  ) {
+    return `analysisRequests[${index}] has unknown kind "${String(kind)}".`;
+  }
+
+  if (kind === 'candle_shape') {
+    const err = hasUnknownFields(obj, new Set(['kind', 'source', 'marketTime']));
+    if (err) return `analysisRequests[${index}] ${err}`;
+    let source = obj.source;
+    if (source !== undefined && source !== null && typeof source !== 'string') {
+      return `analysisRequests[${index}] candle_shape source must be a string.`;
+    }
+    if (source === undefined || source === null) {
+      source = 'current_chart_candle';
+    }
+    const normalizedSource = (source as string).toLowerCase().replace(/[-\s]+/g, '_');
+    if (
+      normalizedSource === 'current' ||
+      normalizedSource === 'current_candle' ||
+      normalizedSource === 'current_chart' ||
+      normalizedSource === 'current_chart_candle' ||
+      normalizedSource === 'now' ||
+      normalizedSource === 'here' ||
+      normalizedSource === 'cursor'
+    ) {
+      return { kind: 'candle_shape', source: 'current_chart_candle' };
+    }
+    if (normalizedSource === 'market_time' || normalizedSource === 'time' || normalizedSource === 'specific_time') {
+      if (typeof obj.marketTime !== 'string' || !isValidTime(obj.marketTime)) {
+        return `analysisRequests[${index}] candle_shape market_time requires a valid HH:MM marketTime.`;
+      }
+      return { kind: 'candle_shape', source: 'market_time', marketTime: obj.marketTime };
+    }
+    return `analysisRequests[${index}] candle_shape source must be "current_chart_candle" or "market_time".`;
+  }
+
+  if (kind === 'window_compare') {
+    const err = hasUnknownFields(obj, new Set(['kind', 'left', 'right']));
+    if (err) return `analysisRequests[${index}] ${err}`;
+    const left = 'left' in obj ? validateAnalysisWindow(obj.left) : undefined;
+    if (typeof left === 'string') return `analysisRequests[${index}] left: ${left}`;
+    const right = 'right' in obj ? validateAnalysisWindow(obj.right) : undefined;
+    if (typeof right === 'string') return `analysisRequests[${index}] right: ${right}`;
+    return { kind: 'window_compare', left, right };
+  }
+
+  const err = hasUnknownFields(obj, new Set(['kind', 'window']));
+  if (err) return `analysisRequests[${index}] ${err}`;
+  const window = 'window' in obj ? validateAnalysisWindow(obj.window) : undefined;
+  if (typeof window === 'string') return `analysisRequests[${index}] window: ${window}`;
+  return { kind, window } as AnalysisRequest;
+}
+
+function validateAnalysisRequests(raw: unknown): AnalysisRequest[] | string {
+  if (!Array.isArray(raw) || raw.length === 0 || raw.length > 4) {
+    return 'analysisRequests must be an array with 1 to 4 items.';
+  }
+  const requests: AnalysisRequest[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    const r = validateAnalysisRequest(raw[i], i);
+    if (typeof r === 'string') return r;
+    requests.push(r);
+  }
+  return requests;
+}
+
 export function validateSemanticIntent(raw: unknown): IntentValidationResult | IntentValidationError {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
     return { ok: false, error: 'Intent must be an object.' };
@@ -462,6 +666,7 @@ export function validateSemanticIntent(raw: unknown): IntentValidationResult | I
   const chartErr = hasUnknownFields(obj, new Set([
     'kind', 'symbol', 'date', 'timeframeMinutes', 'seekTime', 'relativeSeekMinutes',
     'playback', 'finalQuery', 'queryTime', 'previousSymbol', 'contextReference', 'compare',
+    'analysisRequests',
   ]));
   if (chartErr) return { ok: false, error: chartErr };
 
@@ -623,6 +828,14 @@ export function validateSemanticIntent(raw: unknown): IntentValidationResult | I
     intent.compare = validation;
   }
 
+  if ('analysisRequests' in obj) {
+    const validation = validateAnalysisRequests(obj.analysisRequests);
+    if (typeof validation === 'string') {
+      return { ok: false, error: validation };
+    }
+    intent.analysisRequests = validation;
+  }
+
   if (intent.finalQuery === 'candle_at_time' && !intent.queryTime) {
     // The model tried "candle_at_time" with a non-clock phrase like "the bar I land on".
     // Fall back to current_candle.
@@ -656,7 +869,8 @@ export function validateSemanticIntent(raw: unknown): IntentValidationResult | I
     !intent.relativeSeekMinutes &&
     !intent.playback &&
     !intent.finalQuery &&
-    !intent.contextReference
+    !intent.contextReference &&
+    (!intent.analysisRequests || intent.analysisRequests.length === 0)
   ) {
     return { ok: false, error: 'chart_action must include at least one actionable field.' };
   }
@@ -756,6 +970,76 @@ function isPlaybackControlGrounded(text: string): boolean {
   return /\b(?:play|pause|rewind|fast[-\s]?forward|fastforward|speed up|slow down|set\s+speed)\b/.test(text);
 }
 
+const ANALYSIS_KINDS = [
+  'window_ohlc',
+  'window_change',
+  'window_volume',
+  'window_compare',
+  'candle_shape',
+  'window_summary',
+];
+
+const FORBIDDEN_ANALYSIS_KEYS = new Set([
+  'open',
+  'high',
+  'low',
+  'close',
+  'volume',
+  'percentChange',
+  'range',
+  'bodyRange',
+  'upperWick',
+  'lowerWick',
+  'totalVolume',
+  'averageVolume',
+  'largestVolume',
+]);
+
+function isAnalysisWindowMalformed(value: unknown): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return true;
+  const w = value as Record<string, unknown>;
+  if (w.kind !== 'whole_session' && w.kind !== 'up_to_cursor' && w.kind !== 'time_range') return true;
+  if (hasUnknownFields(w, new Set(['kind', 'fromTime', 'toTime']))) return true;
+  if (w.kind === 'time_range') {
+    if (typeof w.fromTime !== 'string' || !isValidTime(w.fromTime)) return true;
+    if (typeof w.toTime !== 'string' || !isValidTime(w.toTime)) return true;
+  }
+  return false;
+}
+
+function isAnalysisRequestMalformed(value: unknown, _index: number): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return true;
+  const r = value as Record<string, unknown>;
+  if (!ANALYSIS_KINDS.includes(String(r.kind))) return true;
+  if (Object.keys(r).some((k) => FORBIDDEN_ANALYSIS_KEYS.has(k))) return true;
+
+  if (r.kind === 'candle_shape') {
+    if (hasUnknownFields(r, new Set(['kind', 'source', 'marketTime']))) return true;
+    if (r.source !== 'current_chart_candle' && r.source !== 'market_time') return true;
+    if (r.source === 'market_time' && (typeof r.marketTime !== 'string' || !isValidTime(r.marketTime))) return true;
+    return false;
+  }
+
+  if (r.kind === 'window_compare') {
+    if (hasUnknownFields(r, new Set(['kind', 'left', 'right']))) return true;
+    if (r.left !== undefined && isAnalysisWindowMalformed(r.left)) return true;
+    if (r.right !== undefined && isAnalysisWindowMalformed(r.right)) return true;
+    return false;
+  }
+
+  if (hasUnknownFields(r, new Set(['kind', 'window']))) return true;
+  if (r.window !== undefined && isAnalysisWindowMalformed(r.window)) return true;
+  return false;
+}
+
+function isAnalysisRequestsMalformed(value: unknown): boolean {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 4) return true;
+  for (let i = 0; i < value.length; i++) {
+    if (isAnalysisRequestMalformed(value[i], i)) return true;
+  }
+  return false;
+}
+
 function getContextAllowedDimensions(ref: ContextReference): Set<ActionDimension> {
   const dims = new Set<ActionDimension>();
   if (ref.mode === 'repeat') {
@@ -787,6 +1071,7 @@ const FIELD_TO_DIMENSION: Record<string, ActionDimension | undefined> = {
   playback: 'playbackControl',
   finalQuery: 'candleQuery',
   queryTime: 'absoluteTime',
+  analysisRequests: 'analysisRequest',
 };
 
 function buildRequestedSet(text: string, raw: Record<string, unknown>, requestContext?: RequestContext): Set<ActionDimension> {
@@ -887,6 +1172,10 @@ function isFieldMalformed(
     return typeof validateContextReference(value) === 'string';
   }
 
+  if (field === 'analysisRequests') {
+    return isAnalysisRequestsMalformed(value);
+  }
+
   return false;
 }
 
@@ -953,6 +1242,10 @@ function isFieldGrounded(
 
   if (field === 'contextReference') {
     return true;
+  }
+
+  if (field === 'analysisRequests') {
+    return Array.isArray(value) && value.length > 0 && textRequestsAnalysis(text);
   }
 
   return false;

@@ -241,11 +241,19 @@ export function createExecutionContext(): ExecutionContextStore {
         parts.push(`seek:${e.template.relativeSeekMinutes}m`);
       }
       if (e.template?.finalQuery) parts.push(`query:${e.template.finalQuery}`);
+      if (e.template?.analysisRequests) {
+        const names = e.template.analysisRequests.map((r) => r.kind.replace(/^window_/, '')).join(',');
+        parts.push(`analysis:${names}`);
+      }
       if (e.after?.symbol) parts.push(`after:${e.after.symbol} ${e.after.date ?? ''} ${e.after.timeframe ?? ''}m`);
       if (e.after?.replayTime) parts.push(`@ ${e.after.replayTime}`);
       if (includeCandles && e.returnedCandles.length > 0) {
         const c = e.returnedCandles[e.returnedCandles.length - 1];
         parts.push(`candle:${c.symbol} ${c.close} @ ${c.marketTime}`);
+      }
+      const analysisReceipt = e.receipts.find((r) => r.success && r.capability.startsWith('analysis.'));
+      if (analysisReceipt) {
+        parts.push(`result:${analysisReceipt.message}`);
       }
       lines.push(parts.join(' '));
     }

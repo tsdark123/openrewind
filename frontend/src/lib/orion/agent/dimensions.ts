@@ -15,7 +15,8 @@ export type ActionDimension =
   | 'relativeSeek'
   | 'playbackControl'
   | 'candleQuery'
-  | 'previousSymbol';
+  | 'previousSymbol'
+  | 'analysisRequest';
 
 export const ALL_ACTION_DIMENSIONS: ActionDimension[] = [
   'symbol',
@@ -26,6 +27,7 @@ export const ALL_ACTION_DIMENSIONS: ActionDimension[] = [
   'playbackControl',
   'candleQuery',
   'previousSymbol',
+  'analysisRequest',
 ];
 
 export const INHERIT_FIELD_TO_DIMENSION: Record<string, ActionDimension | undefined> = {
@@ -35,6 +37,7 @@ export const INHERIT_FIELD_TO_DIMENSION: Record<string, ActionDimension | undefi
   relativeSeekMinutes: 'relativeSeek',
   playback: 'playbackControl',
   finalQuery: 'candleQuery',
+  analysisRequests: 'analysisRequest',
 };
 
 export function looksLikeSwitch(text: string): boolean {
@@ -81,7 +84,10 @@ export function textRequestsPlaybackControl(t: string): boolean {
 }
 
 export function textRequestsCandleQuery(t: string): boolean {
-  if (/\b(?:candle|bar|ohlc)\b/i.test(t)) return true;
+  if (/\b(?:candle|bar|ohlc)\s+(?:at|for|around|about)\b/i.test(t)) return true;
+  if (/\b(?:current|this|the|latest)\s+(?:candle|bar|ohlc)\b/i.test(t)) return true;
+  if (/\b(?:candle|bar|ohlc)\s+(?:now|here|right now|at this time|at the cursor)\b/i.test(t)) return true;
+  if (/\b(?:what|which|tell|show|give)\s+(?:me\s+)?(?:the\s+)?(?:what\s+)?(?:candle|bar|ohlc)\b/i.test(t)) return true;
   if (/\b(?:price|worth|value)\b/i.test(t)) {
     return /\b(?:what|tell|give|show|which|the)\s+(?:price|worth|value)\b/i.test(t) ||
       /\b(?:price|worth|value)\s+(?:at|of)\b/i.test(t);
@@ -91,6 +97,21 @@ export function textRequestsCandleQuery(t: string): boolean {
 
 export function textRequestsPreviousSymbol(t: string): boolean {
   return /\b(?:take me back|previous symbol|previous stock|stock i was just on|was just on)\b/i.test(t);
+}
+
+export function textRequestsAnalysis(t: string): boolean {
+  const text = t.toLowerCase();
+  return (
+    /\b(range|ohlc|open high low close|high low)\b/i.test(text) ||
+    /\b(move|moved|movement|change|changed|how did|do today|performed)\b/i.test(text) ||
+    /\b(volum|vol|total volume|average volume)\b/i.test(text) ||
+    /\b(compare|vs|versus|compared to|against|higher than|lower than|more volume|less volume)\b/i.test(text) ||
+    /\b(candle anatomy|body|wick|upper wick|lower wick|shadow|candle shape|what kind of candle|kind of candle|candle am i on|candle i'm on)\b/i.test(text) ||
+    /\b(summary|overview|recap)\b/i.test(text) ||
+    /\b(first|last)\s+\d+\s*(?:min|minute|hour|hr)s?\b/i.test(text) ||
+    /\b(first hour|last hour|opening hour|closing hour|morning|mornig|afternoon|up to (?:cursor|here|where i)|where i'?m at|right now|rn)\b/i.test(text) ||
+    /\bfrom\s+\d{1,2}:\d{2}\s+to\s+\d{1,2}:\d{2}\b/i.test(text)
+  );
 }
 
 export function getRequestedDimensions(
@@ -114,9 +135,10 @@ export function getRequestedDimensions(
   } else if (textRequestsTimeframe(t)) {
     dims.add('timeframe');
   }
-  if (cmd.startTime || cmd.endTime) {
+  const wantsCandle = textRequestsCandleQuery(t) || (cmd.intent === 'candle_query' && !textRequestsAnalysis(t));
+  if ((cmd.startTime || cmd.endTime) && (!textRequestsAnalysis(t) || wantsCandle)) {
     dims.add('absoluteTime');
-  } else if (textRequestsAbsoluteTime(t)) {
+  } else if (textRequestsAbsoluteTime(t) && !textRequestsAnalysis(t)) {
     dims.add('absoluteTime');
   }
   if (cmd.relativeMinutes !== undefined) {
@@ -124,19 +146,22 @@ export function getRequestedDimensions(
   } else if (textRequestsRelativeSeek(t)) {
     dims.add('relativeSeek');
   }
-  if (cmd.speed !== undefined || ['play', 'pause', 'rewind', 'fast_forward', 'set_speed', 'seek'].includes(cmd.intent)) {
+  if (
+    (cmd.speed !== undefined || ['play', 'pause', 'rewind', 'fast_forward', 'set_speed', 'seek'].includes(cmd.intent)) &&
+    !textRequestsAnalysis(t)
+  ) {
     dims.add('playbackControl');
   } else if (textRequestsPlaybackControl(t)) {
     dims.add('playbackControl');
   }
-  if (cmd.intent === 'candle_query') {
-    dims.add('candleQuery');
-    if (cmd.startTime || cmd.endTime) dims.add('absoluteTime');
-  } else if (textRequestsCandleQuery(t)) {
+  if (wantsCandle) {
     dims.add('candleQuery');
   }
   if (textRequestsPreviousSymbol(t)) {
     dims.add('previousSymbol');
+  }
+  if (textRequestsAnalysis(t)) {
+    dims.add('analysisRequest');
   }
   return dims;
 }
