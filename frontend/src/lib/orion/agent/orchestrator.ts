@@ -558,7 +558,7 @@ function overlayGroundedIntent(model: ChartActionIntent, grounded: ChartActionIn
  *   4. Strip it if it is an unsupported optional field.
  * If no meaningful grounded action remains, the entire intent is rejected.
  */
-function sanitizeIntentGrounding(
+export function sanitizeIntentGrounding(
   resolved: ChartActionIntent,
   text: string,
   originalContextReference: ChartActionIntent['contextReference'],

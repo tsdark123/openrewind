@@ -950,7 +950,7 @@ function isFieldGrounded(
   return false;
 }
 
-function preValidateSanitize(raw: Record<string, unknown>, text: string, requestContext?: RequestContext): void {
+export function preValidateSanitize(raw: Record<string, unknown>, text: string, requestContext?: RequestContext): void {
   if (raw.kind !== 'chart_action') return;
 
   const requested = buildRequestedSet(text, raw, requestContext);
