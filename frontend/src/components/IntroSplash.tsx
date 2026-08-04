@@ -15,7 +15,7 @@ export function IntroSplash({ onFinished, lightMode = false }: IntroSplashProps)
     const hold = setTimeout(() => {
       setFadeOut(true);
       setTimeout(() => onFinishedRef.current(), 400);
-    }, 2000);
+    }, 1500);
     return () => clearTimeout(hold);
   }, []);
 
@@ -29,10 +29,10 @@ export function IntroSplash({ onFinished, lightMode = false }: IntroSplashProps)
       <GradientShimmer
         gradient="sunrise"
         easing="smooth"
-        duration={1.45}
+        duration={1.2}
         spread={3}
         angle={105}
-        pauseBetween={1000}
+        pauseBetween={800}
         className={`text-5xl font-semibold tracking-tight sm:text-7xl ${
           lightMode ? 'text-gray-900' : 'text-white'
         }`}
