@@ -189,6 +189,10 @@ export function buildIntentExtractionPrompt(executionLog?: ExecutionContextStore
     '- "next trading session" -> date:{"kind":"relative_trading","count":1,"direction":"forward"}.',
     '- "N-minute bars" -> timeframeMinutes:N (e.g. 15m -> 15).',
     '- "quarter past X" -> seekTime:"X:15".',
+    '- "quarter to X" -> seekTime:"(X-1):45" with a.m./p.m. or 24-hour conversion (e.g. "quarter to three p.m." -> 14:45).',
+    '- "half past X" -> seekTime:"X:30".',
+    '- "noon" -> 12:00, "midnight" -> 00:00.',
+    '- "a.m." / "p.m." (with or without dots) convert to 24-hour HH:MM (e.g. "2:45 p.m." -> 14:45).',
     '- "park the replay at X" means seekTime:X (do not pause).',
     '- "move the replay X minutes earlier/ago" -> relativeSeekMinutes:-X. "X minutes later/forward" -> relativeSeekMinutes:+X.',
     '- "take me back to the previous stock" -> previousSymbol:true.',
@@ -198,6 +202,7 @@ export function buildIntentExtractionPrompt(executionLog?: ExecutionContextStore
     '- "compare this candle with the previous candle you reported" -> finalQuery:"compare_candles", compare:{"left":{"source":"latest_returned_candle"},"right":{"source":"previous_returned_candle"}}.',
     '- "compare the current chart candle with the last candle you reported" -> finalQuery:"compare_candles", compare:{"left":{"source":"current_chart_candle"},"right":{"source":"latest_returned_candle"}}.',
     '- "compare the 11:30 candle with the 11:00 candle" -> finalQuery:"compare_candles", compare:{"left":{"source":"market_time","marketTime":"11:30"},"right":{"source":"market_time","marketTime":"11:00"}}.',
+    '- seekTime, queryTime and playback.untilTime must be valid clock times (00:00-23:59). If the user gives an invalid or out-of-range time (e.g. 25:00), return clarification. Do not guess a time.',
     '- queryTime must be a clock time (HH:MM), never a phrase like "the bar" or "30 minutes earlier".',
     '- Do NOT set playback unless the user explicitly says play, pause, or play_until.',
     '- playback play_until with an end time -> {"action":"play_until","untilTime":"HH:MM"}.',
@@ -223,6 +228,8 @@ export function buildIntentExtractionPrompt(executionLog?: ExecutionContextStore
   sections.push(
     'Examples:',
     '- "set me up on <SYMBOL> for the prior trading session, use N-minute bars, park the replay at HH:MM and tell me what candle I\'m on" -> {"kind":"chart_action","symbol":"<SYMBOL>","date":{"kind":"relative_trading","count":1,"direction":"backward"},"timeframeMinutes":N,"seekTime":"HH:MM","finalQuery":"current_candle"}',
+    '- "Switch to <SYMBOL>, go back two sessions, use 15m and seek to quarter to three p.m." -> {"kind":"chart_action","symbol":"<SYMBOL>","date":{"kind":"relative_trading","count":2,"direction":"backward"},"timeframeMinutes":15,"seekTime":"14:45"}',
+    '- "Park the replay at 2:45 p.m." -> {"kind":"chart_action","seekTime":"14:45"}',
     '- "move the replay 30 minutes earlier and give me the bar" -> {"kind":"chart_action","relativeSeekMinutes":-30,"finalQuery":"current_candle"}',
     '- "take me back to the previous stock" -> {"kind":"chart_action","previousSymbol":true}',
     '- "Do that again on <SYMBOL>" -> {"kind":"chart_action","symbol":"<SYMBOL>","contextReference":{"source":"latest_successful_action","mode":"repeat"}}',
@@ -232,6 +239,7 @@ export function buildIntentExtractionPrompt(executionLog?: ExecutionContextStore
     '- "Compare this candle with the previous candle you reported" -> {"kind":"chart_action","finalQuery":"compare_candles","compare":{"left":{"source":"latest_returned_candle"},"right":{"source":"previous_returned_candle"}}}',
     '- "Compare the current chart candle with the last candle you reported" -> {"kind":"chart_action","finalQuery":"compare_candles","compare":{"left":{"source":"current_chart_candle"},"right":{"source":"latest_returned_candle"}}}',
     '- "Compare the 11:30 candle with the 11:00 candle" -> {"kind":"chart_action","finalQuery":"compare_candles","compare":{"left":{"source":"market_time","marketTime":"11:30"},"right":{"source":"market_time","marketTime":"11:00"}}}',
+    '- "Jump to 25:00." -> {"kind":"clarification","message":"25:00 is not a valid clock time. Use HH:MM (00:00-23:59)."}',
     '- "Move it over there." -> {"kind":"clarification","message":"Where should I move it?"}',
     '- "Add VWAP and backtest a crossover." -> {"kind":"unsupported","message":"VWAP and backtest crossover are not supported."}',
     '',
@@ -242,7 +250,7 @@ export function buildIntentExtractionPrompt(executionLog?: ExecutionContextStore
 }
 
 export function buildIntentRepairPrompt(validationError: string): string {
-  return `Your previous JSON failed validation: ${validationError}. Return a corrected, minified JSON object matching the same schema.`;
+  return `Your previous JSON failed validation: ${validationError}. Return a corrected, minified JSON object matching the same schema. If the error is an invalid or out-of-range clock time and the user explicitly gave it, return clarification instead of inventing a time.`;
 }
 
 // ---------------------------------------------------------------------------

@@ -232,24 +232,22 @@ describe('deterministic-LLM merge policy regression', () => {
     ctx.getState().replayDate = '2026-07-31';
     ctx.getState().sessionActive = true;
 
-    mockedOrionChat.mockResolvedValueOnce(
-      mockCompactIntent({
-        kind: 'chart_action',
-        symbol: 'NVDA',
-        seekTime: '11:15',
-        date: { kind: 'absolute', value: '2024-02-06' },
-      })
-    );
-
     const r = await handleOrionMessage({
       text: 'Take me to Nvidia next Tuesday around quarter past eleven.',
       ctx,
       setupReady: true,
     });
 
-    expect(r.route).toBe('llm-plan');
+    expect(r.route).toBe('deterministic');
     expect(r.ok).toBe(true);
-    expect(findStepArg(r.plan!, 'session.resolve_trading_date', ['input', 'date'])).toBe('2026-08-04');
+    expect(mockedOrionChat).not.toHaveBeenCalled();
+    expect(r.plan?.steps.map((s) => s.capability)).toEqual([
+      'session.resolve_trading_date',
+      'session.switch_symbol',
+      'playback.seek_to_time',
+    ]);
+    expect(ctx.getState().symbol).toBe('NVDA');
+    expect(ctx.getState().replayDate).toBe('2026-08-04');
   });
 
   it('grounded deterministic timeframe wins over a model-hallucinated timeframe', async () => {
@@ -257,24 +255,21 @@ describe('deterministic-LLM merge policy regression', () => {
     ctx.getState().replayDate = '2026-07-10';
     ctx.getState().sessionActive = true;
 
-    mockedOrionChat.mockResolvedValueOnce(
-      mockCompactIntent({
-        kind: 'chart_action',
-        symbol: 'AAPL',
-        timeframeMinutes: 60,
-        seekTime: '11:15',
-      })
-    );
-
     const r = await handleOrionMessage({
       text: 'Take me to Apple and use fifteen-minute bars, park the replay at quarter past eleven.',
       ctx,
       setupReady: true,
     });
 
-    expect(r.route).toBe('llm-plan');
+    expect(r.route).toBe('deterministic');
     expect(r.ok).toBe(true);
-    expect(findStepArg(r.plan!, 'session.resolve_symbol', ['name'])).toBe('AAPL');
+    expect(mockedOrionChat).not.toHaveBeenCalled();
+    expect(r.plan?.steps.map((s) => s.capability)).toEqual([
+      'session.switch_symbol',
+      'chart.set_timeframe',
+      'playback.seek_to_time',
+    ]);
+    expect(findStepArg(r.plan!, 'session.switch_symbol', ['symbol'])).toBe('AAPL');
     expect(findStepArg(r.plan!, 'chart.set_timeframe', ['timeframe'])).toBe(15);
     expect(findStepArg(r.plan!, 'playback.seek_to_time', ['time'])).toBe('11:15');
   });
@@ -284,23 +279,20 @@ describe('deterministic-LLM merge policy regression', () => {
     ctx.getState().replayDate = '2026-07-10';
     ctx.getState().sessionActive = true;
 
-    mockedOrionChat.mockResolvedValueOnce(
-      mockCompactIntent({
-        kind: 'chart_action',
-        symbol: 'AAPL',
-        seekTime: '11:15',
-      })
-    );
-
     const r = await handleOrionMessage({
       text: 'Take me to Apple around quarter past eleven.',
       ctx,
       setupReady: true,
     });
 
-    expect(r.route).toBe('llm-plan');
+    expect(r.route).toBe('deterministic');
     expect(r.ok).toBe(true);
-    expect(findStepArg(r.plan!, 'session.resolve_symbol', ['name'])).toBe('AAPL');
+    expect(mockedOrionChat).not.toHaveBeenCalled();
+    expect(r.plan?.steps.map((s) => s.capability)).toEqual([
+      'session.switch_symbol',
+      'playback.seek_to_time',
+    ]);
+    expect(findStepArg(r.plan!, 'session.switch_symbol', ['symbol'])).toBe('AAPL');
     expect(findStepArg(r.plan!, 'playback.seek_to_time', ['time'])).toBe('11:15');
   });
 });

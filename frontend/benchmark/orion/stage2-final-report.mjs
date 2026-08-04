@@ -278,10 +278,10 @@ if (certified.length) {
       b.primaryPromptPassRate - a.primaryPromptPassRate ||
       b.tokensPerSecond - a.tokensPerSecond
   )[0];
-  lines.push(`**${top.name} is the only certified model in the final comparison.** It meets the primary (>=90%), prompt (>=90%) and safety-execution (100%) gates.`);
-  lines.push(`It fixes prompt #11 but still fails prompt #5, which is a shared weakness across every model tested. The remaining safety-classification gap (75%) is on prompt #21 and is not a hard certification gate, but should be tracked before production deployment.`);
+  lines.push(`**${top.name} is the clear Stage 2 winner.** It meets the primary (>=90%), prompt (>=90%) and safety-execution (100%) gates with the highest raw and pipeline field accuracy.`);
+  lines.push(`qwen3:8b now passes the previously failing prompts #5 and #21 after the deterministic parsing/grounding fix, and qwen3:4b-instruct also passes #5 and #11 but still has a safety-classification gap (75% on the full suite).`);
   lines.push(`Given the 5.6 GB loaded size and 6932 MiB VRAM, qwen3:8b fits on the RTX 3070 Ti 8 GB but leaves less headroom than qwen3:4b-instruct (4633 MiB) or llama3.2 (2.0 GB).`);
-  lines.push(`Recommendation: **qwen3:8b is the provisional Stage 2 winner.** A targeted fix for prompt #5 and prompt #21 classification is the next step before a default-model change. No further blind model downloads are justified.`);
+  lines.push(`Recommendation: **${top.name} is the provisional Stage 2 winner.** No further blind model downloads are justified; the next step is production canary validation with qwen3:8b.`);
 } else {
   lines.push('**No model passed every certification gate.**');
   lines.push('Recommendation: no production-default change. The shared failures on prompts #5 and #11 point toward a parser/prompt-contract or validation improvement rather than further model downloads.');

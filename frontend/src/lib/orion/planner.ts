@@ -198,6 +198,7 @@ function numberWord(n: string): number | undefined {
   const map: Record<string, number> = {
     one: 1, two: 2, three: 3, four: 4, five: 5,
     six: 6, seven: 7, eight: 8, nine: 9, ten: 10,
+    eleven: 11, twelve: 12,
   };
   const digit = parseInt(n, 10);
   if (!Number.isNaN(digit)) return digit;
@@ -244,6 +245,22 @@ function extractSymbolAndDate(
   return { date };
 }
 
+function normalizeMeridian(meridian?: string): 'am' | 'pm' | undefined {
+  if (!meridian) return undefined;
+  const t = meridian.toLowerCase().replace(/[^a-z]/g, '');
+  if (t === 'am' || t === 'pm') return t;
+  if (/in\s+the\s+morning/i.test(meridian)) return 'am';
+  if (/in\s+the\s+(afternoon|evening|night)/i.test(meridian)) return 'pm';
+  return undefined;
+}
+
+function defaultMeridianForHour(hour: number, token: string): 'am' | 'pm' | undefined {
+  if (token === 'noon' || token === 'midnight') return undefined;
+  if (hour >= 1 && hour <= 6) return 'pm';
+  if (hour >= 7 && hour <= 11) return 'am';
+  return undefined;
+}
+
 function parse24hTime(hour: number, minute: number, meridian?: string): ParsedTime | null {
   let h = hour;
   const m = minute;
@@ -252,6 +269,15 @@ function parse24hTime(hour: number, minute: number, meridian?: string): ParsedTi
   if (md === 'pm' && h !== 12) h += 12;
   if (h < 0 || h > 23 || m < 0 || m > 59) return null;
   return { hour: h, minute: m };
+}
+
+function parseHourToken(token: string): number | undefined {
+  const lowered = token.toLowerCase();
+  if (lowered === 'noon') return 12;
+  if (lowered === 'midnight') return 0;
+  const digit = parseInt(token, 10);
+  if (!Number.isNaN(digit)) return digit;
+  return numberWord(token);
 }
 
 export function extractTimes(text: string): ParsedTime[] {
@@ -267,14 +293,30 @@ export function extractTimes(text: string): ParsedTime[] {
     matches.push({ time: t, index });
   };
 
-  // "2:30pm", "14:00", etc.
-  for (const m of text.matchAll(/\b(\d{1,2}):(\d{2})(?::\d{2})?\s*(am|pm)?\b/gi)) {
-    add(parseInt(m[1], 10), parseInt(m[2], 10), m.index ?? 0, m[3]);
+  // "2:30pm", "2:30 p.m.", "14:00", etc.
+  for (const m of text.matchAll(/\b(\d{1,2}):(\d{2})(?::\d{2})?\s*(a\.?m\.?|p\.?m\.?)?\b/gi)) {
+    add(parseInt(m[1], 10), parseInt(m[2], 10), m.index ?? 0, normalizeMeridian(m[3]));
   }
 
-  // "2pm", "2 pm" — speed markers like "10x" are ignored because they lack am/pm.
-  for (const m of text.matchAll(/\b(\d{1,2})\s*(am|pm)\b/gi)) {
-    add(parseInt(m[1], 10), 0, m.index ?? 0, m[2]);
+  // "2pm", "2 p.m." — speed markers like "10x" are ignored because they lack am/pm.
+  // (?<!:) prevents matching the minutes of a colon time (e.g. "20" in "10:20am").
+  for (const m of text.matchAll(/\b(?<!:)(\d{1,2})\s*(a\.?m\.?|p\.?m\.?)\b/gi)) {
+    add(parseInt(m[1], 10), 0, m.index ?? 0, normalizeMeridian(m[2]));
+  }
+
+  // Spelled-out hours with a meridian or time-of-day phrase: "three p.m.", "two in the afternoon".
+  // Negative lookbehind skips the hour word inside a colloquial phrase such as
+  // "quarter past three p.m." — that is handled by the colloquial regex above.
+  const hourWords = 'one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve';
+  const wordHourRe = new RegExp(
+    `(?<!\\b(?:quarter|half)\\s+(?:past|to)\\s+)(?:^|\\b)(${hourWords})\\s*(a\\.?m\\.?|p\\.?m\\.?|in\\s+the\\s+(morning|afternoon|evening|night))\\b`,
+    'gi'
+  );
+  for (const m of text.matchAll(wordHourRe)) {
+    const hour = parseHourToken(m[1]);
+    if (hour !== undefined) {
+      add(hour, 0, m.index ?? 0, normalizeMeridian(m[2]));
+    }
   }
 
   const marketOpen = /\bmarket\s+open\b/i.exec(text);
@@ -283,11 +325,38 @@ export function extractTimes(text: string): ParsedTime[] {
   const marketClose = /\bmarket\s+close\b/i.exec(text);
   if (marketClose && marketClose.index !== undefined) add(16, 0, marketClose.index, undefined);
 
-  const noon = /\b(noon|midday)\b/i.exec(text);
+  const noon = /(?<!\b(?:quarter|half)\s+(?:past|to)\s+)\b(noon|midday)\b/i.exec(text);
   if (noon && noon.index !== undefined) add(12, 0, noon.index, undefined);
 
-  const midnight = /\bmidnight\b/i.exec(text);
+  const midnight = /(?<!\b(?:quarter|half)\s+(?:past|to)\s+)\bmidnight\b/i.exec(text);
   if (midnight && midnight.index !== undefined) add(0, 0, midnight.index, undefined);
+
+  // Colloquial times: "quarter to three p.m.", "half past eleven in the morning", etc.
+  for (const m of text.matchAll(/(?:^|\b)(quarter|half)\s+(past|to)\s+(\d{1,2}|(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|noon|midnight))(?:\s+(a\.?m\.?|p\.?m\.?|in\s+the\s+(morning|afternoon|evening|night)))?/gi)) {
+    const offset = m[1].toLowerCase() === 'quarter' ? 15 : 30;
+    const relation = m[2].toLowerCase();
+    const token = m[3];
+    const hour = parseHourToken(token);
+    if (hour === undefined) continue;
+
+    let h: number;
+    let min: number;
+    if (relation === 'past') {
+      h = hour;
+      min = offset;
+    } else {
+      h = hour - 1;
+      min = 60 - offset;
+    }
+    if (h < 0) h += 24;
+    if (min >= 60) {
+      h += 1;
+      min -= 60;
+    }
+
+    const meridian = normalizeMeridian(m[4]) || defaultMeridianForHour(hour, token);
+    add(h, min, m.index ?? 0, meridian);
+  }
 
   // Sort by the position the expression appeared in the original text so that
   // "from X to Y" yields X as startTime and Y as endTime.
@@ -309,7 +378,7 @@ function extractSpeed(text: string): number | undefined {
   // "on 10" or "at 10" when the user forgets the x, with a tolerated filler
   // like "on like 25" or "at about 10".
   const bare = text.match(
-    /\b(?:on|at)(?:\s+(?:like|about|around|roughly|maybe|approx|approximately))?\s+(\d{1,3})(?![\d:]|\s*(?:am|pm)\b)\b/i
+    /\b(?:on|at)(?:\s+(?:like|about|around|roughly|maybe|approx|approximately))?\s+(\d{1,3})(?![\d:]|\s*(?:a\.?m\.?|p\.?m\.?)\b)\b/i
   );
   if (bare) {
     const n = parseInt(bare[1], 10);
@@ -458,9 +527,15 @@ function detectIntent(text: string, e: {
   const dayNames = 'sunday|monday|tuesday|wednesday|thursday|friday|saturday';
   const stepForwardRe = new RegExp(`\\b(next(?!\\s+(?:week|${dayNames}\\b)))(?:\\s+(?:step|candle))?\\b|\\b(step forward|advance one|forward one)\\b`, 'i');
   const stepBackwardRe = new RegExp(`\\b(previous(?!\\s+(?:week|${dayNames}\\b)))(?:\\s+(?:step|candle))?\\b|\\b(step back|back one|rewind one)\\b`, 'i');
-  if (stepForwardRe.test(t)) return 'step_forward';
-  if (stepBackwardRe.test(t)) return 'step_backward';
-  if (/\b(jump|seek)\b/i.test(t)) return 'seek';
+  // Avoid treating a compound "switch to X, go back N sessions, set Ym and seek to ..."
+  // as a pure seek/step when the sentence actually names a symbol, date and execution details.
+  const looksCompound =
+    e.symbol !== undefined &&
+    (e.dateInput !== undefined || e.timeframe !== undefined || e.times.length > 0 || e.speed !== undefined);
+
+  if (stepForwardRe.test(t) && !looksCompound) return 'step_forward';
+  if (stepBackwardRe.test(t) && !looksCompound) return 'step_backward';
+  if (/\b(jump|seek)\b/i.test(t) && !looksCompound) return 'seek';
 
   // Any explicit or inferred timeframe request takes precedence only when
   // the user is not already naming a symbol/playback sequence or a relative
@@ -472,16 +547,31 @@ function detectIntent(text: string, e: {
   if (e.timeframe !== undefined && !e.symbol && !hasRelativeMotion) return 'set_timeframe';
 
   // Candle/price queries at a specific time.
-  if (e.times.length > 0 && /\b(price|candle|cost|worth|value|ohlcv)\b/i.test(text) && !/\b(play|rewind|fast[- ]?forward|seek|switch|go to|show me)\b/i.test(t)) {
+  // Exclude switch/setup phrases so "set me up on X at 11:15 and tell me the candle" remains a switch.
+  if (
+    e.times.length > 0 &&
+    /\b(price|candle|cost|worth|value|ohlcv)\b/i.test(text) &&
+    !/\b(play|rewind|fast[- ]?forward|seek|switch|go to|show me|set\s+(?:me\s+)?(?:up|on)|put\s+(?:me\s+)?(?:up|on))\b/i.test(t)
+  ) {
     return 'candle_query';
   }
 
   // Time-based motion without explicit verb can be inferred from direction.
   if (e.times.length > 0 || e.relative !== undefined) {
     if (/(?:fast[- ]?forward|fastforward|ff|skip ahead|fast forward)\b/i.test(t)) return 'fast_forward';
+
+    // Compound "switch to X, go back N sessions, set Ym and seek to ..." routes as a switch
+    // before the generic "go back" / "back" direction inference.
+    if (
+      e.symbol &&
+      e.relative === undefined &&
+      (e.dateInput !== undefined || e.timeframe !== undefined || e.times.length > 0)
+    ) {
+      return 'switch';
+    }
+
     if (/(?:rewind|reverse|go back|back up|skip back)\b/i.test(t)) return 'rewind';
     if (/\b(?:play|run)\b/i.test(t)) return e.times.length > 0 || e.relative !== undefined ? 'fast_forward' : 'play';
-    if (e.direction === 'backward' || /\bback(?:ward)?\b/i.test(t)) return 'rewind';
     if (e.symbol || e.date || /\b(switch|change to|load|open)\b/i.test(t) || (e.times.length === 0 && /\b(show|go to)\b/i.test(t))) {
       // "switch to AAPL and fast forward to 1:47" still carries times, so it
       // lands here only if no playback verb was found. Treat as switch and let
