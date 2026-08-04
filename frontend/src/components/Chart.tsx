@@ -34,7 +34,7 @@ interface ChartTheme {
 }
 
 const CHART_THEME: ChartTheme = {
-  bg: '#121416',
+  bg: '#0a0a0a',
   text: '#787b86',
   grid: '#1e222d',
   crosshair: '#4c525e',

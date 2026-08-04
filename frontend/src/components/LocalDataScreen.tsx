@@ -51,7 +51,7 @@ export function LocalDataScreen({ onBack, onEnterWorkspace, lightMode = false }:
 
   return (
     <div
-      className={`fixed inset-0 z-[80] flex flex-col ${lightMode ? 'bg-white' : 'bg-[#121416]'}`}
+      className={`fixed inset-0 z-[80] flex flex-col ${lightMode ? 'bg-white' : 'bg-[#0a0a0a]'}`}
       aria-label="Local data"
     >
       <div className="flex items-center justify-between border-b px-6 py-4">

@@ -1009,7 +1009,7 @@ export default function App() {
 
   // --- Render: Trading Workspace (FXReplay layout) ---
   return (
-    <div className={`flex h-screen w-screen flex-col overflow-hidden ${lightMode ? 'bg-gray-100 light-mode' : 'bg-[#121416]'}`}>
+    <div className={`flex h-screen w-screen flex-col overflow-hidden ${lightMode ? 'bg-gray-100 light-mode' : 'bg-[#0a0a0a]'}`}>
       {showIntro && (
         <IntroSplash
           lightMode={lightMode}
