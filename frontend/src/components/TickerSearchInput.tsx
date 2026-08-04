@@ -138,9 +138,9 @@ export function TickerSearchInput({
 
   // Styling helpers — keep dark/light parity with the rest of the app.
   const inputBaseDark =
-    'bg-[#1e222d] border-[#363a45] text-[#d1d4dc] placeholder-[#787b86] focus:border-[#2962ff]';
+    'bg-[#1e222d] border-[#363a45] text-[#d1d4dc] placeholder-[#787b86] focus:border-[#3b6fff]';
   const inputBaseLight =
-    'bg-white border-gray-300 text-gray-900 placeholder-gray-400 focus:border-[#2962ff]';
+    'bg-white border-gray-300 text-gray-900 placeholder-gray-400 focus:border-[#3b6fff]';
 
   const sizeClasses =
     size === 'lg'
@@ -205,8 +205,8 @@ export function TickerSearchInput({
               ? 'text-gray-800 hover:bg-gray-100'
               : 'text-[#d1d4dc] hover:bg-[#2a2e39]';
             const activeRow = lightMode
-              ? 'bg-[#e3f0ff] text-[#2962ff]'
-              : 'bg-[#2962ff]/15 text-[#2962ff]';
+              ? 'bg-[#e3f0ff] text-[#3b6fff]'
+              : 'bg-[#3b6fff]/15 text-[#3b6fff]';
 
             return (
               <li

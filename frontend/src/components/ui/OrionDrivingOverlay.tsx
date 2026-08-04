@@ -7,7 +7,7 @@
 //   - Block accidental clicks and keyboard shortcuts on the workspace while
 //     Orion is executing an autonomous task. Chart itself stays visible so
 //     the user sees the automation happen in real time.
-//   - Show a subtle pulsing `#ff3700` inset border and a top-center status
+//   - Show a subtle pulsing `#3b6fff` inset border and a top-center status
 //     pill so the user always knows Orion is in control.
 //   - Provide an explicit "Esc to stop" affordance. Esc is NOT swallowed
 //     by the overlay; the App's global keydown handler picks it up.
@@ -57,7 +57,7 @@ export function OrionDrivingOverlay({ visible, activityLine }: OrionDrivingOverl
         animate={{ opacity: [0.35, 0.7, 0.35] }}
         transition={{ duration: 2.4, repeat: Infinity, ease: 'easeInOut' }}
         className="pointer-events-none absolute inset-0"
-        style={{ boxShadow: 'inset 0 0 0 2px #ff3700' }}
+        style={{ boxShadow: 'inset 0 0 0 2px #3b6fff' }}
       />
 
       {/* Top-center status pill */}
@@ -68,8 +68,8 @@ export function OrionDrivingOverlay({ visible, activityLine }: OrionDrivingOverl
         transition={{ duration: 0.25 }}
         className="pointer-events-none absolute left-1/2 top-4 -translate-x-1/2 select-none"
       >
-        <div className="flex items-center gap-2 rounded-full border border-[#ff3700]/50 bg-[#121416]/95 px-3 py-1.5 text-[12px] font-medium text-[#d1d4dc] shadow-lg backdrop-blur">
-          <Sparkles className="h-3.5 w-3.5 text-[#ff3700]" />
+        <div className="flex items-center gap-2 rounded-full border border-[#3b6fff]/50 bg-[#121416]/95 px-3 py-1.5 text-[12px] font-medium text-[#d1d4dc] shadow-lg backdrop-blur">
+          <Sparkles className="h-3.5 w-3.5 text-[#3b6fff]" />
           <span>
             Orion is driving
             {activityLine ? ` — ${activityLine}` : ''}

@@ -23,7 +23,7 @@ export function Header({ connected, reconnecting, symbol, sessionActive, lightMo
           <Menu className="h-5 w-5" />
         </button>
         <div className="flex items-center">
-          <span className="text-base font-bold tracking-wide text-[#2962ff]">Open</span>
+          <span className="text-base font-bold tracking-wide text-[#3b6fff]">Open</span>
           <span className={`text-base font-bold tracking-wide ${lightMode ? 'text-gray-900' : 'text-white'}`}>Rewind</span>
         </div>
         {sessionActive && symbol && (

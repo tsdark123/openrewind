@@ -112,11 +112,11 @@ export function PlaybackControls({
         {/* Progress bar */}
         <div className={`relative h-1 w-24 rounded-full ${lightMode ? 'bg-gray-300' : 'bg-[#363a45]'}`}>
           <div
-            className="absolute left-0 top-0 h-full rounded-full bg-[#2962ff] transition-all duration-150"
+            className="absolute left-0 top-0 h-full rounded-full bg-[#3b6fff] transition-all duration-150"
             style={{ width: `${progressPercent}%` }}
           />
           <div
-            className={`absolute top-1/2 h-2.5 w-2.5 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-[#2962ff] transition-all duration-150 ${lightMode ? 'bg-white' : 'bg-[#2a2e39]'}`}
+            className={`absolute top-1/2 h-2.5 w-2.5 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-[#3b6fff] transition-all duration-150 ${lightMode ? 'bg-white' : 'bg-[#2a2e39]'}`}
             style={{ left: `${progressPercent}%` }}
           />
         </div>
@@ -127,7 +127,7 @@ export function PlaybackControls({
           disabled={disabled}
           className={`flex h-5 w-5 items-center justify-center disabled:opacity-30 ${
             playbackDirection === 'backward'
-              ? 'text-[#2962ff]'
+              ? 'text-[#3b6fff]'
               : (lightMode ? 'text-gray-600 hover:text-gray-900' : 'text-[#787b86] hover:text-[#d1d4dc]')
           }`}
         >
@@ -138,7 +138,7 @@ export function PlaybackControls({
         <button
           onClick={isPlaying ? onPause : onPlay}
           disabled={disabled}
-          className="flex h-6 w-6 items-center justify-center rounded-full bg-[#2962ff] text-white hover:bg-[#2962ff]/90 disabled:opacity-40"
+          className="flex h-6 w-6 items-center justify-center rounded-full bg-[#3b6fff] text-white hover:bg-[#3b6fff]/90 disabled:opacity-40"
         >
           {isPlaying ? <Pause className="h-3 w-3" /> : <Play className="h-3 w-3 ml-0.5" />}
         </button>
@@ -149,7 +149,7 @@ export function PlaybackControls({
           disabled={disabled}
           className={`flex h-5 w-5 items-center justify-center disabled:opacity-30 ${
             playbackDirection === 'forward'
-              ? 'text-[#2962ff]'
+              ? 'text-[#3b6fff]'
               : (lightMode ? 'text-gray-600 hover:text-gray-900' : 'text-[#787b86] hover:text-[#d1d4dc]')
           }`}
         >
@@ -175,7 +175,7 @@ export function PlaybackControls({
                   onClick={() => { onSetSpeed(s); setIsSpeedOpen(false); }}
                   className={`block w-full px-3 py-1 text-center text-xs font-mono transition-colors ${
                     speed === s
-                      ? 'text-[#2962ff] bg-[#2962ff]/10'
+                      ? 'text-[#3b6fff] bg-[#3b6fff]/10'
                       : (lightMode ? 'text-gray-600 hover:bg-gray-100 hover:text-gray-900' : 'text-[#787b86] hover:bg-[#363a45] hover:text-[#d1d4dc]')
                   }`}
                 >

@@ -104,7 +104,7 @@ export function TradeHistoryDrawer({ trades, onClearHistory, onClose, lightMode 
                         ? 'bg-[#ef5350]/10 text-[#ef5350]'
                         : trade.reason === 'tp'
                         ? 'bg-[#2e9461]/10 text-[#2e9461]'
-                        : 'bg-[#2962ff]/10 text-[#2962ff]'
+                        : 'bg-[#3b6fff]/10 text-[#3b6fff]'
                     }`}>
                       {trade.reason === 'sl' ? 'Stop Loss' : trade.reason === 'tp' ? 'Take Profit' : 'Manual'}
                     </span>

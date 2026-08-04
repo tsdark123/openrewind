@@ -88,7 +88,7 @@ export function CalendarPicker({ value, onChange, minDate, maxDate, onClose, lig
           disabled={disabled}
           className={`w-8 h-8 text-sm rounded-md transition-colors ${
             selected
-              ? 'bg-[#2962ff] text-white font-semibold'
+              ? 'bg-[#3b6fff] text-white font-semibold'
               : disabled
               ? lightMode
                 ? 'text-gray-300 cursor-not-allowed'

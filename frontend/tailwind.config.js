@@ -20,7 +20,10 @@ export default {
         accent: {
           buy: '#2e9461',
           sell: '#f23645',
-          blue: '#2962ff',
+          blue: '#3b6fff',
+        },
+        orion: {
+          terminal: '#111111',
         },
         // Trading calendar tokens (sourced from CSS variables)
         background: 'var(--calendar-background)',
@@ -43,6 +46,10 @@ export default {
       },
       fontFamily: {
         mono: ['"JetBrains Mono"', '"Fira Code"', 'Consolas', 'monospace'],
+      },
+      transitionDuration: {
+        450: '450ms',
+        600: '600ms',
       },
     },
   },

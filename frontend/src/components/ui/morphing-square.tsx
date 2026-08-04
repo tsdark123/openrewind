@@ -28,7 +28,7 @@ export function MorphingSquare({
   return (
     <div className={cn('flex gap-2 items-center justify-center', placementClasses[messagePlacement])}>
       <motion.div
-        className={cn('bg-[#ff3700] h-10 w-10', className)}
+        className={cn('bg-[#3b6fff] h-10 w-10', className)}
         animate={{
           borderRadius: ['6%', '50%', '6%'],
           rotate: [0, 180, 360],

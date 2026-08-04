@@ -379,7 +379,7 @@ export function OrionChatSidepanel({
           lightMode ? 'border-gray-200' : 'border-[#2a2e39]'
         )}
       >
-        <Sparkles className={cn('h-4 w-4 text-[#ff3700]')} />
+        <Sparkles className={cn('h-4 w-4 text-[#3b6fff]')} />
         <span className={cn('text-sm font-semibold', lightMode ? 'text-gray-900' : 'text-[#d1d4dc]')}>
           Orion
         </span>
@@ -408,7 +408,7 @@ export function OrionChatSidepanel({
             className={cn(
               'ml-auto flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px] font-medium',
               agentModelStatus === 'ready'
-                ? 'bg-[#ff3700]/15 text-[#ff3700]'
+                ? 'bg-[#3b6fff]/15 text-[#3b6fff]'
                 : lightMode
                   ? 'bg-gray-100 text-gray-600'
                   : 'bg-[#2a2e39] text-[#787b86]'
@@ -454,7 +454,7 @@ export function OrionChatSidepanel({
               className={cn(
                 'max-w-[90%] rounded-lg px-3 py-2 text-[13px] leading-relaxed',
                 msg.sender === 'user'
-                  ? 'ml-auto bg-[#ff3700] text-white'
+                  ? 'ml-auto bg-[#3b6fff] text-white'
                   : lightMode
                     ? 'mr-auto bg-gray-100 text-gray-900'
                     : 'mr-auto bg-[#2a2e39] text-[#d1d4dc]'
@@ -498,7 +498,7 @@ export function OrionChatSidepanel({
           placeholder="Ask Orion or say 'switch to NFLX'…"
           disabled={isTyping}
           className={cn(
-            'flex-1 rounded border px-2.5 py-1.5 text-[13px] outline-none transition-colors focus:ring-1 focus:ring-[#ff3700]',
+            'flex-1 rounded border px-2.5 py-1.5 text-[13px] outline-none transition-colors focus:ring-1 focus:ring-[#3b6fff]',
             lightMode
               ? 'border-gray-300 bg-white text-gray-900 placeholder:text-gray-400'
               : 'border-[#363a45] bg-[#1e222d] text-[#d1d4dc] placeholder:text-[#787b86]'
@@ -511,7 +511,7 @@ export function OrionChatSidepanel({
           className={cn(
             'flex h-8 w-8 items-center justify-center rounded transition-colors',
             input.trim() && !isTyping
-              ? 'bg-[#ff3700] text-white hover:bg-[#ff3700]/90'
+              ? 'bg-[#3b6fff] text-white hover:bg-[#3b6fff]/90'
               : lightMode
                 ? 'bg-gray-200 text-gray-400'
                 : 'bg-[#2a2e39] text-[#787b86]'

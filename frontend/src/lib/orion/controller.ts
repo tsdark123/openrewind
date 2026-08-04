@@ -8,7 +8,7 @@
 //                           the workspace verbatim at the end.
 //   2. Lock the UI        — flip controller status to 'driving' so the
 //                           <OrionDrivingOverlay/> mounts a transparent
-//                           pointer-events blocker with a pulsing #ff3700
+//                           pointer-events blocker with a pulsing #3b6fff
 //                           inset ring and an Esc-to-stop pill.
 //   3. Foreground Execute — run the queued tool calls sequentially via the
 //                           same WS `send()` and REST endpoints the human

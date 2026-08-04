@@ -89,7 +89,7 @@ export function Toolbar({ symbol, availableTickers, onSymbolChange, replayDate, 
             onClick={() => setCalendarOpen((v) => !v)}
             title="Select backtesting date (09:30–16:00 ET)"
             className={`h-6 rounded border px-2 text-[11px] font-mono tabular-nums whitespace-nowrap
-              focus:outline-none focus:ring-1 focus:ring-[#2962ff] transition-colors
+              focus:outline-none focus:ring-1 focus:ring-[#3b6fff] transition-colors
               ${
                 lightMode
                   ? 'bg-white border-gray-300 text-gray-700 hover:bg-gray-50'
@@ -122,7 +122,7 @@ export function Toolbar({ symbol, availableTickers, onSymbolChange, replayDate, 
               onClick={() => onSetTimeframe(tf.value)}
               className={`rounded px-2 py-0.5 text-[11px] font-medium transition-colors ${
                 timeframe === tf.value
-                  ? 'bg-[#2962ff]/20 text-[#2962ff]'
+                  ? 'bg-[#3b6fff]/20 text-[#3b6fff]'
                   : (lightMode ? 'text-gray-600 hover:text-gray-900' : 'text-[#787b86] hover:text-[#d1d4dc]')
               }`}
             >
@@ -180,7 +180,7 @@ export function Toolbar({ symbol, availableTickers, onSymbolChange, replayDate, 
             onClick={onToggleOrion}
             title="Toggle Orion AI coach"
             className={`flex h-6 w-6 items-center justify-center rounded transition-colors ${
-              orionOpen ? 'text-[#ff3700]' : (lightMode ? 'text-gray-600 hover:text-gray-900' : 'text-[#787b86] hover:text-[#d1d4dc]')
+              orionOpen ? 'text-[#3b6fff]' : (lightMode ? 'text-gray-600 hover:text-gray-900' : 'text-[#787b86] hover:text-[#d1d4dc]')
             }`}
           >
             <Bot className="h-4 w-4" />
@@ -192,7 +192,7 @@ export function Toolbar({ symbol, availableTickers, onSymbolChange, replayDate, 
           onClick={onToggleMarkers}
           title={showMarkers ? 'Hide trade markers' : 'Show trade markers'}
           className={`flex h-6 w-6 items-center justify-center rounded transition-colors ${
-            showMarkers ? 'text-[#2962ff]' : (lightMode ? 'text-gray-600 hover:text-gray-900' : 'text-[#787b86] hover:text-[#d1d4dc]')
+            showMarkers ? 'text-[#3b6fff]' : (lightMode ? 'text-gray-600 hover:text-gray-900' : 'text-[#787b86] hover:text-[#d1d4dc]')
           }`}
         >
           {showMarkers ? <Eye className="h-4 w-4" /> : <EyeOff className="h-4 w-4" />}
@@ -203,7 +203,7 @@ export function Toolbar({ symbol, availableTickers, onSymbolChange, replayDate, 
           onClick={onToggleLock}
           title={lockToEdge ? 'Auto-scroll ON' : 'Auto-scroll OFF'}
           className={`flex h-6 w-6 items-center justify-center rounded transition-colors ${
-            lockToEdge ? 'text-[#2962ff]' : (lightMode ? 'text-gray-600 hover:text-gray-900' : 'text-[#787b86] hover:text-[#d1d4dc]')
+            lockToEdge ? 'text-[#3b6fff]' : (lightMode ? 'text-gray-600 hover:text-gray-900' : 'text-[#787b86] hover:text-[#d1d4dc]')
           }`}
         >
           {lockToEdge ? <Lock className="h-3.5 w-3.5" /> : <Unlock className="h-3.5 w-3.5" />}

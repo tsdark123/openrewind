@@ -101,7 +101,7 @@ export function BottomPanel({
           <button
             onClick={onToggleOrderPanel}
             title="Advanced Order Settings"
-            className={`flex items-center gap-1 rounded border px-2 py-1 text-[11px] transition-colors ${lightMode ? 'border-gray-300 bg-gray-50 text-gray-600 hover:text-gray-900 hover:border-blue-400/50' : 'border-[#363a45] bg-[#1e222d] text-[#787b86] hover:text-[#d1d4dc] hover:border-[#2962ff]/50'}`}
+            className={`flex items-center gap-1 rounded border px-2 py-1 text-[11px] transition-colors ${lightMode ? 'border-gray-300 bg-gray-50 text-gray-600 hover:text-gray-900 hover:border-accent-blue/50' : 'border-[#363a45] bg-[#1e222d] text-[#787b86] hover:text-[#d1d4dc] hover:border-accent-blue/50'}`}
           >
             <Settings2 className="h-3.5 w-3.5" />
             <span>Order</span>
@@ -151,7 +151,7 @@ export function BottomPanel({
           onClick={onToggleHistory}
           title={showHistory ? 'Hide trade history' : 'Show trade history'}
           className={`flex items-center gap-1 transition-colors ${
-            showHistory ? 'text-[#2962ff]' : (lightMode ? 'text-gray-600 hover:text-gray-900' : 'text-[#787b86] hover:text-[#d1d4dc]')
+            showHistory ? 'text-[#3b6fff]' : (lightMode ? 'text-gray-600 hover:text-gray-900' : 'text-[#787b86] hover:text-[#d1d4dc]')
           }`}
         >
           <ChevronUp className={`h-4 w-4 transition-transform ${showHistory ? '' : 'rotate-180'}`} />

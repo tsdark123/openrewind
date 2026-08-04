@@ -337,7 +337,7 @@ export function OrderPanel({
               onClick={() => setOrderType('market')}
               className={`rounded px-3 py-1.5 text-[11px] font-medium transition-colors ${
                 orderType === 'market'
-                  ? 'bg-[#2962ff]/15 text-[#2962ff]'
+                  ? 'bg-[#3b6fff]/15 text-[#3b6fff]'
                   : (lightMode ? 'text-gray-600 hover:text-gray-900' : 'text-[#787b86] hover:text-[#d1d4dc]')
               }`}
             >
@@ -347,7 +347,7 @@ export function OrderPanel({
               onClick={() => setOrderType('limit')}
               className={`rounded px-3 py-1.5 text-[11px] font-medium transition-colors ${
                 orderType === 'limit'
-                  ? 'bg-[#2962ff]/15 text-[#2962ff]'
+                  ? 'bg-[#3b6fff]/15 text-[#3b6fff]'
                   : (lightMode ? 'text-gray-600 hover:text-gray-900' : 'text-[#787b86] hover:text-[#d1d4dc]')
               }`}
             >
@@ -368,7 +368,7 @@ export function OrderPanel({
               onChange={(e) => setEntryPrice(Number(e.target.value))}
               placeholder={currentPrice.toFixed(2)}
               step={0.01}
-              className={`w-full rounded border px-3 py-2 text-sm font-mono outline-none transition-colors [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none ${lightMode ? 'border-gray-300 bg-gray-50 text-gray-900 placeholder-gray-500 focus:border-blue-400' : 'border-[#363a45] bg-[#1e222d] text-[#d1d4dc] placeholder-[#787b86] focus:border-[#2962ff]'}`}
+              className={`w-full rounded border px-3 py-2 text-sm font-mono outline-none transition-colors [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none ${lightMode ? 'border-gray-300 bg-gray-50 text-gray-900 placeholder-gray-500 focus:border-accent-blue' : 'border-[#363a45] bg-[#1e222d] text-[#d1d4dc] placeholder-[#787b86] focus:border-[#3b6fff]'}`}
             />
           </div>
         )}
@@ -384,7 +384,7 @@ export function OrderPanel({
             onChange={(e) => onSetQuantity(Math.max(0, Number(e.target.value)))}
             min={1}
             step={1}
-            className={`w-full rounded border px-3 py-2 text-sm font-mono outline-none transition-colors [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none ${lightMode ? 'border-gray-300 bg-gray-50 text-gray-900 focus:border-blue-400' : 'border-[#363a45] bg-[#1e222d] text-[#d1d4dc] focus:border-[#2962ff]'}`}
+            className={`w-full rounded border px-3 py-2 text-sm font-mono outline-none transition-colors [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none ${lightMode ? 'border-gray-300 bg-gray-50 text-gray-900 focus:border-accent-blue' : 'border-[#363a45] bg-[#1e222d] text-[#d1d4dc] focus:border-[#3b6fff]'}`}
           />
           <div className="mt-1.5 flex gap-1">
             {[1, 5, 10, 25, 50, 100].map((q) => (
@@ -393,7 +393,7 @@ export function OrderPanel({
                 onClick={() => onSetQuantity(q)}
                 className={`rounded px-1.5 py-0.5 text-[10px] font-mono focus:outline-none focus:ring-0 outline-none border-transparent ${
                   quantity === q
-                    ? 'bg-[#2962ff]/15 text-[#2962ff]'
+                    ? 'bg-[#3b6fff]/15 text-[#3b6fff]'
                     : (lightMode ? 'text-gray-600 hover:text-gray-900 border border-gray-300' : 'text-[#787b86] hover:text-[#d1d4dc] border border-[#363a45]')
                 }`}
               >
@@ -422,7 +422,7 @@ export function OrderPanel({
                 ) : (
                   <button
                     onClick={suggestSL}
-                    className="text-[10px] text-[#2962ff] hover:text-[#2962ff]/80"
+                    className="text-[10px] text-[#3b6fff] hover:text-[#3b6fff]/80"
                   >
                     Update
                   </button>
@@ -432,7 +432,7 @@ export function OrderPanel({
                 !slEnabled ? (
                   <button
                     onClick={suggestSL}
-                    className="text-[10px] text-[#2962ff] hover:text-[#2962ff]/80"
+                    className="text-[10px] text-[#3b6fff] hover:text-[#3b6fff]/80"
                   >
                     + Add
                   </button>
@@ -490,7 +490,7 @@ export function OrderPanel({
                 ) : (
                   <button
                     onClick={suggestTP}
-                    className="text-[10px] text-[#2962ff] hover:text-[#2962ff]/80"
+                    className="text-[10px] text-[#3b6fff] hover:text-[#3b6fff]/80"
                   >
                     Update
                   </button>
@@ -500,7 +500,7 @@ export function OrderPanel({
                 !tpEnabled ? (
                   <button
                     onClick={suggestTP}
-                    className="text-[10px] text-[#2962ff] hover:text-[#2962ff]/80"
+                    className="text-[10px] text-[#3b6fff] hover:text-[#3b6fff]/80"
                   >
                     + Add
                   </button>
