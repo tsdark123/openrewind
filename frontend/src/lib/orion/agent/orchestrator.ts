@@ -719,10 +719,8 @@ export function sanitizeIntentGrounding(
       }
       if (pb.speed !== undefined) {
         const s = pb.speed;
-        if (cmd.speed === s) {
+        if (cmd.speed === s || s === 1 || originalContextReference?.mode === 'repeat') {
           trace.kept.push(`playback.speed:${s}`);
-        } else if (s === 1) {
-          trace.defaults.push(`playback.speed:${s}`);
         } else {
           delete pb.speed;
           trace.stripped.push(`playback.speed:${s}`);
@@ -730,7 +728,7 @@ export function sanitizeIntentGrounding(
       }
       if (pb.direction !== undefined) {
         const d = pb.direction;
-        if (cmd.direction === d || textRequestsPlaybackControl(text)) {
+        if (cmd.direction === d || originalContextReference?.mode === 'repeat' || textRequestsPlaybackControl(text)) {
           trace.kept.push(`playback.direction:${d}`);
         } else {
           delete pb.direction;

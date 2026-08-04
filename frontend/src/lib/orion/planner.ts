@@ -208,15 +208,57 @@ function numberWord(n: string): number | undefined {
 export function extractDateInput(text: string, baseDate?: string): DateInputSpec | undefined {
   const t = text.toLowerCase();
   const anchor = baseDate || new Date().toISOString().slice(0, 10);
+  const countWords = 'one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve';
 
-  const tradingMatch = /\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+trading\s+(?:session|day)s?\s+(ago|back|before)\b/.exec(t);
-  if (tradingMatch) {
-    const n = numberWord(tradingMatch[1]);
+  // "prior trading session", "previous session", "last trading day"
+  const priorMatch = /\b(?:prior|previous|last)\s+(?:trading\s+)?(?:session|day)s?\b/.exec(t);
+  if (priorMatch) {
+    return { kind: 'relative_trading', count: 1, direction: 'backward', from: anchor };
+  }
+
+  // "next trading session", "next session"
+  const nextMatch = /\b(?:next)\s+(?:trading\s+)?(?:session|day)s?\b/.exec(t);
+  if (nextMatch) {
+    return { kind: 'relative_trading', count: 1, direction: 'forward', from: anchor };
+  }
+
+  // "go back two sessions", "go back two trading sessions", "jump forward three days"
+  const goBackMatch = new RegExp(
+    `\\b(?:go|jump|move|step|skip)?\\s*(back|backward|forward|ahead)\\s+(\\d+|${countWords})\\s+(?:trading\\s+)?(?:session|day)s?\\b`,
+    'i'
+  ).exec(t);
+  if (goBackMatch) {
+    const n = numberWord(goBackMatch[2]);
     if (n !== undefined) {
-      return { kind: 'relative_trading', count: n, direction: 'backward', from: anchor };
+      const dir = goBackMatch[1].toLowerCase();
+      return {
+        kind: 'relative_trading',
+        count: n,
+        direction: dir === 'forward' || dir === 'ahead' ? 'forward' : 'backward',
+        from: anchor,
+      };
     }
   }
 
+  // "two sessions ago", "one session before", "two days back", "two sessions from now"
+  const countDirMatch = new RegExp(
+    `\\b(\\d+|${countWords})\\s+(?:trading\\s+)?(?:session|day)s?\\s+(ago|back|before|from\\s+now|ahead|later)\\b`,
+    'i'
+  ).exec(t);
+  if (countDirMatch) {
+    const n = numberWord(countDirMatch[1]);
+    const dir = countDirMatch[2].replace(/\\s+/g, ' ').trim().toLowerCase();
+    if (n !== undefined) {
+      return {
+        kind: 'relative_trading',
+        count: n,
+        direction: dir === 'from now' || dir === 'ahead' || dir === 'later' ? 'forward' : 'backward',
+        from: anchor,
+      };
+    }
+  }
+
+  // Original explicit/calendar forms.
   const explicit = parseDate(text, baseDate);
   if (explicit) return { kind: 'explicit', date: explicit };
 

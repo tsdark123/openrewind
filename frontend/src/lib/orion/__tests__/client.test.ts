@@ -79,7 +79,32 @@ describe('orion client warm-up', () => {
     expect(chatCalls).toHaveLength(2);
   });
 
-  it('chat-tier orionChat runs independently of an agent warm-up in flight', async () => {
+  it('agent orionChat with json format disables thinking by default', async () => {
+    const fetchMock = makeFetchMock((url) => {
+      if (url.includes('/api/show')) {
+        return { ok: true, status: 200, json: () => ({}) };
+      }
+      if (url.includes('/api/chat')) {
+        return { ok: true, status: 200, json: () => ({ message: { content: '{}' } }) };
+      }
+      return { ok: false, status: 404, json: () => ({}) };
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const client = await import('../client');
+    await client.orionChat({
+      tier: 'agent',
+      messages: [{ role: 'user', content: 'test' }],
+      format: 'json',
+    });
+
+    const chatCalls = fetchMock.mock.calls.filter(([url]) => String(url).includes('/api/chat'));
+    expect(chatCalls).toHaveLength(1);
+    const body = (chatCalls[0][1] as { body: string }).body;
+    expect(JSON.parse(body)).toMatchObject({ think: false });
+  });
+
+  it('chat-tier orionChat does not set think', async () => {
     let chatCall = 0;
     const fetchMock = makeFetchMock((url) => {
       if (url.includes('/api/show')) {
@@ -105,6 +130,9 @@ describe('orion client warm-up', () => {
     });
 
     expect(result.content).toBe('call-2');
+
+    const chatCalls = fetchMock.mock.calls.filter(([url]) => String(url).includes('/api/chat'));
+    expect(JSON.parse((chatCalls[1][1] as { body: string }).body)).not.toHaveProperty('think');
 
     // Finish the warm-up so the test can clean up without dangling promises.
     await warmup;

@@ -23,7 +23,15 @@ import { agentTrace } from './agent/config';
 export type OrionModelTier = 'chat' | 'agent';
 
 export const ORION_CHAT_MODEL = 'llama3.2';
-export const ORION_AGENT_MODEL = 'llama3.2:latest';
+
+function getEnvOrionAgentModel(): string | undefined {
+  const envProcess = (globalThis as typeof globalThis & { process?: { env?: Record<string, string> } }).process;
+  return envProcess?.env?.ORION_AGENT_MODEL;
+}
+
+// Production default is llama3.2:latest. The optional ORION_AGENT_MODEL env var
+// is provided for local model validation without hard-coding a dev override.
+export const ORION_AGENT_MODEL = getEnvOrionAgentModel() ?? 'llama3.2:latest';
 
 // 10 minutes as a duration string — Ollama's keep_alive accepts either a
 // duration ("10m", "1h") or a seconds integer. We use the string form so
@@ -84,6 +92,8 @@ export interface OrionChatOptions {
     num_predict?: number;
     num_ctx?: number;
   };
+  /** Ollama's qwen3-style reasoning switch. false disables the hidden thinking block. */
+  think?: boolean;
   /** Internal: bypass the warm-up wait for the agent model. */
   skipWarmup?: boolean;
 }
@@ -275,6 +285,10 @@ export async function orionChat(opts: OrionChatOptions): Promise<OrionChatRespon
   }
   if (opts.options) {
     body.options = opts.options;
+  }
+  const think = opts.think ?? (opts.tier === 'agent' ? false : undefined);
+  if (think !== undefined) {
+    body.think = think;
   }
 
   const res = await ollamaFetch('/api/chat', {

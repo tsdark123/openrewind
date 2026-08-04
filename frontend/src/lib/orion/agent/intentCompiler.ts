@@ -263,6 +263,28 @@ export function resolveContextReference(
       if (key === 'contextReference') continue;
       mergeField(key);
     }
+
+    // Playback is a multi-field object; a repeat like "Do that again on NVDA" may
+    // have only the action in the new utterance, but it must still inherit speed,
+    // untilTime and direction from the prior action when those are not re-specified.
+    const targetPb = merged.playback;
+    const sourcePb = source.playback;
+    if (targetPb && sourcePb) {
+      if (targetPb.action === undefined) targetPb.action = sourcePb.action;
+      if (targetPb.speed === undefined) targetPb.speed = sourcePb.speed;
+      if (targetPb.untilTime === undefined) targetPb.untilTime = sourcePb.untilTime;
+      if (targetPb.direction === undefined) targetPb.direction = sourcePb.direction;
+    }
+
+    // The source template may have had dimensions stripped by the sanitizer (e.g.
+    // the date on a bare "Play from here..." command). Fall back to the verified
+    // after-state for any fields the new request did not re-specify.
+    if (merged.date === undefined && after?.date) {
+      merged.date = { kind: 'absolute', value: after.date };
+    }
+    if (merged.timeframeMinutes === undefined && after?.timeframe !== undefined) {
+      merged.timeframeMinutes = after.timeframe;
+    }
   } else if (ref.mode === 'inherit') {
     if (!ref.inherit || ref.inherit.length === 0) {
       return { ok: false, error: 'inherit mode requires an inherit list.' };

@@ -20,7 +20,7 @@ import {
 import type { AppAction, AppState, PerformanceLog } from '../../types';
 import type { ChartHandle } from '../Chart';
 
-const ORION_MODEL = 'llama3.2';
+const ORION_MODEL = ((import.meta as any).env?.VITE_ORION_AGENT_MODEL as string | undefined) ?? 'llama3.2';
 
 const WELCOME_TEXT = `[SYSTEM INITIALIZED] - Orion Terminal v1.0
 

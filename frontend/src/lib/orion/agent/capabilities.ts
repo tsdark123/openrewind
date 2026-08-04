@@ -394,7 +394,9 @@ registerCapability({
     const hasData = async (date: string): Promise<boolean> => {
       try {
         const probe = await fetchCandles({ symbol, date, timeframe: 1, limit: 1, dataDir: ctx.dataDir }, ctx.apiBase);
-        return !probe.missing;
+        // A fallback result means the requested date is not itself a trading
+        // session; the resolver must keep walking rather than accepting it.
+        return !probe.missing && !probe.fallbackUsed;
       } catch (e) {
         console.warn('[agent] resolve_trading_date probe failed:', e);
         return false;

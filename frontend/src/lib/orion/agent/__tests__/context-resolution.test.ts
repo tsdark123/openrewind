@@ -96,7 +96,7 @@ describe('resolveContextReference', () => {
     ctx.executionLog.record(makeEntry({ kind: 'chart_action', symbol: 'AAPL', timeframeMinutes: 5 }, true));
     const r = resolveContextReference({ kind: 'chart_action', contextReference: { source: 'latest_successful_action', mode: 'repeat' } }, ctx);
     expect(r.ok).toBe(true);
-    expect(r.intent).toEqual({ kind: 'chart_action', symbol: 'AAPL', timeframeMinutes: 5 });
+    expect(r.intent).toEqual({ kind: 'chart_action', symbol: 'AAPL', date: { kind: 'absolute', value: '2026-07-10' }, timeframeMinutes: 5 });
   });
 
   it('inherits only the requested fields', () => {
@@ -119,6 +119,65 @@ describe('resolveContextReference', () => {
     const r = resolveContextReference({ kind: 'chart_action', contextReference: { source: 'latest_successful_action', mode: 'repeat' } }, ctx);
     expect(r.ok).toBe(false);
     expect(r.error).toMatch(/No prior successful action/);
+  });
+
+  it('repeats playback action with symbol override and preserves speed/untilTime', () => {
+    const ctx = makeContext();
+    ctx.executionLog.record(
+      makeEntry(
+        {
+          kind: 'chart_action',
+          symbol: 'AAPL',
+          playback: { action: 'play_until', speed: 4, untilTime: '15:45', direction: 'forward' },
+        },
+        true
+      )
+    );
+    const r = resolveContextReference(
+      {
+        kind: 'chart_action',
+        symbol: 'NVDA',
+        contextReference: { source: 'latest_successful_action', mode: 'repeat' },
+      },
+      ctx
+    );
+    expect(r.ok).toBe(true);
+    expect(r.intent.symbol).toBe('NVDA');
+    expect(r.intent.playback).toEqual({
+      action: 'play_until',
+      speed: 4,
+      untilTime: '15:45',
+      direction: 'forward',
+    });
+  });
+
+  it('repeats playback action and fills missing subfields from the prior action', () => {
+    const ctx = makeContext();
+    ctx.executionLog.record(
+      makeEntry(
+        {
+          kind: 'chart_action',
+          symbol: 'AAPL',
+          playback: { action: 'play_until', speed: 4, untilTime: '15:45' },
+        },
+        true
+      )
+    );
+    const r = resolveContextReference(
+      {
+        kind: 'chart_action',
+        symbol: 'NVDA',
+        playback: { action: 'play_until' },
+        contextReference: { source: 'latest_successful_action', mode: 'repeat' },
+      },
+      ctx
+    );
+    expect(r.ok).toBe(true);
+    expect(r.intent.playback).toEqual({
+      action: 'play_until',
+      speed: 4,
+      untilTime: '15:45',
+    });
   });
 
   it('rejects repeat of a failed action', () => {

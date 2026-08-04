@@ -51,13 +51,9 @@ export function textRequestsTimeframe(t: string): boolean {
 }
 
 export function textRequestsDate(t: string): boolean {
-  return (
-    /\b(?:prior|previous|last)\s+(?:trading\s+)?(?:session|day)s?\b/i.test(t) ||
-    /\b(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:trading\s+)?(?:session|day)s?\s+(?:ago|back|before)\b/i.test(t) ||
-    /\b(?:yesterday|today|tomorrow)\b/i.test(t) ||
-    /\b\d{4}-\d{1,2}-\d{1,2}\b/.test(t) ||
-    /\b\d{1,2}\/\d{1,2}\/\d{4}\b/.test(t)
-  );
+  // Reuse the planner's actual date extractor so any relative trading-session
+  // phrase it recognizes is also treated as a date request here.
+  return extractDateInput(t) !== undefined;
 }
 
 export function textRequestsAbsoluteTime(t: string): boolean {
