@@ -13,6 +13,7 @@
 #include <memory>
 #include <thread>
 #include <condition_variable>
+#include <optional>
 
 // =============================================================================
 // OpenRewindServer — Crow-based HTTP/WebSocket server for OpenRewind.
@@ -38,7 +39,9 @@ using json = nlohmann::json;
 
 class OpenRewindServer {
 public:
-    explicit OpenRewindServer(int port = 9000, std::string data_dir = "data");
+    explicit OpenRewindServer(int port = 9000,
+                              std::string data_dir = "data",
+                              std::optional<std::string> local_data_dir = std::nullopt);
     ~OpenRewindServer();
 
     // Start the Crow server (blocking). Call from main().
@@ -52,6 +55,7 @@ private:
     crow::App<crow::CORSHandler> app_;
     int port_;
     std::string data_dir_;
+    std::optional<std::string> local_data_dir_;
 
     // --- Core Session ---
     SessionManager session_;

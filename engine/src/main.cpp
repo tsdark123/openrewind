@@ -2,6 +2,10 @@
 
 #include <iostream>
 #include <cstdlib>
+#include <filesystem>
+#include <optional>
+#include <string>
+#include <system_error>
 
 // =============================================================================
 // OpenRewind Engine — Entry Point
@@ -32,14 +36,32 @@ int main() {
         data_dir = data_dir_env;
     }
 
+    // Optional: local data directory that the user may import CSVs into.
+    // The Tauri sidecar passes this as an absolute path.
+    std::optional<std::string> local_data_dir;
+    const char* local_env = std::getenv("OPENREWIND_LOCAL_DATA_DIR");
+    if (local_env && local_env[0] != '\0') {
+        std::error_code ec;
+        std::filesystem::path local_path = std::filesystem::absolute(local_env, ec);
+        if (!ec) {
+            local_data_dir = local_path.string();
+        } else {
+            std::cerr << "[OpenRewind] Ignoring invalid OPENREWIND_LOCAL_DATA_DIR: "
+                      << local_env << std::endl;
+        }
+    }
+
     std::cout << "========================================" << std::endl;
     std::cout << "  OpenRewind Engine v0.1.0"              << std::endl;
     std::cout << "  Market Replay & Backtesting Server"    << std::endl;
     std::cout << "  Data directory: " << data_dir          << std::endl;
+    if (local_data_dir) {
+        std::cout << "  Local data dir: " << *local_data_dir << std::endl;
+    }
     std::cout << "========================================" << std::endl;
 
     try {
-        OpenRewindServer server(port, data_dir);
+        OpenRewindServer server(port, data_dir, local_data_dir);
         server.run();
     }
     catch (const std::exception& e) {

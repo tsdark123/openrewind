@@ -58,10 +58,12 @@ export function sessionStartBody(params: {
 export async function fetchAvailableDates(
   apiBase: string,
   symbol: string,
-  dataDir?: string
+  dataDir?: string,
+  options?: { signal?: AbortSignal }
 ): Promise<AvailableDatesResult> {
   const res = await fetch(
-    engineUrl(apiBase, '/api/available_dates', { symbol }, dataDir)
+    engineUrl(apiBase, '/api/available_dates', { symbol }, dataDir),
+    options
   );
   if (!res.ok) {
     throw new Error(`Engine returned ${res.status}`);

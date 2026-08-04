@@ -32,6 +32,8 @@ set(ENGINE_SOURCES
     src/matching.cpp
     src/session.cpp
     src/server.cpp
+    src/child_process.cpp
+    src/path_utils.cpp
 )
 
 set(ENGINE_HEADERS
@@ -40,6 +42,8 @@ set(ENGINE_HEADERS
     include/matching.hpp
     include/session.hpp
     include/server.hpp
+    include/child_process.hpp
+    include/path_utils.hpp
 )
 
 # ==============================================================================
@@ -144,6 +148,56 @@ add_custom_command(TARGET openrewind-engine POST_BUILD
         "${SIDECAR_DEST}"
     COMMENT "Copying engine sidecar → src-tauri/binaries/${SIDECAR_NAME}"
 )
+
+# ==============================================================================
+# Engine utility tests
+#
+# A focused test executable for child_process and path_utils.  It intentionally
+# does NOT link Crow or nlohmann_json — only the two utility sources and the
+# test file itself.
+# ==============================================================================
+
+set(ENGINE_TEST_SOURCES
+    tests/engine_utils_test.cpp
+    src/child_process.cpp
+    src/path_utils.cpp
+)
+
+add_executable(openrewind-engine-tests ${ENGINE_TEST_SOURCES})
+
+target_include_directories(openrewind-engine-tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+if(MSVC)
+    target_compile_options(openrewind-engine-tests PRIVATE
+        /W4
+        /permissive-
+        /utf-8
+        /Zc:__cplusplus
+    )
+    target_compile_definitions(openrewind-engine-tests PRIVATE
+        _WIN32_WINNT=0x0A00
+        _CRT_SECURE_NO_WARNINGS
+        NOMINMAX
+    )
+    set_property(TARGET openrewind-engine-tests PROPERTY
+        MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
+    )
+else()
+    target_compile_options(openrewind-engine-tests PRIVATE
+        -Wall -Wextra -Wpedantic
+    )
+    if(NOT APPLE)
+        target_link_options(openrewind-engine-tests PRIVATE
+            -static-libgcc
+            -static-libstdc++
+        )
+    endif()
+endif()
+
+find_package(Threads REQUIRED)
+target_link_libraries(openrewind-engine-tests PRIVATE Threads::Threads)
 
 # ==============================================================================
 # Install (optional — for packaging)

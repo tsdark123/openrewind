@@ -13,13 +13,16 @@ interface CalendarPickerProps {
 }
 
 export function CalendarPicker({ value, onChange, minDate, maxDate, availableDates = [], onClose, lightMode = false }: CalendarPickerProps) {
-  const [currentMonth, setCurrentMonth] = useState(() => {
-    const d = value ? new Date(value) : new Date();
-    return new Date(d.getFullYear(), d.getMonth(), 1);
-  });
+  const initialMonth = (() => {
+    if (!value) return new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), 1));
+    const [y, m] = value.split('-').map(Number);
+    return new Date(Date.UTC(y, m - 1, 1));
+  })();
 
-  const daysInMonth = new Date(currentMonth.getFullYear(), currentMonth.getMonth() + 1, 0).getDate();
-  const firstDayOfMonth = new Date(currentMonth.getFullYear(), currentMonth.getMonth(), 1).getDay();
+  const [currentMonth, setCurrentMonth] = useState(initialMonth);
+
+  const daysInMonth = new Date(Date.UTC(currentMonth.getUTCFullYear(), currentMonth.getUTCMonth() + 1, 0)).getUTCDate();
+  const firstDayOfMonth = new Date(Date.UTC(currentMonth.getUTCFullYear(), currentMonth.getUTCMonth(), 1)).getUTCDay();
   const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
   const dayNames = ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'];
 
@@ -35,34 +38,34 @@ export function CalendarPicker({ value, onChange, minDate, maxDate, availableDat
   };
 
   const handlePrevMonth = () => {
-    setCurrentMonth(new Date(currentMonth.getFullYear(), currentMonth.getMonth() - 1, 1));
+    setCurrentMonth(new Date(Date.UTC(currentMonth.getUTCFullYear(), currentMonth.getUTCMonth() - 1, 1)));
   };
 
   const handleNextMonth = () => {
-    setCurrentMonth(new Date(currentMonth.getFullYear(), currentMonth.getMonth() + 1, 1));
+    setCurrentMonth(new Date(Date.UTC(currentMonth.getUTCFullYear(), currentMonth.getUTCMonth() + 1, 1)));
   };
 
   const renderDays = () => {
     const days = [];
-    const prevMonthDays = new Date(currentMonth.getFullYear(), currentMonth.getMonth(), 0).getDate();
+    const prevMonthDays = new Date(Date.UTC(currentMonth.getUTCFullYear(), currentMonth.getUTCMonth(), 0)).getUTCDate();
 
     // Previous month padding
     for (let i = firstDayOfMonth - 1; i >= 0; i--) {
-      const date = new Date(currentMonth.getFullYear(), currentMonth.getMonth() - 1, prevMonthDays - i);
+      const date = new Date(Date.UTC(currentMonth.getUTCFullYear(), currentMonth.getUTCMonth() - 1, prevMonthDays - i, 12, 0, 0));
       days.push(
         <button
           key={`prev-${i}`}
           disabled
           className={`w-8 h-8 text-sm cursor-not-allowed ${lightMode ? 'text-gray-300' : 'text-[#4a4d55]'}`}
         >
-          {date.getDate()}
+          {date.getUTCDate()}
         </button>
       );
     }
 
     // Current month days
     for (let i = 1; i <= daysInMonth; i++) {
-      const date = new Date(currentMonth.getFullYear(), currentMonth.getMonth(), i);
+      const date = new Date(Date.UTC(currentMonth.getUTCFullYear(), currentMonth.getUTCMonth(), i, 12, 0, 0));
       const disabled = isDateDisabled(date);
       const selected = isSelected(date);
       const unavailable = isUnavailable(date);
@@ -93,14 +96,14 @@ export function CalendarPicker({ value, onChange, minDate, maxDate, availableDat
     const totalCells = days.length;
     const remainingCells = 42 - totalCells; // 6 rows of 7 days
     for (let i = 1; i <= remainingCells; i++) {
-      const date = new Date(currentMonth.getFullYear(), currentMonth.getMonth() + 1, i);
+      const date = new Date(Date.UTC(currentMonth.getUTCFullYear(), currentMonth.getUTCMonth() + 1, i, 12, 0, 0));
       days.push(
         <button
           key={`next-${i}`}
           disabled
           className={`w-8 h-8 text-sm cursor-not-allowed ${lightMode ? 'text-gray-300' : 'text-[#4a4d55]'}`}
         >
-          {date.getDate()}
+          {date.getUTCDate()}
         </button>
       );
     }
@@ -119,7 +122,7 @@ export function CalendarPicker({ value, onChange, minDate, maxDate, availableDat
           <ChevronLeft size={18} />
         </button>
         <span className={`text-sm font-semibold ${lightMode ? 'text-gray-900' : 'text-[#d1d4dc]'}`}>
-          {monthNames[currentMonth.getMonth()]} {currentMonth.getFullYear()}
+          {monthNames[currentMonth.getUTCMonth()]} {currentMonth.getUTCFullYear()}
         </span>
         <button
           onClick={handleNextMonth}

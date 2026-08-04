@@ -2,6 +2,7 @@ import { RotateCcw, Settings, Lock, Unlock, Eye, EyeOff, Sun, Moon, CalendarDays
 import { IndicatorsDropdown } from '../IndicatorsDropdown';
 import { TickerSearchInput } from '../TickerSearchInput';
 import { useState, useMemo } from 'react';
+import { getCalendarBounds } from '../../lib/marketDate';
 import { CalendarPicker } from './CalendarPicker';
 
 const TIMEFRAME_OPTIONS = [
@@ -52,14 +53,9 @@ export function Toolbar({ symbol, availableTickers, availableDates, onSymbolChan
 
   console.log('[Orion Diagnostic] Toolbar render', { symbol, availableTickers: availableTickers.length, replayDate, lightMode, orionOpen });
 
-  // Rolling 30-day window — matches the yfinance data retention in fetch_data.py.
-  const { todayStr, minDateStr } = useMemo(() => {
-    const now = new Date();
-    const todayStr = now.toISOString().slice(0, 10);
-    const min = new Date(now);
-    min.setDate(now.getDate() - 30);
-    return { todayStr, minDateStr: min.toISOString().slice(0, 10) };
-  }, []);
+  // Rolling 30-day window in America/New_York.  Matches the yfinance data
+  // retention in fetch_data.py and is stable for users in any timezone.
+  const { maxDate: todayStr, minDate: minDateStr } = useMemo(() => getCalendarBounds(), []);
 
   return (
     <div className={`flex h-9 items-center justify-between border-b px-3 ${lightMode ? 'bg-white border-gray-200' : 'bg-[#121416] border-[#2a2e39]'}`}>

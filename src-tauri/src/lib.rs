@@ -452,11 +452,20 @@ pub fn run() {
             // on CWD, which Windows can set to System32 for installed apps.
             let data_dir = resource_dir.join("data");
 
+            // Pass the user-local data root (imported CSVs) to the engine so
+            // it can authorize /api/... requests against it.
+            let local_data_dir = local_data::get_local_data_dir(app.handle().clone())
+                .unwrap_or_else(|e| {
+                    eprintln!("Failed to resolve local data dir: {e}");
+                    data_dir.to_string_lossy().into_owned()
+                });
+
             let (_rx, child) = app
                 .shell()
                 .sidecar("openrewind-engine")
                 .expect("openrewind-engine sidecar not found — run the CMake build first")
                 .env("OPENREWIND_DATA_DIR", data_dir.to_string_lossy().as_ref())
+                .env("OPENREWIND_LOCAL_DATA_DIR", local_data_dir.as_str())
                 .spawn()
                 .expect("Failed to spawn openrewind-engine sidecar");
 

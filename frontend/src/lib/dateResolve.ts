@@ -3,6 +3,8 @@
 // trading days.  Used by App.tsx for symbol switching and manual date picking.
 // =============================================================================
 
+import { formatMarketDate } from './marketDate';
+
 export interface DateResolution {
   date: string;
   fallback: boolean;
@@ -29,16 +31,8 @@ export function resolveSessionDate(
     return { date: requested, fallback: false, message: null };
   }
   const latest = available[available.length - 1];
-  const requestedDate = new Date(`${requested}T00:00:00`);
-  const latestDate = new Date(`${latest}T00:00:00`);
-  const requestedFmt = requestedDate.toLocaleDateString('en-US', {
-    month: 'short',
-    day: 'numeric',
-  });
-  const latestFmt = latestDate.toLocaleDateString('en-US', {
-    month: 'short',
-    day: 'numeric',
-  });
+  const requestedFmt = formatMarketDate(requested);
+  const latestFmt = formatMarketDate(latest);
   return {
     date: latest,
     fallback: true,

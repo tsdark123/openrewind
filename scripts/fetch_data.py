@@ -89,9 +89,8 @@ def _configure_console_encoding() -> None:
             pass
 
 
-# Call this as early as possible so every subsequent print() can use Unicode
-# symbols (box-drawing arrows, etc.) safely on Windows consoles.
-_configure_console_encoding()
+# Console encoding is configured at the start of main() so that importing
+# this module does not have side effects and so tests stay deterministic.
 
 import pandas as pd
 import yfinance as yf
@@ -478,6 +477,9 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    # Configure console encoding before any Unicode header/summary output.
+    _configure_console_encoding()
+
     symbols    = [s.upper() for s in (args.symbols or TOP_TICKERS)]
     timeframes = args.timeframes
     mode       = args.mode
@@ -556,7 +558,7 @@ def main() -> None:
     manifest_path = write_manifest(args.data_dir, manifest_data)
     print(f"Manifest written → {manifest_path}")
 
-    if not args.no_notify:
+    if fail == 0 and not args.no_notify:
         notify_engine(args.port, manifest_data)
 
     if fail > 0:

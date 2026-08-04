@@ -1,16 +1,21 @@
 /**
  * Calendar day helpers used by CalendarPicker.
+ *
+ * All date math is UTC-anchored to the year/month/day represented by the
+ * Date object's *UTC* components, so the calendar is stable for users in any
+ * timezone.  Callers should construct dates with Date.UTC or a fixed
+ * UTC-noon offset (e.g. new Date(`${date}T12:00:00Z`)).
  */
 
 /**
- * Format a local Date as YYYY-MM-DD.  Uses local date components so timezone
- * conversion does not shift the displayed day and accidentally grey out valid
- * weekdays.
+ * Format a Date as YYYY-MM-DD using UTC components.  This returns the calendar
+ * date that the Date was constructed from, independent of the browser's local
+ * timezone.
  */
 export function formatCalendarDate(date: Date): string {
-  const y = date.getFullYear();
-  const m = String(date.getMonth() + 1).padStart(2, '0');
-  const d = String(date.getDate()).padStart(2, '0');
+  const y = date.getUTCFullYear();
+  const m = String(date.getUTCMonth() + 1).padStart(2, '0');
+  const d = String(date.getUTCDate()).padStart(2, '0');
   return `${y}-${m}-${d}`;
 }
 
@@ -29,7 +34,7 @@ export function isCalendarDayDisabled(
   availableDates?: string[]
 ): boolean {
   const dateStr = formatCalendarDate(date);
-  const day = date.getDay();
+  const day = date.getUTCDay();
   if (day === 0 || day === 6) return true;
   if (dateStr < minDate || dateStr > maxDate) return true;
   if (availableDates && availableDates.length > 0 && !availableDates.includes(dateStr)) {
@@ -49,7 +54,7 @@ export function isCalendarDayUnavailable(
   availableDates?: string[]
 ): boolean {
   const dateStr = formatCalendarDate(date);
-  const day = date.getDay();
+  const day = date.getUTCDay();
   if (day === 0 || day === 6) return false;
   if (dateStr < minDate || dateStr > maxDate) return false;
   return !!availableDates && availableDates.length > 0 && !availableDates.includes(dateStr);

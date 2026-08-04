@@ -58,8 +58,24 @@ describe('engine helpers', () => {
       expect(result).toEqual(payload);
       expect(fetchMock).toHaveBeenCalledTimes(1);
       const calledUrl = String(fetchMock.mock.calls[0][0]);
+      const calledOpts = fetchMock.mock.calls[0][1] as RequestInit | undefined;
       expect(calledUrl).toContain('/api/available_dates');
       expect(calledUrl).toContain('symbol=AAPL');
+      expect(calledOpts).toBeUndefined();
+    });
+
+    it('forwards an AbortSignal to fetch', async () => {
+      const payload = { symbol: 'AAPL', dates: [], earliest: null, latest: null, count: 0, missing: true };
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(payload),
+      } as unknown as Response);
+      vi.stubGlobal('fetch', fetchMock);
+
+      const controller = new AbortController();
+      await fetchAvailableDates('http://127.0.0.1:9000', 'AAPL', undefined, { signal: controller.signal });
+      const calledOpts = fetchMock.mock.calls[0][1] as RequestInit | undefined;
+      expect(calledOpts?.signal).toBe(controller.signal);
     });
 
     it('throws when the engine returns an error status', async () => {

@@ -1,4 +1,4 @@
-import { useReducer, useCallback, useEffect, useState, useRef } from 'react';
+import { useReducer, useCallback, useEffect, useState, useRef, useMemo } from 'react';
 import { Chart, type ChartHandle } from './components/Chart';
 import { IntroSplash } from './components/IntroSplash';
 import { Header } from './components/layout/Header';
@@ -18,8 +18,10 @@ import { warmOrionAgent } from './lib/orion/client';
 import { createExecutionContext, buildCompactStateSnapshot } from './lib/orion/agent/executionContext';
 import type { ExecutionContextStore, ExecutionContextEntry } from './lib/orion/agent/types';
 import { useDataSource, getEngineDataDir } from './lib/dataSourceContext';
-import { engineUrl, sessionStartBody, fetchAvailableDates, type AvailableDatesResult } from './lib/engine';
+import { engineUrl, sessionStartBody } from './lib/engine';
 import { resolveSessionDate } from './lib/dateResolve';
+import { getPreviousMarketDay } from './lib/marketDate';
+import { createAvailableDatesLoader, type LoadResult } from './lib/availableDatesLoader';
 import { threadKeyForContext, appendMessage, loadOrionThreads, writeOrionThreads } from './lib/orionThreads';
 import type {
   AppState,
@@ -45,19 +47,11 @@ const API_BASE = isTauri ? 'http://127.0.0.1:9000' : '';
 import { DataSourceMenu } from './components/DataSourceMenu';
 import { LocalDataScreen } from './components/LocalDataScreen';
 
-// Return the most recent past trading weekday (YYYY-MM-DD). If today is a
-// weekday we still step back one calendar day because the local market data
-// is only fully available after the previous close.
+// Return the most recent past trading weekday (YYYY-MM-DD) in America/New_York.
+// If today is a weekday we still step back one calendar day because the local
+// market data is only fully available after the previous close.
 function getLastTradingDate(): string {
-  const d = new Date();
-  d.setDate(d.getDate() - 1);
-  while (d.getDay() === 0 || d.getDay() === 6) {
-    d.setDate(d.getDate() - 1);
-  }
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${y}-${m}-${day}`;
+  return getPreviousMarketDay();
 }
 
 // =============================================================================
@@ -386,23 +380,27 @@ export default function App() {
   // the default date and to disable/mark unavailable calendar days.
   const [availableDates, setAvailableDates] = useState<string[]>([]);
 
-  const loadAvailableDates = useCallback(
-    async (symbol: string): Promise<AvailableDatesResult | null> => {
-      try {
-        const result = await fetchAvailableDates(API_BASE, symbol, dataDir);
-        if (!result.missing && result.dates) {
-          setAvailableDates(result.dates);
-        } else {
-          setAvailableDates([]);
-        }
-        return result;
-      } catch (err) {
-        console.warn('[OpenRewind] Failed to fetch available dates:', err);
-        setAvailableDates([]);
-        return null;
-      }
-    },
+  // Stale-response guard: rapid AAPL → ABBV → NVDA switching must not let an
+  // older request overwrite the dates for the newest symbol.
+  const availableDatesLoader = useMemo(
+    () => createAvailableDatesLoader(API_BASE, dataDir),
     [dataDir]
+  );
+
+  const loadAvailableDates = useCallback(
+    async (symbol: string): Promise<LoadResult> => {
+      const { result, isStale } = await availableDatesLoader.load(symbol);
+      if (isStale) {
+        return { result: null, isStale: true };
+      }
+      if (result && !result.missing && result.dates) {
+        setAvailableDates(result.dates);
+      } else {
+        setAvailableDates([]);
+      }
+      return { result, isStale: false };
+    },
+    [availableDatesLoader]
   );
 
   const fetchTickers = useCallback(() => {
@@ -423,7 +421,7 @@ export default function App() {
     } else {
       setAvailableDates([]);
     }
-  }, [state.symbol, dataDir]);
+  }, [state.symbol, dataDir, loadAvailableDates]);
 
   const onDataSynced = useCallback(() => {
     fetchTickers();
@@ -649,7 +647,11 @@ export default function App() {
       }
 
       try {
-        const availability = await loadAvailableDates(state.symbol);
+        const { result: availability, isStale } = await loadAvailableDates(state.symbol);
+        if (isStale) {
+          console.log('[Orion Diagnostic] handleDateChange stale, ignoring');
+          return;
+        }
         if (!availability || availability.missing || !availability.dates.length) {
           console.log('[Orion Diagnostic] handleDateError triggered', { reason: 'no-dates', newDate });
           setSymbolError('No local market data found for this date.');
@@ -956,7 +958,11 @@ export default function App() {
       try {
         const balance = state.balance > 0 ? state.balance : 100000;
 
-        const availability = await loadAvailableDates(newSymbol);
+        const { result: availability, isStale } = await loadAvailableDates(newSymbol);
+        if (isStale) {
+          console.log('[Orion Diagnostic] handleSymbolChange stale, ignoring');
+          return;
+        }
         if (!availability || availability.missing || !availability.dates.length) {
           console.log('[Orion Diagnostic] handleSymbolError triggered', { reason: 'no-dates', newSymbol });
           setSymbolError('No local market data found for this symbol.');

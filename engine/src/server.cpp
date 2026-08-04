@@ -1,5 +1,7 @@
 #include "server.hpp"
 #include "csv_loader.hpp"
+#include "child_process.hpp"
+#include "path_utils.hpp"
 
 #include <iostream>
 #include <optional>
@@ -11,52 +13,19 @@
 #include <ctime>
 #include <set>
 
-// =============================================================================
-// Command-line helpers
-// =============================================================================
-
 namespace {
 
-// Quote a single argument for std::system() on Windows.  Implements the
-// CommandLineToArgvW escaping rules: wrap the argument in double quotes and
-// double every backslash that precedes a closing quote or the end of the
-// argument, and escape any embedded quotes with a backslash.
-std::string quote_shell_arg(const std::string& arg) {
-    std::string out;
-    out.push_back('"');
-
-    std::size_t backslash_run = 0;
-    for (char c : arg) {
-        if (c == '\\') {
-            ++backslash_run;
-        } else if (c == '"') {
-            out.append(backslash_run * 2, '\\');
-            backslash_run = 0;
-            out += "\\\"";
-        } else {
-            out.append(backslash_run, '\\');
-            backslash_run = 0;
-            out += c;
-        }
+// Log an argv vector as a printable string.  This is purely diagnostic — the
+// actual launch is done via run_child_process() with no shell interpretation.
+std::string format_argv_for_log(const std::string& program,
+                                const std::vector<std::string>& args) {
+    // Use a JSON array for an unambiguous, machine-readable log of the argv.
+    json arr = json::array();
+    arr.push_back(program);
+    for (const auto& a : args) {
+        arr.push_back(a);
     }
-
-    // Double the trailing backslashes before the closing quote.
-    out.append(backslash_run * 2, '\\');
-    out.push_back('"');
-    return out;
-}
-
-// Build a python scripts/fetch_data.py command line for the current platform.
-std::string build_ingest_command(const std::string& mode,
-                                 const std::string& data_dir,
-                                 int port) {
-    std::ostringstream cmd;
-    cmd << "python ";
-    cmd << quote_shell_arg("scripts/fetch_data.py");
-    cmd << " --mode " << quote_shell_arg(mode);
-    cmd << " --data-dir " << quote_shell_arg(data_dir);
-    cmd << " --port " << std::to_string(port);
-    return cmd.str();
+    return arr.dump();
 }
 
 } // namespace
@@ -69,8 +38,12 @@ std::string build_ingest_command(const std::string& mode,
 // Construction / Destruction
 // -----------------------------------------------------------------------------
 
-OpenRewindServer::OpenRewindServer(int port, std::string data_dir)
-    : port_(port), data_dir_(std::move(data_dir))
+OpenRewindServer::OpenRewindServer(int port,
+                                   std::string data_dir,
+                                   std::optional<std::string> local_data_dir)
+    : port_(port),
+      data_dir_(std::move(data_dir)),
+      local_data_dir_(std::move(local_data_dir))
 {
     // Configure CORS so the Tauri webview (origin: tauri://localhost) and
     // the Vite dev server (origin: http://localhost:5173) can both reach
@@ -140,14 +113,20 @@ void OpenRewindServer::start_ingest_worker() {
         // Initial kickoff: fetch the full rolling 30-day window every time the
         // engine boots, so the user can pick any date in the last month. The
         // 30-minute periodic ticks stay on append mode to keep it fast.
-        const std::string full_cmd = build_ingest_command("full", data_dir_, port_);
+        std::vector<std::string> full_argv = {
+            "scripts/fetch_data.py",
+            "--mode", "full",
+            "--data-dir", data_dir_,
+            "--port", std::to_string(port_)
+        };
 
         std::cout << "[OpenRewind] auto-ingest worker started — kicking off\n"
-                  << "  " << full_cmd << "\n";
+                  << "  " << format_argv_for_log("python", full_argv) << "\n";
 
         broadcast("data_sync_started", json{{"mode", "full"}, {"timestamp", now_ms()}});
 
-        int rc0 = std::system(full_cmd.c_str());
+        int rc0 = run_child_process("python", full_argv);
+        std::cout << "[OpenRewind] auto-ingest initial exit code: " << rc0 << "\n";
         if (rc0 != 0) {
             std::cerr << "[OpenRewind] ingest worker: initial fetch_data.py "
                          "exited with " << rc0 << " (continuing)\n";
@@ -167,13 +146,20 @@ void OpenRewindServer::start_ingest_worker() {
             }
             lk.unlock();
 
-            const std::string append_cmd = build_ingest_command("append", data_dir_, port_);
+            std::vector<std::string> append_argv = {
+                "scripts/fetch_data.py",
+                "--mode", "append",
+                "--data-dir", data_dir_,
+                "--port", std::to_string(port_)
+            };
+
             std::cout << "[OpenRewind] auto-ingest tick — running\n"
-                      << "  " << append_cmd << "\n";
+                      << "  " << format_argv_for_log("python", append_argv) << "\n";
 
             broadcast("data_sync_started", json{{"mode", "append"}, {"timestamp", now_ms()}});
 
-            int rc = std::system(append_cmd.c_str());
+            int rc = run_child_process("python", append_argv);
+            std::cout << "[OpenRewind] auto-ingest tick exit code: " << rc << "\n";
             if (rc != 0) {
                 std::cerr << "[OpenRewind] ingest worker: fetch_data.py "
                              "exited with " << rc << "\n";
@@ -223,8 +209,19 @@ void OpenRewindServer::setup_rest_routes() {
         namespace fs = std::filesystem;
 
         const char* dir_param = req.url_params.get("data_dir");
-        std::string data_dir = dir_param ? dir_param : data_dir_;
+        std::string requested = dir_param ? dir_param : data_dir_;
 
+        auto resolved = resolve_data_dir(requested, data_dir_, local_data_dir_);
+        if (!resolved) {
+            std::error_code ec;
+            bool exists = !requested.empty() && fs::exists(requested, ec) && fs::is_directory(requested, ec);
+            int status = exists ? 403 : 404;
+            std::string msg = exists ? "data_dir not authorized" : "data_dir not found";
+            return crow::response(status, "application/json",
+                json{{"error", msg}}.dump());
+        }
+
+        std::string data_dir = resolved->string();
         std::vector<std::string> tickers;
 
         std::error_code ec;
@@ -275,18 +272,44 @@ void OpenRewindServer::setup_rest_routes() {
                 json{{"error", "Missing required field: symbol"}}.dump());
         }
 
-        std::string symbol = body["symbol"].get<std::string>();
+        std::string symbol_input;
+        try {
+            symbol_input = body["symbol"].get<std::string>();
+        } catch (const std::exception&) {
+            return crow::response(400, "application/json",
+                json{{"error", "Invalid symbol"}}.dump());
+        }
+
+        auto symbol_opt = sanitize_symbol(symbol_input);
+        if (!symbol_opt) {
+            return crow::response(400, "application/json",
+                json{{"error", "Invalid or unsafe symbol"}}.dump());
+        }
+
         double starting_balance = body.value("starting_balance", 100000.0);
-        std::string data_dir = body.value("data_dir", data_dir_);
+        std::string requested = body.value("data_dir", data_dir_);
         std::string start_date = body.value("start_date", "");
+
+        auto resolved = resolve_data_dir(requested, data_dir_, local_data_dir_);
+        if (!resolved) {
+            std::error_code ec;
+            bool exists = !requested.empty() && std::filesystem::exists(requested, ec) &&
+                          std::filesystem::is_directory(requested, ec);
+            int status = exists ? 403 : 404;
+            std::string msg = exists ? "data_dir not authorized" : "data_dir not found";
+            return crow::response(status, "application/json",
+                json{{"error", msg}}.dump());
+        }
+
+        std::string data_dir = resolved->string();
 
         try {
             std::size_t total = session_.start_session(
-                symbol, starting_balance, data_dir, start_date);
+                *symbol_opt, starting_balance, data_dir, start_date);
 
             json response = {
                 {"session_id",     "1"},
-                {"symbol",         symbol},
+                {"symbol",         *symbol_opt},
                 {"total_candles",  total},
                 {"start_ts",       session_.start_timestamp()},
                 {"end_ts",         session_.end_timestamp()},
@@ -499,7 +522,12 @@ void OpenRewindServer::setup_rest_routes() {
             return crow::response(400, "application/json",
                 json{{"error", "Missing required query param: symbol"}}.dump());
         }
-        std::string symbol = sym_param;
+
+        auto symbol_opt = sanitize_symbol(sym_param);
+        if (!symbol_opt) {
+            return crow::response(400, "application/json",
+                json{{"error", "Invalid or unsafe symbol"}}.dump());
+        }
 
         const char* date_param = req.url_params.get("date");
         std::string date = date_param ? date_param : "";
@@ -518,17 +546,30 @@ void OpenRewindServer::setup_rest_routes() {
         limit = std::min<std::size_t>(limit, 5000);
 
         const char* dir_param = req.url_params.get("data_dir");
-        std::string data_dir = dir_param ? dir_param : data_dir_;
+        std::string requested = dir_param ? dir_param : data_dir_;
+
+        auto resolved = resolve_data_dir(requested, data_dir_, local_data_dir_);
+        if (!resolved) {
+            std::error_code ec;
+            bool exists = !requested.empty() && std::filesystem::exists(requested, ec) &&
+                          std::filesystem::is_directory(requested, ec);
+            int status = exists ? 403 : 404;
+            std::string msg = exists ? "data_dir not authorized" : "data_dir not found";
+            return crow::response(status, "application/json",
+                json{{"error", msg}}.dump());
+        }
+
+        std::string data_dir = resolved->string();
 
         std::vector<Candle> base;
         try {
-            base = CsvLoader::load_symbol(symbol, data_dir, date);
+            base = CsvLoader::load_symbol(*symbol_opt, data_dir, date);
         } catch (const std::exception& e) {
             // Missing/unreadable data — return an empty result rather than
             // 500 so Orion can gracefully suggest running the sync script.
             return crow::response(200, "application/json",
                 json{
-                    {"symbol",    symbol},
+                    {"symbol",    *symbol_opt},
                     {"date",      date},
                     {"timeframe", timeframe},
                     {"candles",   json::array()},
@@ -569,7 +610,7 @@ void OpenRewindServer::setup_rest_routes() {
 
         return crow::response(200, "application/json",
             json{
-                {"symbol",    symbol},
+                {"symbol",    *symbol_opt},
                 {"date",      date},
                 {"timeframe", timeframe},
                 {"candles",   arr},
@@ -621,21 +662,39 @@ void OpenRewindServer::setup_rest_routes() {
             return crow::response(400, "application/json",
                 json{{"error", "Missing required query param: symbol"}}.dump());
         }
-        std::string symbol = sym_param;
+
+        auto symbol_opt = sanitize_symbol(sym_param);
+        if (!symbol_opt) {
+            return crow::response(400, "application/json",
+                json{{"error", "Invalid or unsafe symbol"}}.dump());
+        }
 
         const char* dir_param = req.url_params.get("data_dir");
-        std::string data_dir = dir_param ? dir_param : data_dir_;
+        std::string requested = dir_param ? dir_param : data_dir_;
+
+        auto resolved = resolve_data_dir(requested, data_dir_, local_data_dir_);
+        if (!resolved) {
+            std::error_code ec;
+            bool exists = !requested.empty() && std::filesystem::exists(requested, ec) &&
+                          std::filesystem::is_directory(requested, ec);
+            int status = exists ? 403 : 404;
+            std::string msg = exists ? "data_dir not authorized" : "data_dir not found";
+            return crow::response(status, "application/json",
+                json{{"error", msg}}.dump());
+        }
+
+        std::string data_dir = resolved->string();
 
         std::vector<Candle> candles;
         try {
             // Load the entire rolling history; the 1m master file is bounded to
             // 30 days (~10k rows) so this is small and keeps the implementation
             // identical to /api/candles.
-            candles = CsvLoader::load_symbol(symbol, data_dir, "");
+            candles = CsvLoader::load_symbol(*symbol_opt, data_dir, "");
         } catch (const std::exception& e) {
             return crow::response(200, "application/json",
                 json{
-                    {"symbol",  symbol},
+                    {"symbol",  *symbol_opt},
                     {"dates",   json::array()},
                     {"earliest", nullptr},
                     {"latest",   nullptr},
@@ -667,7 +726,7 @@ void OpenRewindServer::setup_rest_routes() {
 
         return crow::response(200, "application/json",
             json{
-                {"symbol",   symbol},
+                {"symbol",   *symbol_opt},
                 {"dates",    arr},
                 {"earliest", unique_dates.empty() ? nullptr : *unique_dates.begin()},
                 {"latest",   unique_dates.empty() ? nullptr : *unique_dates.rbegin()},
@@ -818,14 +877,27 @@ void OpenRewindServer::handle_ws_command(crow::websocket::connection& conn,
             return;
         }
         try {
-            std::string symbol = cmd["symbol"].get<std::string>();
+            std::string symbol_input = cmd["symbol"].get<std::string>();
+            auto symbol_opt = sanitize_symbol(symbol_input);
+            if (!symbol_opt) {
+                send_to(conn, "error", {{"message", "Invalid or unsafe symbol"}});
+                return;
+            }
+
             double starting_balance = cmd.value("starting_balance", 100000.0);
             std::string start_date = cmd.value("start_date", "");
-            std::string data_dir = cmd.value("data_dir", data_dir_);
-            std::size_t total = session_.start_session(symbol, starting_balance, data_dir, start_date);
+            std::string requested = cmd.value("data_dir", data_dir_);
+            auto resolved = resolve_data_dir(requested, data_dir_, local_data_dir_);
+            if (!resolved) {
+                send_to(conn, "error", {{"message", "Unauthorized or missing data_dir"}});
+                return;
+            }
+
+            std::string data_dir = resolved->string();
+            std::size_t total = session_.start_session(*symbol_opt, starting_balance, data_dir, start_date);
             json response = {
                 {"session_id",     "1"},
-                {"symbol",         symbol},
+                {"symbol",         *symbol_opt},
                 {"total_candles",  total},
                 {"start_ts",       session_.start_timestamp()},
                 {"end_ts",         session_.end_timestamp()},
