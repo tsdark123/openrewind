@@ -84,6 +84,15 @@ Stop for a manual browser test on fresh UI changes; do not rely only on unit tes
 - Do not commit or push without explicit user approval.
 - Do not reintroduce streaming, `llama3.1:8b`, or giant timeouts.
 - Keep tests focused; one warm-up per app session is enough.
+- Requested action dimensions are computed centrally and reused across routing, deterministic completeness, semantic extraction and grounding.
+- Grounded deterministic values are authoritative.
+- Resolved context values come next.
+- The LLM may fill only genuinely missing dimensions and must not overwrite deterministic symbol, date, time, timeframe, relative seek or playback values.
+- Unrequested, ungrounded and malformed optional LLM fields are stripped before strict semantic validation.
+- Requested malformed fields must still be rejected.
+- Complete commands must remain deterministic and avoid unnecessary LLM calls.
+- Do not add phrase-specific routing lists or ticker-specific branches.
+- All execution must continue through the existing capability registry, compiler, validator, executor, receipts and refreshed WorldState.
 
 ## Common issues
 
