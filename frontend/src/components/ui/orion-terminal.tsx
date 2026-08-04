@@ -466,7 +466,7 @@ export function OrionTerminal({
             transition={{ duration: 0.4, ease: 'easeInOut' }}
             className={cn(
               'absolute inset-0 z-50 flex flex-col items-center justify-center gap-4 p-6',
-              lightMode ? 'bg-[#f8f9fa]' : 'bg-orion-terminal'
+              lightMode ? 'bg-[#f8f9fa]' : 'bg-[#1a1c21]'
             )}
           >
             {setupStage === 'error' ? (
