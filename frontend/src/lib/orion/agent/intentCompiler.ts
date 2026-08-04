@@ -392,7 +392,7 @@ export function resolveContextReference(
   const shouldInheritAnalysis =
     ref.mode === 'repeat' ||
     (ref.mode === 'inherit' && ref.inherit?.includes('analysisRequests'));
-  if (shouldInheritAnalysis && source.analysisRequests) {
+  if (shouldInheritAnalysis && merged.analysisRequests) {
     const mergedAnalysis = mergeAnalysisRequests(source.analysisRequests, merged.analysisRequests);
     if (!mergedAnalysis.ok) {
       return { ok: false, error: mergedAnalysis.error };

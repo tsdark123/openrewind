@@ -314,6 +314,22 @@ describe('resolveContextReference for analysis follow-ups', () => {
     expect(ar.left).toEqual({ kind: 'time_range', fromTime: '09:30', toTime: '10:30' });
     expect(ar.right).toEqual({ kind: 'time_range', fromTime: '15:00', toTime: '16:00' });
   });
+
+  it('clarifies when a follow-up tries to inherit analysisRequests but the prior action has no analysis', () => {
+    const ctx = makeContext();
+    recordAction(ctx, { kind: 'chart_action', symbol: 'AAPL' });
+    const r = resolveContextReference(
+      {
+        kind: 'chart_action',
+        contextReference: { source: 'latest_successful_action', mode: 'inherit', inherit: ['analysisRequests'] },
+        analysisRequests: [{ kind: 'window_ohlc' }],
+      },
+      ctx
+    );
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error).toMatch(/missing a window and no prior analysis exists to inherit from/i);
+  });
 });
 
 describe('sanitizeIntentGrounding for analysisRequests', () => {
