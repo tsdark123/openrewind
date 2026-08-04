@@ -19,7 +19,7 @@ export function IntroSplash({ onFinished, onFadeStart, lightMode = false }: Intr
       onFadeStartRef.current?.();
       setFadeOut(true);
       setTimeout(() => onFinishedRef.current(), 450);
-    }, 1500);
+    }, 1800);
     return () => clearTimeout(hold);
   }, []);
 
