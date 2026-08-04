@@ -48,6 +48,7 @@ export default {
         mono: ['"JetBrains Mono"', '"Fira Code"', 'Consolas', 'monospace'],
       },
       transitionDuration: {
+        450: '450ms',
         600: '600ms',
       },
     },

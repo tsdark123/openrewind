@@ -18,14 +18,14 @@ export function IntroSplash({ onFinished, onFadeStart, lightMode = false }: Intr
     const hold = setTimeout(() => {
       onFadeStartRef.current?.();
       setFadeOut(true);
-      setTimeout(() => onFinishedRef.current(), 600);
+      setTimeout(() => onFinishedRef.current(), 450);
     }, 1500);
     return () => clearTimeout(hold);
   }, []);
 
   return (
     <div
-      className={`fixed inset-0 z-[100] flex items-center justify-center transition-opacity duration-600 ease-out ${
+      className={`fixed inset-0 z-[100] flex items-center justify-center transition-opacity duration-450 ease-out ${
         fadeOut ? 'opacity-0 pointer-events-none' : 'opacity-100'
       } ${lightMode ? 'bg-white' : 'bg-[#0a0a0a]'}`}
       aria-label="OpenRewind intro"
