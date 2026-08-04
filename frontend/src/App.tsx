@@ -14,12 +14,12 @@ import { OrionDrivingOverlay } from './components/ui/OrionDrivingOverlay';
 import { useWebSocket } from './hooks/useWebSocket';
 import { endSession, loadPerformanceLog } from './lib/journal';
 import { orionController } from './lib/orion/controller';
-import { fetchCandles } from './lib/orion/tools';
 import { warmOrionAgent } from './lib/orion/client';
 import { createExecutionContext, buildCompactStateSnapshot } from './lib/orion/agent/executionContext';
 import type { ExecutionContextStore, ExecutionContextEntry } from './lib/orion/agent/types';
 import { useDataSource, getEngineDataDir } from './lib/dataSourceContext';
-import { engineUrl, sessionStartBody } from './lib/engine';
+import { engineUrl, sessionStartBody, fetchAvailableDates, type AvailableDatesResult } from './lib/engine';
+import { resolveSessionDate } from './lib/dateResolve';
 import { threadKeyForContext, appendMessage, loadOrionThreads, writeOrionThreads } from './lib/orionThreads';
 import type {
   AppState,
@@ -382,6 +382,29 @@ export default function App() {
   const availableTickersRef = useRef<string[]>([]);
   availableTickersRef.current = availableTickers;
 
+  // Available session dates for the currently selected symbol.  Used to resolve
+  // the default date and to disable/mark unavailable calendar days.
+  const [availableDates, setAvailableDates] = useState<string[]>([]);
+
+  const loadAvailableDates = useCallback(
+    async (symbol: string): Promise<AvailableDatesResult | null> => {
+      try {
+        const result = await fetchAvailableDates(API_BASE, symbol, dataDir);
+        if (!result.missing && result.dates) {
+          setAvailableDates(result.dates);
+        } else {
+          setAvailableDates([]);
+        }
+        return result;
+      } catch (err) {
+        console.warn('[OpenRewind] Failed to fetch available dates:', err);
+        setAvailableDates([]);
+        return null;
+      }
+    },
+    [dataDir]
+  );
+
   const fetchTickers = useCallback(() => {
     fetch(engineUrl(API_BASE, '/api/tickers', undefined, dataDir))
       .then((r) => r.json())
@@ -393,9 +416,35 @@ export default function App() {
       });
   }, [dataDir]);
 
+  // Keep availableDates in sync with the current symbol.
+  useEffect(() => {
+    if (state.symbol) {
+      loadAvailableDates(state.symbol);
+    } else {
+      setAvailableDates([]);
+    }
+  }, [state.symbol, dataDir]);
+
   const onDataSynced = useCallback(() => {
     fetchTickers();
-  }, [fetchTickers]);
+    // The backend has fresh data; refresh the selected symbol's available dates.
+    if (stateRef.current.symbol) {
+      loadAvailableDates(stateRef.current.symbol);
+    }
+  }, [fetchTickers, loadAvailableDates]);
+
+  const onDataSyncFailed = useCallback(
+    (payload: { mode: string; exit_code: number; timestamp: number }) => {
+      console.warn('[OpenRewind] Market data refresh failed:', payload);
+      setDateError('Market-data refresh failed. Showing previously cached data.');
+    },
+    []
+  );
+
+  const onDataSyncStarted = useCallback(() => {
+    // Clear stale warning when a new refresh begins.
+    clearDateError();
+  }, [clearDateError]);
 
   const { send, connected, reconnecting } = useWebSocket({
     dispatch,
@@ -403,6 +452,8 @@ export default function App() {
     onSessionReset,
     onSessionHistory,
     onDataSynced,
+    onDataSyncStarted,
+    onDataSyncFailed,
   });
 
   // --- Orion Automation Driver wiring ---------------------------------------
@@ -578,9 +629,9 @@ export default function App() {
   }, [view, dataSource, dataSynced]);
 
   // --- Change replay date from the Toolbar date picker ---
-  // Probe the requested date; if the local cache has no bars for it, fall
-  // back to the nearest previous weekday. This mirrors setSession's fallback
-  // and prevents the engine from rejecting a manual date pick.
+  // Only use the selected date if the local cache actually has candles for it.
+  // If it doesn't, keep the existing valid session and explain why, or fall
+  // back to the latest available session when there is no active session yet.
   const handleDateChange = useCallback(
     async (newDate: string) => {
       if (!newDate) return;
@@ -597,35 +648,33 @@ export default function App() {
         return;
       }
 
-      let sessionDate = newDate;
       try {
-        const probe = await fetchCandles(
-          { symbol: state.symbol, date: newDate, timeframe: 1, limit: 1, dataDir },
-          API_BASE
-        );
-        if (probe.missing) {
-          console.log('[Orion Diagnostic] handleDateError triggered', { reason: 'no-data', newDate });
+        const availability = await loadAvailableDates(state.symbol);
+        if (!availability || availability.missing || !availability.dates.length) {
+          console.log('[Orion Diagnostic] handleDateError triggered', { reason: 'no-dates', newDate });
           setSymbolError('No local market data found for this date.');
           setDateConfirmed(false);
           return;
         }
-        sessionDate = probe.fallbackDate ?? newDate;
-      } catch (e) {
-        console.error('[OpenRewind] Failed to probe date:', e);
-        // proceed with the requested date; the engine will surface a real error if it is truly missing
-      }
 
-      dispatch({ type: 'SET_REPLAY_DATE', date: sessionDate });
-      clearDateError();
-      clearSymbolError();
-      setDateConfirmed(false);
+        const resolved = resolveSessionDate(newDate, availability.dates);
+        if (resolved.fallback && resolved.message) {
+          setDateError(resolved.message);
+        } else {
+          clearDateError();
+        }
+        clearSymbolError();
 
-      if (!state.sessionActive) {
-        // No active session yet — the date will be used when the user picks a ticker.
-        return;
-      }
+        const sessionDate = resolved.date;
+        dispatch({ type: 'SET_REPLAY_DATE', date: sessionDate });
+        setDateConfirmed(false);
 
-      try {
+        if (!state.sessionActive) {
+          // No active session yet — the resolved date will be used when the
+          // user picks a ticker or resumes interaction.
+          return;
+        }
+
         const balance = state.balance > 0 ? state.balance : 100000;
         const requestBody = sessionStartBody(
           { symbol: state.symbol, starting_balance: balance, start_date: sessionDate },
@@ -646,7 +695,6 @@ export default function App() {
           setSymbolError('No local market data found for this date.');
           return;
         }
-        clearDateError();
         clearSymbolError();
         dispatch({
           type: 'SESSION_STARTED',
@@ -668,7 +716,7 @@ export default function App() {
         setSymbolError('No local market data found for this date.');
       }
     },
-    [state.sessionActive, state.symbol, state.balance, clearDateError, setSymbolError, clearSymbolError, dataDir]
+    [state.sessionActive, state.symbol, state.balance, clearDateError, setSymbolError, clearSymbolError, dataDir, loadAvailableDates]
   );
 
   // --- WS command helpers ---
@@ -899,33 +947,41 @@ export default function App() {
   //   2. Resets the matching engine to the (current) starting balance.
   //   3. Broadcasts session_started -> reducer's SESSION_STARTED case wipes
   //      candles/positions/orders so the chart cleanly shows the new ticker.
-  // We probe the current replay date for the new ticker and fall back to the
-  // nearest previous weekday with data, keeping manual symbol changes and
-  // Orion's setSession on the same code path.
+  // Resolve the selected date from the actual local sessions for the new
+  // symbol, falling back to the latest available session and surfacing a
+  // warning instead of silently pretending stale data is current.
   const handleSymbolChange = useCallback(
     async (newSymbol: string, targetDate?: string) => {
       if (!newSymbol || (newSymbol === state.symbol && !targetDate)) return;
       try {
         const balance = state.balance > 0 ? state.balance : 100000;
-        let sessionDate = targetDate ?? replayDate;
-        console.log('[session-trace] handleSymbolChange start:', { newSymbol, targetDate, replayDate, sessionDate });
-        if (sessionDate) {
-          try {
-            const probe = await fetchCandles(
-              { symbol: newSymbol, date: sessionDate, timeframe: 1, limit: 1, dataDir },
-              API_BASE
-            );
-            console.log('[session-trace] handleSymbolChange probe:', { newSymbol, sessionDate, missing: probe.missing, fallbackDate: probe.fallbackDate });
-            if (probe.missing) {
-              console.log('[Orion Diagnostic] handleSymbolError triggered', { reason: 'no-data', newSymbol, sessionDate });
-              setSymbolError('No local market data found for this symbol.');
-              return;
-            }
-            sessionDate = probe.fallbackDate ?? sessionDate;
-          } catch (e) {
-            console.error('[OpenRewind] Failed to probe symbol:', e);
-          }
+
+        const availability = await loadAvailableDates(newSymbol);
+        if (!availability || availability.missing || !availability.dates.length) {
+          console.log('[Orion Diagnostic] handleSymbolError triggered', { reason: 'no-dates', newSymbol });
+          setSymbolError('No local market data found for this symbol.');
+          return;
         }
+
+        const requested = targetDate ?? replayDate;
+        const resolved = resolveSessionDate(requested, availability.dates);
+        const sessionDate = resolved.date;
+
+        if (resolved.fallback && resolved.message) {
+          setDateError(resolved.message);
+        } else {
+          clearDateError();
+        }
+        clearSymbolError();
+
+        console.log('[session-trace] handleSymbolChange start:', {
+          newSymbol,
+          targetDate,
+          replayDate,
+          requested,
+          resolvedDate: sessionDate,
+          fallback: resolved.fallback,
+        });
 
         const requestBody = sessionStartBody(
           { symbol: newSymbol, starting_balance: balance, start_date: sessionDate },
@@ -945,7 +1001,6 @@ export default function App() {
           setSymbolError('No local market data found for this symbol.');
           return;
         }
-        clearDateError();
         clearSymbolError();
         dispatch({
           type: 'SESSION_STARTED',
@@ -969,7 +1024,7 @@ export default function App() {
         setSymbolError('No local market data found for this symbol.');
       }
     },
-    [state.symbol, state.balance, replayDate, clearDateError, setSymbolError, clearSymbolError, dataDir]
+    [state.symbol, state.balance, replayDate, clearDateError, setSymbolError, clearSymbolError, dataDir, loadAvailableDates]
   );
 
   // --- Data-source menu handlers ---
@@ -1065,6 +1120,7 @@ export default function App() {
           <Toolbar
             symbol={state.symbol}
             availableTickers={availableTickers}
+            availableDates={availableDates}
             onSymbolChange={handleSymbolChange}
             error={symbolError ?? undefined}
             replayDate={replayDate}

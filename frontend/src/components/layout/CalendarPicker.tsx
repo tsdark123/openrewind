@@ -1,16 +1,18 @@
 import { useState } from 'react';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
+import { formatCalendarDate, isCalendarDayDisabled, isCalendarDayUnavailable } from '../../lib/calendar';
 
 interface CalendarPickerProps {
   value: string; // YYYY-MM-DD
   onChange: (date: string) => void;
   minDate: string; // YYYY-MM-DD
   maxDate: string; // YYYY-MM-DD
+  availableDates?: string[]; // dates that actually have local candles
   onClose?: () => void;
   lightMode?: boolean;
 }
 
-export function CalendarPicker({ value, onChange, minDate, maxDate, onClose, lightMode = false }: CalendarPickerProps) {
+export function CalendarPicker({ value, onChange, minDate, maxDate, availableDates = [], onClose, lightMode = false }: CalendarPickerProps) {
   const [currentMonth, setCurrentMonth] = useState(() => {
     const d = value ? new Date(value) : new Date();
     return new Date(d.getFullYear(), d.getMonth(), 1);
@@ -21,30 +23,13 @@ export function CalendarPicker({ value, onChange, minDate, maxDate, onClose, lig
   const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
   const dayNames = ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'];
 
-  // Format using local date components so timezone conversion does not shift
-  // the displayed day and accidentally grey out valid weekdays.
-  const formatDate = (date: Date) => {
-    const y = date.getFullYear();
-    const m = String(date.getMonth() + 1).padStart(2, '0');
-    const d = String(date.getDate()).padStart(2, '0');
-    return `${y}-${m}-${d}`;
-  };
-
-  const isDateDisabled = (date: Date) => {
-    const dateStr = formatDate(date);
-    const day = date.getDay();
-    // Disable weekends and clamp to the supplied bounds. Weekdays inside the
-    // range remain fully clickable.
-    return day === 0 || day === 6 || dateStr < minDate || dateStr > maxDate;
-  };
-
-  const isSelected = (date: Date) => {
-    return formatDate(date) === value;
-  };
+  const isDateDisabled = (date: Date) => isCalendarDayDisabled(date, minDate, maxDate, availableDates);
+  const isSelected = (date: Date) => formatCalendarDate(date) === value;
+  const isUnavailable = (date: Date) => isCalendarDayUnavailable(date, minDate, maxDate, availableDates);
 
   const handleDateClick = (date: Date) => {
     if (!isDateDisabled(date)) {
-      onChange(formatDate(date));
+      onChange(formatCalendarDate(date));
       onClose?.();
     }
   };
@@ -80,6 +65,7 @@ export function CalendarPicker({ value, onChange, minDate, maxDate, onClose, lig
       const date = new Date(currentMonth.getFullYear(), currentMonth.getMonth(), i);
       const disabled = isDateDisabled(date);
       const selected = isSelected(date);
+      const unavailable = isUnavailable(date);
 
       days.push(
         <button
@@ -91,8 +77,8 @@ export function CalendarPicker({ value, onChange, minDate, maxDate, onClose, lig
               ? 'bg-[#3b6fff] text-white font-semibold'
               : disabled
               ? lightMode
-                ? 'text-gray-300 cursor-not-allowed'
-                : 'text-[#4a4d55] cursor-not-allowed'
+                ? `text-gray-300 cursor-not-allowed ${unavailable ? 'line-through' : ''}`
+                : `text-[#4a4d55] cursor-not-allowed ${unavailable ? 'line-through' : ''}`
               : lightMode
               ? 'text-gray-800 hover:bg-gray-100'
               : 'text-[#d1d4dc] hover:bg-[#363a45]'

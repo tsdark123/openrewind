@@ -6,6 +6,16 @@
 // support it: /api/tickers, /api/candles, /api/session/start.
 // =============================================================================
 
+export interface AvailableDatesResult {
+  symbol: string;
+  dates: string[];
+  earliest: string | null;
+  latest: string | null;
+  count: number;
+  missing?: boolean;
+  reason?: string;
+}
+
 export function engineUrl(
   apiBase: string,
   path: string,
@@ -43,4 +53,18 @@ export function sessionStartBody(params: {
     body.data_dir = dataDir;
   }
   return body;
+}
+
+export async function fetchAvailableDates(
+  apiBase: string,
+  symbol: string,
+  dataDir?: string
+): Promise<AvailableDatesResult> {
+  const res = await fetch(
+    engineUrl(apiBase, '/api/available_dates', { symbol }, dataDir)
+  );
+  if (!res.ok) {
+    throw new Error(`Engine returned ${res.status}`);
+  }
+  return (await res.json()) as AvailableDatesResult;
 }

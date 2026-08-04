@@ -16,6 +16,7 @@ const TIMEFRAME_OPTIONS = [
 interface ToolbarProps {
   symbol: string;
   availableTickers: string[];
+  availableDates?: string[];
   onSymbolChange: (symbol: string) => void;
   replayDate: string;
   onDateChange: (date: string) => void;
@@ -45,7 +46,7 @@ interface ToolbarProps {
   error?: string;
 }
 
-export function Toolbar({ symbol, availableTickers, onSymbolChange, replayDate, onDateChange, timeframe, lockToEdge, showMarkers, lightMode, indicators, onSetTimeframe, onToggleLock, onToggleMarkers, onToggleLightMode, onToggleIndicator, onReset, onOpenCalendar, orionOpen, onToggleOrion, error }: ToolbarProps) {
+export function Toolbar({ symbol, availableTickers, availableDates, onSymbolChange, replayDate, onDateChange, timeframe, lockToEdge, showMarkers, lightMode, indicators, onSetTimeframe, onToggleLock, onToggleMarkers, onToggleLightMode, onToggleIndicator, onReset, onOpenCalendar, orionOpen, onToggleOrion, error }: ToolbarProps) {
   const [indicatorsDropdownOpen, setIndicatorsDropdownOpen] = useState(false);
   const [calendarOpen, setCalendarOpen] = useState(false);
 
@@ -107,6 +108,7 @@ export function Toolbar({ symbol, availableTickers, onSymbolChange, replayDate, 
                 onChange={(d) => { onDateChange(d); setCalendarOpen(false); }}
                 minDate={minDateStr}
                 maxDate={todayStr}
+                availableDates={availableDates}
                 onClose={() => setCalendarOpen(false)}
                 lightMode={lightMode}
               />

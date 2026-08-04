@@ -47,6 +47,8 @@ interface UseWebSocketOptions {
   onSessionReset?: () => void;
   onSessionHistory?: (candles: CandleData[]) => void;
   onDataSynced?: () => void;
+  onDataSyncStarted?: () => void;
+  onDataSyncFailed?: (payload: { mode: string; exit_code: number; timestamp: number }) => void;
 }
 
 interface UseWebSocketReturn {
@@ -62,6 +64,8 @@ export function useWebSocket({
   onSessionReset,
   onSessionHistory,
   onDataSynced,
+  onDataSyncStarted,
+  onDataSyncFailed,
 }: UseWebSocketOptions): UseWebSocketReturn {
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectDelayRef = useRef(INITIAL_RECONNECT_DELAY);
@@ -73,10 +77,14 @@ export function useWebSocket({
   const onSessionResetRef = useRef(onSessionReset);
   const onSessionHistoryRef = useRef(onSessionHistory);
   const onDataSyncedRef = useRef(onDataSynced);
+  const onDataSyncStartedRef = useRef(onDataSyncStarted);
+  const onDataSyncFailedRef = useRef(onDataSyncFailed);
   onCandleUpdateRef.current = onCandleUpdate;
   onSessionResetRef.current = onSessionReset;
   onSessionHistoryRef.current = onSessionHistory;
   onDataSyncedRef.current = onDataSynced;
+  onDataSyncStartedRef.current = onDataSyncStarted;
+  onDataSyncFailedRef.current = onDataSyncFailed;
 
   const [connected, setConnected] = useState(false);
   const [reconnecting, setReconnecting] = useState(false);
@@ -198,6 +206,17 @@ export function useWebSocket({
 
         case 'data_synced': {
           onDataSyncedRef.current?.();
+          break;
+        }
+
+        case 'data_sync_started': {
+          onDataSyncStartedRef.current?.();
+          break;
+        }
+
+        case 'data_sync_failed': {
+          const p = payload as { mode: string; exit_code: number; timestamp: number };
+          onDataSyncFailedRef.current?.(p);
           break;
         }
 
