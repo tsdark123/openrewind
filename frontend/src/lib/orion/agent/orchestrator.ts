@@ -32,7 +32,16 @@ import type {
   ExecutionContextEntry,
 } from './types';
 import { createCancellationSource, type CancellationSource } from './types';
-import { parseChartCommand, extractDateInput, extractTimes, type ChartCommand, type ParsedTime } from '../planner';
+import { parseChartCommand, extractTimes, clampTimeframe, SUPPORTED_TIMEFRAMES, type ChartCommand, type ParsedTime } from '../planner';
+import {
+  type ActionDimension,
+  ALL_ACTION_DIMENSIONS,
+  INHERIT_FIELD_TO_DIMENSION,
+  getRequestedDimensions,
+  looksLikeSwitch,
+  textRequestsCandleQuery,
+  textRequestsPlaybackControl,
+} from './dimensions';
 import { SYMBOL_ALIASES } from '../symbolAliases';
 import { classifyOrionIntent } from '../router';
 import { orionChat } from '../client';
@@ -41,7 +50,7 @@ import { commonSenseReply } from '../commonSense';
 import type { SymbolResolution } from './resolveSymbol';
 import { chartCommandToPlan, chartCommandToActionTemplate } from './planner-adapter';
 import { executeAgentPlan } from './executor';
-import { extractSemanticIntent } from './intent';
+import { extractSemanticIntent, validateSemanticIntent } from './intent';
 import { compileChartActionIntent, resolveContextReference } from './intentCompiler';
 import { validateAgentPlan } from './validatePlan';
 import { agentTrace } from './config';
@@ -266,11 +275,6 @@ function looksLikeContextReference(text: string): boolean {
   );
 }
 
-function looksLikeSwitch(text: string): boolean {
-  const t = text.toLowerCase();
-  return /\b(switch|go to|load|open|change to|show|pull)\b/.test(t);
-}
-
 function looksLikePlayOrPause(text: string): boolean {
   const t = text.toLowerCase();
   return /\b(play|pause|stop|resume|go|rewind|fast[- ]?forward|fastforward)\b/.test(t);
@@ -448,8 +452,6 @@ function makeSwitchPlan(symbol: string): AgentPlan {
 // Deterministic planning completeness
 // ---------------------------------------------------------------------------
 
-type ActionDimension = 'symbol' | 'date' | 'timeframe' | 'absoluteTime' | 'relativeSeek' | 'playbackControl' | 'candleQuery' | 'previousSymbol';
-
 function planCoversDimensions(plan: AgentPlan): Set<ActionDimension> {
   const covered = new Set<ActionDimension>();
   for (const step of plan.steps) {
@@ -483,105 +485,6 @@ function planCoversDimensions(plan: AgentPlan): Set<ActionDimension> {
   return covered;
 }
 
-function textRequestsTimeframe(t: string): boolean {
-  const hasContext = /\b(?:timeframe|time frame|tf|bars?|chart)\b/i.test(t);
-  const numberWord = '(?:\\d+|one|two|three|four|five|six|seven|eight|nine|ten|fifteen|thirty|sixty)';
-  const unit = '(?:m|min|minute|minutes|h|hour|hours|d|day|days)';
-  const explicit = new RegExp(`\\b${numberWord}\\s*(?:-?${unit})?(?:\\s*(?:bar(?:s)?|timeframe|tf))?\\b`, 'i');
-  return hasContext ? explicit.test(t) : /\b\d+\s*m\b/i.test(t);
-}
-
-function textRequestsDate(t: string): boolean {
-  return (
-    /\b(?:prior|previous|last)\s+(?:trading\s+)?(?:session|day)s?\b/i.test(t) ||
-    /\b(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:trading\s+)?(?:session|day)s?\s+(?:ago|back|before)\b/i.test(t) ||
-    /\b(?:yesterday|today|tomorrow)\b/i.test(t) ||
-    /\b\d{4}-\d{1,2}-\d{1,2}\b/.test(t) ||
-    /\b\d{1,2}\/\d{1,2}\/\d{4}\b/.test(t)
-  );
-}
-
-function textRequestsAbsoluteTime(t: string): boolean {
-  return (
-    /\b\d{1,2}:\d{2}\b/.test(t) ||
-    /\b\d{1,2}\s*(?:am|pm)\b/i.test(t) ||
-    /\b(?:noon|midnight|market\s+open|market\s+close)\b/i.test(t) ||
-    /\b(?:quarter|half)\s+(?:past|to)\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\b/i.test(t) ||
-    /\bo\'clock\b/i.test(t)
-  );
-}
-
-function textRequestsRelativeSeek(t: string): boolean {
-  if (/\b(?:take me back|previous symbol|previous stock|stock i was just on|was just on)\b/i.test(t)) return false;
-  return (
-    /\b(?:\d+|half)\s*(?:an?\s+)?(?:minute|minutes|hour|hours|hr|hrs|min|mins)\s+(?:ago|earlier|later|before|after)\b/i.test(t) ||
-    /\b(?:earlier|later)\b/i.test(t) ||
-    /\b(?:go|move|skip|jump)\s+back\b/i.test(t) ||
-    /\brewind\s+(?:\d+|half|a few)?\s*(?:minute|minutes|hour|hours)?/i.test(t)
-  );
-}
-
-function textRequestsPlaybackControl(t: string): boolean {
-  return /\b(?:play|pause|rewind|fast[-\s]?forward|fastforward|speed up|slow down|set\s+speed)\b/.test(t);
-}
-
-function textRequestsCandleQuery(t: string): boolean {
-  if (/\b(?:candle|bar|ohlc)\b/i.test(t)) return true;
-  if (/\b(?:price|worth|value)\b/i.test(t)) {
-    return /\b(?:what|tell|give|show|which|the)\s+(?:price|worth|value)\b/i.test(t) ||
-      /\b(?:price|worth|value)\s+(?:at|of)\b/i.test(t);
-  }
-  return false;
-}
-
-function textRequestsPreviousSymbol(t: string): boolean {
-  return /\b(?:take me back|previous symbol|previous stock|stock i was just on|was just on)\b/i.test(t);
-}
-
-function getRequestedDimensions(text: string, cmd: ChartCommand, baseDate?: string): Set<ActionDimension> {
-  const t = text;
-  const dims = new Set<ActionDimension>();
-
-  if (cmd.symbol || cmd.intent === 'switch' || looksLikeSwitch(text)) {
-    dims.add('symbol');
-  }
-  if (cmd.date || cmd.dateInput || extractDateInput(text, baseDate)) {
-    dims.add('date');
-  } else if (textRequestsDate(t)) {
-    dims.add('date');
-  }
-  if (cmd.timeframe !== undefined) {
-    dims.add('timeframe');
-  } else if (textRequestsTimeframe(t)) {
-    dims.add('timeframe');
-  }
-  if (cmd.startTime || cmd.endTime) {
-    dims.add('absoluteTime');
-  } else if (textRequestsAbsoluteTime(t)) {
-    dims.add('absoluteTime');
-  }
-  if (cmd.relativeMinutes !== undefined) {
-    dims.add('relativeSeek');
-  } else if (textRequestsRelativeSeek(t)) {
-    dims.add('relativeSeek');
-  }
-  if (cmd.speed !== undefined || ['play', 'pause', 'rewind', 'fast_forward', 'set_speed', 'seek'].includes(cmd.intent)) {
-    dims.add('playbackControl');
-  } else if (textRequestsPlaybackControl(t)) {
-    dims.add('playbackControl');
-  }
-  if (cmd.intent === 'candle_query') {
-    dims.add('candleQuery');
-    if (cmd.startTime || cmd.endTime) dims.add('absoluteTime');
-  } else if (textRequestsCandleQuery(t)) {
-    dims.add('candleQuery');
-  }
-  if (textRequestsPreviousSymbol(t)) {
-    dims.add('previousSymbol');
-  }
-  return dims;
-}
-
 function stateCoversDimension(
   dim: ActionDimension,
   cmd: ChartCommand,
@@ -592,26 +495,6 @@ function stateCoversDimension(
   if (dim === 'timeframe') return cmd.timeframe !== undefined && state.timeframe === cmd.timeframe;
   return false;
 }
-
-const ALL_ACTION_DIMENSIONS: ActionDimension[] = [
-  'symbol',
-  'date',
-  'timeframe',
-  'absoluteTime',
-  'relativeSeek',
-  'playbackControl',
-  'candleQuery',
-  'previousSymbol',
-];
-
-const INHERIT_FIELD_TO_DIMENSION: Record<string, ActionDimension | undefined> = {
-  date: 'date',
-  timeframe: 'timeframe',
-  seekTime: 'absoluteTime',
-  relativeSeekMinutes: 'relativeSeek',
-  playback: 'playbackControl',
-  finalQuery: 'candleQuery',
-};
 
 function formatParsedTime(t: ParsedTime): string {
   return `${t.hour.toString().padStart(2, '0')}:${t.minute.toString().padStart(2, '0')}`;
@@ -643,6 +526,29 @@ function formatDateForTrace(d: ChartActionIntent['date']): string {
 }
 
 /**
+ * Overlay deterministic, parser-grounded fields onto a model/context intent.
+ * Deterministic values win over the LLM and over inherited context values.
+ * The result is re-validated so malformed deterministic values (e.g. an
+ * unsupported timeframe) are rejected before planning.
+ */
+function overlayGroundedIntent(model: ChartActionIntent, grounded: ChartActionIntent): ChartActionIntent {
+  const merged: ChartActionIntent = { ...model };
+  for (const key of Object.keys(grounded) as (keyof ChartActionIntent)[]) {
+    if (key === 'kind') continue;
+    const value = grounded[key];
+    if (value !== undefined) {
+      (merged as any)[key] = value;
+    }
+  }
+  // If the deterministic template supplies a finalQuery but no queryTime, do
+  // not keep a stale model queryTime (the two are a matched pair).
+  if (grounded.finalQuery !== undefined && grounded.queryTime === undefined) {
+    delete (merged as any).queryTime;
+  }
+  return merged;
+}
+
+/**
  * Field-level semantic-safety sanitizer. After the compact model emits a
  * ChartActionIntent (and after context references have been resolved), each
  * actionable field is checked independently:
@@ -651,8 +557,6 @@ function formatDateForTrace(d: ChartActionIntent['date']): string {
  *   3. Strip it as a safe state default if it only repeats the current state.
  *   4. Strip it if it is an unsupported optional field.
  * If no meaningful grounded action remains, the entire intent is rejected.
- * This prevents `clean` -> `Switch AAPL 2023-03-15 15m @11:15 current_candle`
- * while still allowing "Take me to Apple around quarter past eleven."
  */
 function sanitizeIntentGrounding(
   resolved: ChartActionIntent,
@@ -695,8 +599,22 @@ function sanitizeIntentGrounding(
   const trace: IntentSanitizationResult['trace'] = { kept: [], stripped: [], defaults: [] };
 
   // Work on a deep copy; contextReference is consumed by resolveContextReference.
-  const sanitized = JSON.parse(JSON.stringify(resolved)) as ChartActionIntent;
+  let sanitized = JSON.parse(JSON.stringify(resolved)) as ChartActionIntent;
   delete (sanitized as unknown as Record<string, unknown>).contextReference;
+
+  // Deterministic grounded fields are authoritative over model/context values.
+  const groundedTemplate = chartCommandToActionTemplate(cmd);
+  if (groundedTemplate) {
+    sanitized = overlayGroundedIntent(sanitized, groundedTemplate);
+    const validation = validateSemanticIntent(sanitized);
+    if (!validation.ok) {
+      return { ok: false, reason: validation.error, trace: { kept: [], stripped: [], defaults: [] } };
+    }
+    if (validation.intent.kind !== 'chart_action') {
+      return { ok: false, reason: 'Expected a chart action intent.', trace: { kept: [], stripped: [], defaults: [] } };
+    }
+    sanitized = validation.intent;
+  }
 
   // Symbol
   if (sanitized.symbol !== undefined) {
@@ -1060,8 +978,23 @@ async function routeMessage(
   }
 
   // 4. Deterministic chart parser.
-  const cmd = parseChartCommand(text, ctx.availableTickers, SYMBOL_ALIASES, ctx.getState().replayDate);
+  const baseDate = ctx.getState().replayDate;
+  const cmd = parseChartCommand(text, ctx.availableTickers, SYMBOL_ALIASES, baseDate);
   agentTrace('parsed chart command', cmd);
+
+  // Reject explicit timeframe requests with malformed or unsupported values
+  // before any plan runs.  This keeps zero-minute, 7m, etc. from partially
+  // executing or reaching the model with a value the engine cannot satisfy.
+  if (cmd.timeframe !== undefined && getRequestedDimensions(text, cmd, baseDate).has('timeframe')) {
+    const clamped = clampTimeframe(cmd.timeframe);
+    if (clamped === undefined) {
+      const msg = cmd.timeframe < 1
+        ? 'timeframeMinutes must be a positive integer.'
+        : `Unsupported timeframe. Supported values are: ${SUPPORTED_TIMEFRAMES.join(', ')}.`;
+      agentTrace('route', 'error', { error: msg });
+      return { ok: false, message: msg, wasChat: false, route: 'error' };
+    }
+  }
 
   if (!anaphoric && isFastPathReady(cmd)) {
     const plan = chartCommandToPlan(cmd);
@@ -1157,8 +1090,26 @@ async function routeMessage(
 
   // 6. Compact semantic-intent extraction for unfamiliar or compound actionable language.
   if (setupReady && (classification.intent === 'agent' || !routeChat)) {
+    const baseDate = ctx.getState().replayDate;
+    const requested = getRequestedDimensions(text, cmd, baseDate);
+    const parserCovered = new Set<ActionDimension>();
+    if (cmd.symbol) parserCovered.add('symbol');
+    if (cmd.date || cmd.dateInput) parserCovered.add('date');
+    if (cmd.timeframe !== undefined) parserCovered.add('timeframe');
+    if (cmd.startTime || cmd.endTime) parserCovered.add('absoluteTime');
+    if (cmd.relativeMinutes !== undefined) parserCovered.add('relativeSeek');
+    if (cmd.speed !== undefined) parserCovered.add('playbackControl');
+    if (cmd.intent === 'candle_query') parserCovered.add('candleQuery');
+    const missing = Array.from(requested).filter((d) => !parserCovered.has(d));
     agentTrace('route', 'llm-intent-start', { text });
-    const extraction = await extractSemanticIntent(text, { executionLog: ctx.executionLog });
+    const extraction = await extractSemanticIntent(text, {
+      executionLog: ctx.executionLog,
+      requestContext: {
+        dimensions: Array.from(requested),
+        missing,
+        baseDate,
+      },
+    });
     agentTrace('llm intent end', { ok: extraction.ok ? 'intent' : extraction.kind });
 
     if (extraction.ok) {

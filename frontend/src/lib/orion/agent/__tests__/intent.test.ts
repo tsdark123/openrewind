@@ -206,7 +206,12 @@ describe('extractSemanticIntent', () => {
       toolCalls: [],
       raw: {},
     });
-    const r = await extractSemanticIntent('set me up on Nvidia prior session 15m 11:15 candle');
+    const r = await extractSemanticIntent('set me up on Nvidia prior session 15m 11:15 candle', {
+      requestContext: {
+        dimensions: ['symbol', 'date', 'timeframe', 'absoluteTime', 'candleQuery'],
+        missing: [],
+      },
+    });
     expect(mockedOrionChat).toHaveBeenCalledTimes(1);
     const call = mockedOrionChat.mock.calls[0][0];
     expect(call.format).toBe('json');
@@ -229,7 +234,12 @@ describe('extractSemanticIntent', () => {
         toolCalls: [],
         raw: {},
       });
-    const r = await extractSemanticIntent('what is the current candle for AAPL');
+    const r = await extractSemanticIntent('what is the current candle for AAPL', {
+      requestContext: {
+        dimensions: ['symbol', 'candleQuery'],
+        missing: [],
+      },
+    });
     expect(mockedOrionChat).toHaveBeenCalledTimes(2);
     expect(r.ok).toBe(true);
   });
@@ -240,7 +250,12 @@ describe('extractSemanticIntent', () => {
       toolCalls: [],
       raw: {},
     });
-    const r = await extractSemanticIntent('AAPL at 25:00');
+    const r = await extractSemanticIntent('AAPL at 25:00', {
+      requestContext: {
+        dimensions: ['symbol', 'absoluteTime'],
+        missing: [],
+      },
+    });
     expect(mockedOrionChat).toHaveBeenCalledTimes(2);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.kind).toBe('invalid');

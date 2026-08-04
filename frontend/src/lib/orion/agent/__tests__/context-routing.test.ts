@@ -420,18 +420,10 @@ describe('semantic grounding', () => {
     ]);
   });
 
-  it('keeps an explicit timeframe from user text', async () => {
+  it('keeps an explicit timeframe from user text deterministically', async () => {
     const ctx = makeCtx();
     ctx.getState().replayDate = '2026-07-10';
     ctx.getState().sessionActive = true;
-
-    mockedOrionChat.mockResolvedValueOnce(
-      mockCompactIntent({
-        kind: 'chart_action',
-        symbol: 'AAPL',
-        timeframeMinutes: 15,
-      })
-    );
 
     const r = await handleOrionMessage({
       text: 'Could you set me up on Apple and use fifteen-minute bars?',
@@ -439,15 +431,15 @@ describe('semantic grounding', () => {
       setupReady: true,
     });
 
-    expect(r.route).toBe('llm-plan');
+    expect(r.route).toBe('deterministic');
     expect(r.ok).toBe(true);
     expect(ctx.getState().symbol).toBe('AAPL');
     expect(ctx.getState().timeframe).toBe(15);
     expect(r.plan?.steps.map((s) => s.capability)).toEqual([
-      'session.resolve_symbol',
       'session.switch_symbol',
       'chart.set_timeframe',
     ]);
+    expect(mockedOrionChat).not.toHaveBeenCalled();
   });
 
   it('strips a model date equal to the current state as a safe default', async () => {
@@ -527,5 +519,279 @@ describe('semantic grounding', () => {
     );
     await handleOrionMessage({ text: 'clean', ctx, setupReady: true });
     expect(ctx.executionLog.getEntries()).toHaveLength(2);
+  });
+});
+
+describe('regression: time-only and invalid-date handling', () => {
+  it('inherits the active session date when the model emits an invalid date for a time-only request', async () => {
+    const ctx = makeCtx();
+    ctx.getState().replayDate = '2026-07-31';
+    ctx.getState().sessionActive = true;
+    ctx.getState().timeframe = 5;
+
+    mockedOrionChat.mockResolvedValueOnce(
+      mockCompactIntent({
+        kind: 'chart_action',
+        symbol: 'AAPL',
+        seekTime: '11:15',
+        date: { kind: 'absolute', value: 'today' },
+        timeframeMinutes: 15,
+      })
+    );
+
+    const r = await handleOrionMessage({
+      text: 'Take me to Apple around quarter past eleven.',
+      ctx,
+      setupReady: true,
+    });
+
+    expect(r.route).toBe('llm-plan');
+    expect(r.ok).toBe(true);
+    expect(ctx.getState().symbol).toBe('AAPL');
+    expect(ctx.getState().replayDate).toBe('2026-07-31');
+    expect(ctx.getState().timeframe).toBe(5);
+    expect(r.plan?.steps.map((s) => s.capability)).toEqual([
+      'session.resolve_symbol',
+      'session.switch_symbol',
+      'playback.seek_to_time',
+    ]);
+    expect(ctx.send).toHaveBeenCalledWith(expect.objectContaining({ cmd: 'seek', timestamp: expect.any(Number) }));
+  });
+
+  it('uses the active session date for a time-only request to a different symbol', async () => {
+    const ctx = makeCtx();
+    ctx.getState().symbol = 'AAPL';
+    ctx.getState().replayDate = '2026-07-31';
+    ctx.getState().sessionActive = true;
+    ctx.getState().timeframe = 5;
+
+    const r = await handleOrionMessage({
+      text: 'Go to Nvidia at 10:30.',
+      ctx,
+      setupReady: true,
+    });
+
+    expect(r.route).toBe('deterministic');
+    expect(r.ok).toBe(true);
+    expect(ctx.getState().symbol).toBe('NVDA');
+    expect(ctx.getState().replayDate).toBe('2026-07-31');
+    expect(ctx.getState().timeframe).toBe(5);
+    expect(r.plan?.steps.map((s) => s.capability)).toEqual([
+      'session.switch_symbol',
+      'playback.seek_to_time',
+    ]);
+    expect(ctx.send).toHaveBeenCalledWith(expect.objectContaining({ cmd: 'seek', timestamp: expect.any(Number) }));
+    expect(mockedOrionChat).not.toHaveBeenCalled();
+  });
+
+  it('rejects an explicitly invalid date rather than inheriting the active session date', async () => {
+    const ctx = makeCtx();
+    ctx.getState().symbol = 'AAPL';
+    ctx.getState().replayDate = '2026-07-31';
+    ctx.getState().sessionActive = true;
+    ctx.getState().timeframe = 5;
+
+    mockedOrionChat.mockResolvedValue(
+      mockCompactIntent({
+        kind: 'chart_action',
+        symbol: 'AAPL',
+        seekTime: '11:15',
+        date: { kind: 'absolute', value: 'banana' },
+      })
+    );
+
+    const r = await handleOrionMessage({
+      text: 'Take me to Apple on banana around quarter past eleven.',
+      ctx,
+      setupReady: true,
+    });
+
+    expect(r.ok).toBe(false);
+    expect(r.wasChat).toBe(false);
+    expect(ctx.getState().symbol).toBe('AAPL');
+    expect(ctx.getState().replayDate).toBe('2026-07-31');
+    expect(r.message).toMatch(/absolute date requires a valid YYYY-MM-DD value/);
+    expect(mockedOrionChat).toHaveBeenCalledTimes(2);
+  });
+
+  it('preserves a valid explicit date from the user text', async () => {
+    const ctx = makeCtx();
+    ctx.getState().replayDate = '2026-07-31';
+    ctx.getState().sessionActive = true;
+    ctx.getState().timeframe = 5;
+
+    const r = await handleOrionMessage({
+      text: 'Take me to Apple on 2026-07-30 at 11:15.',
+      ctx,
+      setupReady: true,
+    });
+
+    expect(r.route).toBe('deterministic');
+    expect(r.ok).toBe(true);
+    expect(ctx.getState().symbol).toBe('AAPL');
+    expect(ctx.getState().replayDate).toBe('2026-07-30');
+    expect(ctx.getState().timeframe).toBe(5);
+    expect(r.plan?.steps.map((s) => s.capability)).toEqual([
+      'session.resolve_trading_date',
+      'session.switch_symbol',
+      'playback.seek_to_time',
+    ]);
+    expect(mockedOrionChat).not.toHaveBeenCalled();
+  });
+
+  it('strips an unrequested invalid timeframe on an otherwise valid explicit date + time request', async () => {
+    const ctx = makeCtx();
+    ctx.getState().symbol = 'AAPL';
+    ctx.getState().replayDate = '2026-07-31';
+    ctx.getState().sessionActive = true;
+    ctx.getState().timeframe = 5;
+
+    mockedOrionChat.mockResolvedValueOnce(
+      mockCompactIntent({
+        kind: 'chart_action',
+        symbol: 'AAPL',
+        date: { kind: 'absolute', value: '2026-07-31' },
+        seekTime: '11:15',
+        timeframeMinutes: 0,
+      })
+    );
+
+    const r = await handleOrionMessage({
+      text: 'Take me to Apple on 2026-07-31 around quarter past eleven.',
+      ctx,
+      setupReady: true,
+    });
+
+    expect(r.route).toBe('llm-plan');
+    expect(r.ok).toBe(true);
+    expect(ctx.getState().symbol).toBe('AAPL');
+    expect(ctx.getState().replayDate).toBe('2026-07-31');
+    expect(ctx.getState().timeframe).toBe(5);
+    expect(r.plan?.steps.map((s) => s.capability)).toEqual([
+      'session.resolve_symbol',
+      'session.resolve_trading_date',
+      'session.switch_symbol',
+      'playback.seek_to_time',
+    ]);
+    expect(mockedOrionChat).toHaveBeenCalledTimes(1);
+  });
+
+  it('strips a hallucinated date and timeframe from a time-only request', async () => {
+    const ctx = makeCtx();
+    ctx.getState().symbol = 'AAPL';
+    ctx.getState().replayDate = '2026-07-31';
+    ctx.getState().sessionActive = true;
+    ctx.getState().timeframe = 5;
+
+    mockedOrionChat.mockResolvedValueOnce(
+      mockCompactIntent({
+        kind: 'chart_action',
+        symbol: 'AAPL',
+        seekTime: '11:15',
+        date: { kind: 'absolute', value: '2023-11-15' },
+        timeframeMinutes: 15,
+      })
+    );
+
+    const r = await handleOrionMessage({
+      text: 'Take me to Apple around quarter past eleven.',
+      ctx,
+      setupReady: true,
+    });
+
+    expect(r.route).toBe('llm-plan');
+    expect(r.ok).toBe(true);
+    expect(ctx.getState().symbol).toBe('AAPL');
+    expect(ctx.getState().replayDate).toBe('2026-07-31');
+    expect(ctx.getState().timeframe).toBe(5);
+  });
+
+  it('rejects an explicitly malformed timeframe rather than silently fixing it', async () => {
+    const ctx = makeCtx();
+    ctx.getState().symbol = 'AAPL';
+    ctx.getState().replayDate = '2026-07-31';
+    ctx.getState().sessionActive = true;
+    ctx.getState().timeframe = 5;
+
+    mockedOrionChat.mockResolvedValue(
+      mockCompactIntent({
+        kind: 'chart_action',
+        symbol: 'AAPL',
+        date: { kind: 'absolute', value: '2026-07-31' },
+        seekTime: '11:15',
+        timeframeMinutes: 0,
+      })
+    );
+
+    const r = await handleOrionMessage({
+      text: 'Take me to Apple on 2026-07-31 at 11:15 with a 0 minute chart.',
+      ctx,
+      setupReady: true,
+    });
+
+    expect(r.ok).toBe(false);
+    expect(r.wasChat).toBe(false);
+    expect(r.message).toMatch(/timeframeMinutes must be a positive integer/);
+    expect(mockedOrionChat).not.toHaveBeenCalled();
+  });
+
+  it('preserves a valid explicit timeframe requested by the user', async () => {
+    const ctx = makeCtx();
+    ctx.getState().symbol = 'AAPL';
+    ctx.getState().replayDate = '2026-07-31';
+    ctx.getState().sessionActive = true;
+    ctx.getState().timeframe = 5;
+
+    const r = await handleOrionMessage({
+      text: 'Take me to Apple on 2026-07-31 at 11:15 on a 15m chart.',
+      ctx,
+      setupReady: true,
+    });
+
+    expect(r.route).toBe('deterministic');
+    expect(r.ok).toBe(true);
+    expect(ctx.getState().symbol).toBe('AAPL');
+    expect(ctx.getState().replayDate).toBe('2026-07-31');
+    expect(ctx.getState().timeframe).toBe(15);
+    expect(r.plan?.steps.map((s) => s.capability)).toEqual([
+      'session.resolve_trading_date',
+      'session.switch_symbol',
+      'chart.set_timeframe',
+      'playback.seek_to_time',
+    ]);
+    expect(mockedOrionChat).not.toHaveBeenCalled();
+  });
+
+  it('uses the current active session date for a time-only request with no model date', async () => {
+    const ctx = makeCtx();
+    ctx.getState().symbol = 'AAPL';
+    ctx.getState().replayDate = '2026-07-31';
+    ctx.getState().sessionActive = true;
+    ctx.getState().timeframe = 5;
+
+    mockedOrionChat.mockResolvedValueOnce(
+      mockCompactIntent({
+        kind: 'chart_action',
+        symbol: 'AAPL',
+        seekTime: '11:15',
+      })
+    );
+
+    const r = await handleOrionMessage({
+      text: 'Take me to Apple around quarter past eleven.',
+      ctx,
+      setupReady: true,
+    });
+
+    expect(r.route).toBe('llm-plan');
+    expect(r.ok).toBe(true);
+    expect(ctx.getState().symbol).toBe('AAPL');
+    expect(ctx.getState().replayDate).toBe('2026-07-31');
+    expect(ctx.getState().timeframe).toBe(5);
+    expect(r.plan?.steps.map((s) => s.capability)).toEqual([
+      'session.resolve_symbol',
+      'session.switch_symbol',
+      'playback.seek_to_time',
+    ]);
   });
 });

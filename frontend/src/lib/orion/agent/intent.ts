@@ -13,6 +13,13 @@
 
 import { agentTrace } from './config';
 import { orionChat, ORION_AGENT_MODEL, type OrionChatMessage } from '../client';
+import { parseChartCommand, extractTimes } from '../planner';
+import {
+  type ActionDimension,
+  ALL_ACTION_DIMENSIONS,
+  INHERIT_FIELD_TO_DIMENSION,
+  getRequestedDimensions,
+} from './dimensions';
 import type {
   ChartActionIntent,
   SemanticIntent,
@@ -43,6 +50,12 @@ export interface RequestContext {
   dimensions: string[];
   /** Dimensions that the deterministic parser did NOT cover. */
   missing: string[];
+  /** Base date for relative date resolution and date-request detection. */
+  baseDate?: string;
+  /** Ticker list for computing requested dimensions when a pre-computed list is not supplied. */
+  availableTickers?: string[];
+  /** Symbol aliases for the ticker-list fallback. */
+  symbolAliases?: Record<string, string>;
   /** Human-readable details for each detected dimension, when available. */
   signals?: Record<string, string | undefined>;
   /** Short note about what the deterministic parser produced, if anything. */
@@ -174,8 +187,8 @@ export function buildIntentExtractionPrompt(executionLog?: ExecutionContextStore
     '- Map company names to tickers: AAPL, MSFT, NVDA.',
     '- "prior trading session" -> date:{"kind":"relative_trading","count":1,"direction":"backward"}. No date value.',
     '- "next trading session" -> date:{"kind":"relative_trading","count":1,"direction":"forward"}.',
-    '- "fifteen-minute bars" -> timeframeMinutes:15.',
-    '- "quarter past eleven" -> seekTime:"11:15".',
+    '- "N-minute bars" -> timeframeMinutes:N (e.g. 15m -> 15).',
+    '- "quarter past X" -> seekTime:"X:15".',
     '- "park the replay at X" means seekTime:X (do not pause).',
     '- "move the replay X minutes earlier/ago" -> relativeSeekMinutes:-X. "X minutes later/forward" -> relativeSeekMinutes:+X.',
     '- "take me back to the previous stock" -> previousSymbol:true.',
@@ -209,11 +222,11 @@ export function buildIntentExtractionPrompt(executionLog?: ExecutionContextStore
 
   sections.push(
     'Examples:',
-    '- "set me up on NVDA for the prior trading session, fifteen-minute bars, park the replay at 11:15 and tell me what candle I\'m on" -> {"kind":"chart_action","symbol":"NVDA","date":{"kind":"relative_trading","count":1,"direction":"backward"},"timeframeMinutes":15,"seekTime":"11:15","finalQuery":"current_candle"}',
+    '- "set me up on <SYMBOL> for the prior trading session, use N-minute bars, park the replay at HH:MM and tell me what candle I\'m on" -> {"kind":"chart_action","symbol":"<SYMBOL>","date":{"kind":"relative_trading","count":1,"direction":"backward"},"timeframeMinutes":N,"seekTime":"HH:MM","finalQuery":"current_candle"}',
     '- "move the replay 30 minutes earlier and give me the bar" -> {"kind":"chart_action","relativeSeekMinutes":-30,"finalQuery":"current_candle"}',
     '- "take me back to the previous stock" -> {"kind":"chart_action","previousSymbol":true}',
-    '- "Do that again on AAPL" -> {"kind":"chart_action","symbol":"AAPL","contextReference":{"source":"latest_successful_action","mode":"repeat"}}',
-    '- "Use the same timeframe on NVDA" -> {"kind":"chart_action","symbol":"NVDA","contextReference":{"source":"latest_successful_action","mode":"inherit","inherit":["timeframe"]}}',
+    '- "Do that again on <SYMBOL>" -> {"kind":"chart_action","symbol":"<SYMBOL>","contextReference":{"source":"latest_successful_action","mode":"repeat"}}',
+    '- "Use the same timeframe on <SYMBOL>" -> {"kind":"chart_action","symbol":"<SYMBOL>","contextReference":{"source":"latest_successful_action","mode":"inherit","inherit":["timeframe"]}}',
     '- "Use the same timeframe but go to the prior trading session" -> {"kind":"chart_action","date":{"kind":"relative_trading","count":1,"direction":"backward"},"contextReference":{"source":"latest_successful_action","mode":"inherit","inherit":["timeframe"]}}',
     '- "Go back to the candle we were discussing" -> {"kind":"chart_action","contextReference":{"source":"latest_returned_candle","mode":"use_as_target"}}',
     '- "Compare this candle with the previous candle you reported" -> {"kind":"chart_action","finalQuery":"compare_candles","compare":{"left":{"source":"latest_returned_candle"},"right":{"source":"previous_returned_candle"}}}',
@@ -644,6 +657,346 @@ export function validateSemanticIntent(raw: unknown): IntentValidationResult | I
 }
 
 // ---------------------------------------------------------------------------
+// Pre-validation grounding / sanitation
+//
+// Before strict validation, remove model-produced optional dimensions that were
+// not requested or grounded in the user's text. This prevents an unrequested
+// malformed optional field (e.g. timeframeMinutes: 0, a hallucinated date) from
+// aborting the pipeline before sanitizeIntentGrounding can resolve or strip it.
+// ---------------------------------------------------------------------------
+
+function normalizeForMatch(s: string): string {
+  return s.toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function isDateInText(value: string, text: string): boolean {
+  const nValue = normalizeForMatch(value);
+  const nText = normalizeForMatch(text);
+  if (!nValue || !nText) return false;
+  if (nText.includes(nValue)) return true;
+
+  // The user may write "7/30", "7/30/2026", "30/7/2026", etc. while the model
+  // normalizes to an ISO date. Match month/day with a separator and an optional
+  // year so abbreviated explicit dates are still treated as user-provided, while
+  // avoiding false positives from bare 4-digit numbers like "1115".
+  const m = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return false;
+  const month = m[2];
+  const day = m[3];
+  const dayNoPad = String(parseInt(day, 10));
+  const monthNoPad = String(parseInt(month, 10));
+  const patterns = [
+    new RegExp(`\\b(?:\\d{4}[-/\\s.])?0?${monthNoPad}[-/\\s.]0?${dayNoPad}\\b`),
+    new RegExp(`\\b0?${dayNoPad}[-/\\s.]0?${monthNoPad}(?:[-/\\s.]\\d{4})?\\b`),
+  ];
+  return patterns.some((re) => re.test(text));
+}
+
+function isTimeInText(value: string, text: string): boolean {
+  const nValue = normalizeForMatch(value);
+  const nText = normalizeForMatch(text);
+  if (!nValue || !nText) return false;
+  if (nText.includes(nValue)) return true;
+
+  // The user may write a colloquial time and the model may normalize it (e.g.
+  // "quarter past X" -> "X:15").  Trust explicit time extraction to decide
+  // whether any time expression was said.
+  return extractTimes(text).length > 0;
+}
+
+function isNumberInText(value: number, text: string): boolean {
+  if (!text) return false;
+  const re = new RegExp(`(?:^|\\D)${String(value)}(?!\\d)`, 'i');
+  return re.test(text);
+}
+
+function isPlaybackActionGrounded(action: unknown, text: string): boolean {
+  if (typeof action !== 'string') return false;
+  const t = text.toLowerCase();
+  if (action === 'play') return /\bplay\b/i.test(text) && !/\bplay\s+until\b/i.test(text) && !/\buntil\b/i.test(t);
+  if (action === 'play_until') return /\b(?:play\s+until|play\s+till|until\s+\d|till\s+\d)\b/i.test(text);
+  if (action === 'pause') return /\b(?:pause|stop|halt)\b/i.test(text);
+  return false;
+}
+
+function isFinalQueryGrounded(finalQuery: unknown, text: string): boolean {
+  const t = text.toLowerCase();
+  if (finalQuery === 'current_candle') {
+    return /\b(?:candle|bar|price|value|worth)\b/i.test(text) || /\b(?:current|now|latest)\b/i.test(t);
+  }
+  if (finalQuery === 'candle_at_time') {
+    return extractTimes(text).length > 0 && /\b(?:candle|bar|price|value|worth)\b/i.test(text);
+  }
+  if (finalQuery === 'compare_candles') {
+    return /\bcompare\b/i.test(t) || /\b(?:this|the|that)\s+candle\s+(?:with|to|against)\s+(?:the\s+)?(?:previous|last|prior|reported)\b/i.test(t);
+  }
+  return false;
+}
+
+function isSymbolInText(value: string, text: string): boolean {
+  const nValue = normalizeForMatch(value);
+  const nText = normalizeForMatch(text);
+  if (!nValue || !nText) return false;
+  return nText.includes(nValue);
+}
+
+function isPreviousSymbolGrounded(text: string): boolean {
+  return /\b(?:take me back|previous symbol|previous stock|stock i was just on|was just on)\b/i.test(text);
+}
+
+function isPlaybackControlGrounded(text: string): boolean {
+  return /\b(?:play|pause|rewind|fast[-\s]?forward|fastforward|speed up|slow down|set\s+speed)\b/.test(text);
+}
+
+function getContextAllowedDimensions(ref: ContextReference): Set<ActionDimension> {
+  const dims = new Set<ActionDimension>();
+  if (ref.mode === 'repeat') {
+    for (const d of ALL_ACTION_DIMENSIONS) dims.add(d);
+  } else if (ref.mode === 'inherit' && ref.inherit) {
+    for (const f of ref.inherit) {
+      const dim = INHERIT_FIELD_TO_DIMENSION[f];
+      if (dim) dims.add(dim);
+    }
+  } else if (ref.mode === 'use_as_target') {
+    dims.add('absoluteTime');
+    dims.add('symbol');
+    dims.add('date');
+    dims.add('timeframe');
+    dims.add('candleQuery');
+  } else if (ref.mode === 'anchor_relative_date') {
+    dims.add('date');
+  }
+  return dims;
+}
+
+const FIELD_TO_DIMENSION: Record<string, ActionDimension | undefined> = {
+  symbol: 'symbol',
+  previousSymbol: 'previousSymbol',
+  date: 'date',
+  timeframeMinutes: 'timeframe',
+  seekTime: 'absoluteTime',
+  relativeSeekMinutes: 'relativeSeek',
+  playback: 'playbackControl',
+  finalQuery: 'candleQuery',
+  queryTime: 'absoluteTime',
+};
+
+function buildRequestedSet(text: string, raw: Record<string, unknown>, requestContext?: RequestContext): Set<ActionDimension> {
+  const requested = new Set<ActionDimension>();
+
+  if (requestContext?.dimensions) {
+    for (const d of requestContext.dimensions) {
+      if (ALL_ACTION_DIMENSIONS.includes(d as ActionDimension)) {
+        requested.add(d as ActionDimension);
+      }
+    }
+  } else {
+    // Fallback: compute dimensions from the text alone when the orchestrator has
+    // not pre-computed them (e.g. direct unit tests).
+    const tickers = requestContext?.availableTickers ?? [];
+    const aliases = requestContext?.symbolAliases;
+    const cmd = parseChartCommand(text, tickers, aliases, requestContext?.baseDate);
+    for (const d of getRequestedDimensions(text, cmd, requestContext?.baseDate)) {
+      requested.add(d);
+    }
+  }
+
+  // Context references authorize inherited dimensions even when the current text
+  // does not explicitly name them.
+  const ref = raw.contextReference as ContextReference | undefined;
+  if (ref) {
+    for (const d of getContextAllowedDimensions(ref)) {
+      requested.add(d);
+    }
+  }
+
+  return requested;
+}
+
+function isFieldMalformed(
+  field: string,
+  value: unknown
+): boolean {
+  if (field === 'symbol') {
+    return typeof value !== 'string' || looksLikeInjection(value);
+  }
+
+  if (field === 'previousSymbol') {
+    return value !== true;
+  }
+
+  if (field === 'date') {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return true;
+    const d = value as Record<string, unknown>;
+    if (d.kind !== 'absolute' && d.kind !== 'relative_trading') return true;
+    if (d.kind === 'absolute') {
+      const v = d.value;
+      return typeof v !== 'string' || !isValidDate(v) || 'count' in d || 'direction' in d;
+    }
+    // relative_trading
+    if ('value' in d) return true;
+    const count = d.count;
+    if (!isInteger(count) || count < 1) return true;
+    const dir = d.direction;
+    return dir !== 'backward' && dir !== 'forward';
+  }
+
+  if (field === 'timeframeMinutes') {
+    return !isInteger(value) || value < 1;
+  }
+
+  if (field === 'seekTime' || field === 'queryTime') {
+    return typeof value !== 'string' || !isValidTime(value) || looksLikeInjection(value);
+  }
+
+  if (field === 'relativeSeekMinutes') {
+    return !isInteger(value);
+  }
+
+  if (field === 'playback') {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return true;
+    const p = value as Record<string, unknown>;
+    if (p.action !== 'play' && p.action !== 'pause' && p.action !== 'play_until') return true;
+    if ('untilTime' in p) {
+      if (p.action !== 'play_until') return true;
+      if (typeof p.untilTime !== 'string' || !isValidTime(p.untilTime)) return true;
+    }
+    if ('speed' in p) {
+      if (!isInteger(p.speed) || p.speed < 1) return true;
+    }
+    if ('direction' in p) {
+      if (p.action !== 'play_until') return true;
+      if (p.direction !== 'forward' && p.direction !== 'backward') return true;
+    }
+    return false;
+  }
+
+  if (field === 'finalQuery') {
+    return value !== 'current_candle' && value !== 'candle_at_time' && value !== 'compare_candles';
+  }
+
+  if (field === 'contextReference') {
+    return typeof validateContextReference(value) === 'string';
+  }
+
+  return false;
+}
+
+function isFieldGrounded(
+  field: string,
+  value: unknown,
+  text: string
+): boolean {
+  if (value === undefined) return true;
+
+  if (field === 'date') {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+    const d = value as Record<string, unknown>;
+    if (d.kind === 'absolute') {
+      return typeof d.value === 'string' && isDateInText(d.value, text);
+    }
+    if (d.kind === 'relative_trading') {
+      const count = typeof d.count === 'number' ? d.count : undefined;
+      if (count !== undefined && isNumberInText(count, text)) return true;
+      const dir = d.direction;
+      if (dir === 'backward') return /\b(?:ago|back|before|prior|previous|last)\b/i.test(text);
+      if (dir === 'forward') return /\b(?:ahead|forward|next|tomorrow)\b/i.test(text);
+      return false;
+    }
+    return false;
+  }
+
+  if (field === 'timeframeMinutes') {
+    return typeof value === 'number' && isNumberInText(value, text);
+  }
+
+  if (field === 'seekTime' || field === 'queryTime') {
+    return typeof value === 'string' && isTimeInText(value, text);
+  }
+
+  if (field === 'relativeSeekMinutes') {
+    return typeof value === 'number' && isNumberInText(Math.abs(value), text);
+  }
+
+  if (field === 'symbol') {
+    return typeof value === 'string' && isSymbolInText(value, text);
+  }
+
+  if (field === 'previousSymbol') {
+    return value === true && isPreviousSymbolGrounded(text);
+  }
+
+  if (field === 'finalQuery') {
+    return isFinalQueryGrounded(value, text);
+  }
+
+  if (field === 'playback' && value && typeof value === 'object' && !Array.isArray(value)) {
+    const pb = value as Record<string, unknown>;
+    if (!isPlaybackActionGrounded(pb.action, text)) return false;
+    if (pb.untilTime !== undefined && !isTimeInText(String(pb.untilTime), text)) return false;
+    if (pb.speed !== undefined && typeof pb.speed === 'number' && !isNumberInText(pb.speed, text) && !isPlaybackControlGrounded(text)) return false;
+    if (pb.direction !== undefined) {
+      const dir = String(pb.direction);
+      if (dir === 'forward' && !/\b(?:forward|ahead|next)\b/i.test(text)) return false;
+      if (dir === 'backward' && !/\b(?:back|backward|rewind|reverse|prior)\b/i.test(text)) return false;
+    }
+    return true;
+  }
+
+  if (field === 'contextReference') {
+    return true;
+  }
+
+  return false;
+}
+
+function preValidateSanitize(raw: Record<string, unknown>, text: string, requestContext?: RequestContext): void {
+  if (raw.kind !== 'chart_action') return;
+
+  const requested = buildRequestedSet(text, raw, requestContext);
+
+  // Normalize well-known nested objects: remove hallucinated extra fields that
+  // are not valid for the selected kind so they do not trigger an unnecessary
+  // repair loop. The user value itself is preserved.
+  const date = raw.date as Record<string, unknown> | undefined;
+  if (date && typeof date === 'object' && !Array.isArray(date)) {
+    if (date.kind === 'absolute') {
+      delete date.count;
+      delete date.direction;
+    } else if (date.kind === 'relative_trading') {
+      delete date.value;
+    }
+  }
+
+  // Strip top-level optional fields that are:
+  //   - not requested by the user,
+  //   - not grounded in the original text,
+  //   - AND malformed (would fail strict validation).
+  // Valid-but-ungrounded fields are left for sanitizeIntentGrounding, which can
+  // either keep them or strip them safely. This prevents an unrequested
+  // malformed optional field from killing an otherwise valid request without
+  // pre-empting the post-validation grounding stage.
+  for (const [field, dim] of Object.entries(FIELD_TO_DIMENSION)) {
+    if (!(field in raw)) continue;
+    if (dim && requested.has(dim)) continue;
+    if (isFieldGrounded(field, raw[field], text)) continue;
+    if (!isFieldMalformed(field, raw[field])) continue;
+
+    agentTrace('llm intent sanitize', { reason: 'ungrounded malformed optional field', field, value: raw[field] });
+    delete raw[field];
+  }
+
+  // compare is only valid with compare_candles and a compare request.
+  if ('compare' in raw && raw.finalQuery !== 'compare_candles') {
+    agentTrace('llm intent sanitize', { reason: 'ungrounded compare', value: raw.compare });
+    delete raw.compare;
+  }
+
+  // If a contextReference is present, it was already used to authorize dimensions
+  // and is resolved by resolveContextReference later.
+}
+
+// ---------------------------------------------------------------------------
 // LLM extraction
 // ---------------------------------------------------------------------------
 
@@ -704,7 +1057,7 @@ export async function extractSemanticIntent(
     const callElapsed = Date.now() - callStart;
     agentTrace('llm intent response', { attempt, elapsed: callElapsed, contentLength: response.content.length });
 
-    const raw = parseIntentJson(response.content);
+    let raw = parseIntentJson(response.content);
     if (raw === undefined) {
       if (attempt === MAX_REPAIR_ATTEMPTS) {
         return { ok: false, kind: 'invalid', message: 'Could not parse a valid JSON intent.', elapsed: Date.now() - start };
@@ -712,6 +1065,14 @@ export async function extractSemanticIntent(
       lastValidation = 'Response was not valid JSON.';
       messages.push({ role: 'user', content: buildIntentRepairPrompt(lastValidation) });
       continue;
+    }
+
+    // Strip ungrounded/hallucinated optional fields before validation so that
+    // unrequested malformed values do not abort the pipeline. Genuinely
+    // user-provided dimensions (explicit values in the text or pre-computed
+    // requested dimensions from the orchestrator) are preserved.
+    if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+      preValidateSanitize(raw as Record<string, unknown>, text, opts.requestContext);
     }
 
     const validation = validateSemanticIntent(raw);

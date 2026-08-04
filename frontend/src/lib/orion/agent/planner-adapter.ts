@@ -6,7 +6,7 @@
 // existing command shape into the step/receipt protocol.
 // =============================================================================
 
-import type { ChartCommand, ParsedTime } from '../planner';
+import { type ChartCommand, type ParsedTime, clampTimeframe } from '../planner';
 import type { AgentPlan, AgentStep, ChartActionIntent, SemanticDate } from './types';
 import { resolveSymbol } from './resolveSymbol';
 import { makeStepId } from './types';
@@ -194,10 +194,22 @@ function buildSwitchCommandPlan(cmd: ChartCommand): AgentPlan | null {
     lastStep = tfStep;
   }
 
+  if (cmd.endTime) {
+    const seekStep: AgentStep = {
+      id: makeStepId(steps.length, 'seek'),
+      capability: 'playback.seek_to_time',
+      args: { time: parseTimeToString(cmd.endTime) },
+      required: true,
+      dependsOn: [lastStep.id],
+    };
+    steps.push(seekStep);
+    lastStep = seekStep;
+  }
+
   return {
     id: `plan-switch-${Date.now()}`,
     kind: 'action',
-    summary: `Switch to ${cmd.symbol}${cmd.date ? ' on ' + cmd.date : ''}`,
+    summary: `Switch to ${cmd.symbol}${cmd.date ? ' on ' + cmd.date : ''}${cmd.endTime ? ' at ' + parseTimeToString(cmd.endTime) : ''}`,
     steps,
   };
 }
@@ -361,8 +373,12 @@ export function chartCommandToActionTemplate(cmd: ChartCommand): ChartActionInte
 
   if (cmd.symbol) template.symbol = cmd.symbol;
   if (cmd.dateInput) template.date = toSemanticDate(cmd.dateInput);
-  if (cmd.timeframe !== undefined) template.timeframeMinutes = cmd.timeframe;
+  if (cmd.timeframe !== undefined) {
+    const tf = clampTimeframe(cmd.timeframe);
+    if (tf !== undefined) template.timeframeMinutes = tf;
+  }
   if (cmd.startTime) template.seekTime = parseTimeToString(cmd.startTime);
+  if (cmd.endTime && cmd.intent === 'switch') template.seekTime = parseTimeToString(cmd.endTime);
   if (cmd.endTime) {
     // Some commands put an end time (e.g. play_until). For candle_query,
     // startTime is used above; play_until end time maps to playback.untilTime.

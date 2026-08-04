@@ -153,10 +153,14 @@ function parseRelativeDate(input: string, base?: string): string | undefined {
   if (/\bnext\s+week\b/.test(t)) return offsetDate(7, base);
 
   const days = ['sunday','monday','tuesday','wednesday','thursday','friday','saturday'];
-  const dayMatch = /\b(?:last\s+)?(sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b/.exec(t);
+  const dayMatch = /\b(?:(last|next|this)\s+)?(sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b/.exec(t);
   if (dayMatch) {
-    const target = days.indexOf(dayMatch[1]);
-    const direction = dayMatch[0].startsWith('last ') ? 'last' : 'last';
+    const target = days.indexOf(dayMatch[2]);
+    const qualifier = dayMatch[1];
+    let direction: 'last' | 'next';
+    if (qualifier === 'last') direction = 'last';
+    else if (qualifier === 'next' || qualifier === 'this') direction = 'next';
+    else direction = 'last';
     return dayOfWeekDate(target, direction, base);
   }
 
@@ -339,11 +343,30 @@ function formatTimeframe(minutes: number): string {
 
 export function clampTimeframe(tf?: number): number | undefined {
   if (tf === undefined) return undefined;
-  const n = Number.isFinite(tf) ? Math.max(1, Math.round(tf)) : 1;
+  const n = Number.isFinite(tf) ? Math.round(tf) : NaN;
+  if (n < 1) return undefined;
   return SUPPORTED_TIMEFRAMES.includes(n as any) ? n : undefined;
 }
 
-function extractTimeframe(text: string): number | undefined {
+const TIMEFRAME_NUMBER_WORDS: Record<string, number> = {
+  zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5,
+  six: 6, seven: 7, eight: 8, nine: 9, ten: 10,
+  fifteen: 15, thirty: 30, sixty: 60,
+};
+
+function parseTimeframeNumber(raw: string): number | undefined {
+  const digits = parseInt(raw, 10);
+  if (!Number.isNaN(digits)) return digits;
+  return TIMEFRAME_NUMBER_WORDS[raw.toLowerCase()];
+}
+
+const UNIT_TO_MINUTES: Record<string, number> = {
+  m: 1, min: 1, minute: 1, minutes: 1,
+  h: 60, hr: 60, hour: 60, hours: 60,
+  d: 1440, day: 1440, days: 1440,
+};
+
+export function extractTimeframe(text: string): number | undefined {
   const t = text.toLowerCase();
 
   // Compact token forms: 5m, 1h, 4h, 1d, 60m, 240m.
@@ -366,25 +389,42 @@ function extractTimeframe(text: string): number | undefined {
   if (/\bhourly\b/.test(t)) return 60;
   if (/\bdaily\b/.test(t)) return 1440;
 
-  // Phrases like "5 minute timeframe", "1 hour chart", "1 day bars".
-  const hasTimeframeContext = /\b(timeframe|tf|chart|bars)\b/.test(t);
-  if (hasTimeframeContext) {
-    const m = /\b(\d+(?:\.\d+)?)\s*(?:minute|hour|day)s?\b/.exec(t);
-    if (m) {
-      const n = parseFloat(m[1]);
-      if (!Number.isNaN(n) && n > 0) {
-        const unit = t.charAt(m.index + m[0].length - 1);
-        if (/m/.test(unit)) {
-          const rounded = Math.round(n);
-          if (SUPPORTED_TIMEFRAMES.includes(rounded as any)) return rounded;
-        } else if (/h/.test(unit)) {
-          const minutes = Math.round(n * 60);
-          if (SUPPORTED_TIMEFRAMES.includes(minutes as any)) return minutes;
-        } else if (/d/.test(unit)) {
-          return 1440;
-        }
-      }
+  // Phrases like "5 minute timeframe", "fifteen-minute bars", "1 hour chart",
+  // "zero-minute candles".  We require an explicit unit (minute/hour/day/m/etc)
+  // OR a recognized bar/timeframe suffix (bar/candle/timeframe/tf).  A bare
+  // number followed by "chart" is not enough.
+  const wordOrDigit = '(\\d+|zero|one|two|three|four|five|six|seven|eight|nine|ten|fifteen|thirty|sixty)';
+  const unit = '(m(?:in(?:utes?)?)?|h(?:our(?:s?)?)?|hr(?:s?)?|d(?:ay(?:s?)?)?)';
+  const suffix = 'bar(?:s)?|candle(?:s)?|timeframe|tf';
+  const re = new RegExp(`\\b${wordOrDigit}(?:\\s*[- ]\\s*|\\s+)(?:(${unit})(?:\\s+(?:${suffix}))?|(?:${suffix}))\\b`, 'gi');
+
+  for (const m of t.matchAll(re)) {
+    const rawN = m[1];
+    const rawUnit = m[2];
+    const full = m[0];
+
+    // Skip if this is part of a relative-time phrase (e.g. "15 minutes ago",
+    // "go back one minute").  It is only a timeframe request when it stands as
+    // a candle/aggregation setting.
+    const start = m.index ?? 0;
+    const before = t.slice(0, start);
+    if (/(?:back|backward|rewind|reverse|forward|ahead|go\s+(?:back|forward)|skip|earlier|later)\s+$/i.test(before)) continue;
+
+    const end = start + full.length;
+    const after = t.slice(end);
+    if (/^\s*(ago|back|before|later|forward|ahead|from\s+now)\b/.test(after)) continue;
+
+    const n = parseTimeframeNumber(rawN);
+    if (n === undefined) continue;
+
+    if (rawUnit) {
+      const factor = UNIT_TO_MINUTES[rawUnit.toLowerCase()];
+      if (factor !== undefined) return n * factor;
+      continue;
     }
+
+    // Suffix-only (e.g. "fifteen candles" means fifteen-minute candles).
+    return n;
   }
 
   return undefined;
@@ -415,13 +455,21 @@ function detectIntent(text: string, e: {
 
   if (/\b(pause|halt|stop playback|stop the playback|stop the chart)\b/i.test(t)) return 'pause';
   if (/\b(set speed|speed up|slow down)\b/i.test(t)) return 'set_speed';
-  if (/\b(next|step forward|advance one|forward one)\b/i.test(t)) return 'step_forward';
-  if (/\b(previous|step back|back one|rewind one)\b/i.test(t)) return 'step_backward';
+  const dayNames = 'sunday|monday|tuesday|wednesday|thursday|friday|saturday';
+  const stepForwardRe = new RegExp(`\\b(next(?!\\s+(?:week|${dayNames}\\b)))(?:\\s+(?:step|candle))?\\b|\\b(step forward|advance one|forward one)\\b`, 'i');
+  const stepBackwardRe = new RegExp(`\\b(previous(?!\\s+(?:week|${dayNames}\\b)))(?:\\s+(?:step|candle))?\\b|\\b(step back|back one|rewind one)\\b`, 'i');
+  if (stepForwardRe.test(t)) return 'step_forward';
+  if (stepBackwardRe.test(t)) return 'step_backward';
   if (/\b(jump|seek)\b/i.test(t)) return 'seek';
 
   // Any explicit or inferred timeframe request takes precedence only when
-  // the user is not already naming a symbol/playback sequence.
-  if (e.timeframe !== undefined && !e.symbol) return 'set_timeframe';
+  // the user is not already naming a symbol/playback sequence or a relative
+  // motion amount (e.g. "go back one minute" is a rewind, not a timeframe).
+  const hasRelativeMotion = e.relative !== undefined && (
+    e.direction !== undefined ||
+    /(?:back|backward|rewind|reverse|forward|ahead|go\s+(?:back|forward)|skip|earlier|later)\b/i.test(t)
+  );
+  if (e.timeframe !== undefined && !e.symbol && !hasRelativeMotion) return 'set_timeframe';
 
   // Candle/price queries at a specific time.
   if (e.times.length > 0 && /\b(price|candle|cost|worth|value|ohlcv)\b/i.test(text) && !/\b(play|rewind|fast[- ]?forward|seek|switch|go to|show me)\b/i.test(t)) {
@@ -434,7 +482,7 @@ function detectIntent(text: string, e: {
     if (/(?:rewind|reverse|go back|back up|skip back)\b/i.test(t)) return 'rewind';
     if (/\b(?:play|run)\b/i.test(t)) return e.times.length > 0 || e.relative !== undefined ? 'fast_forward' : 'play';
     if (e.direction === 'backward' || /\bback(?:ward)?\b/i.test(t)) return 'rewind';
-    if (e.symbol || e.date || /\b(switch|change to|load|open|show)\b/i.test(t)) {
+    if (e.symbol || e.date || /\b(switch|change to|load|open)\b/i.test(t) || (e.times.length === 0 && /\b(show|go to)\b/i.test(t))) {
       // "switch to AAPL and fast forward to 1:47" still carries times, so it
       // lands here only if no playback verb was found. Treat as switch and let
       // the executor notice the times and continue with a fast-forward.
@@ -448,7 +496,7 @@ function detectIntent(text: string, e: {
   if (/\b(fast[- ]?forward|fastforward|ff)\b/i.test(t)) return 'fast_forward';
   if (/\b(rewind|reverse|go back|back up)\b/i.test(t)) return 'rewind';
   if (/\bplay\b/i.test(t)) return 'play';
-  if (e.symbol || e.date || /\b(switch|change to|load|open|show|go to)\b/i.test(t)) return 'switch';
+  if (e.symbol || e.date || /\b(switch|change to|load|open)\b/i.test(t)) return 'switch';
 
   return 'unknown';
 }

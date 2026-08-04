@@ -57,16 +57,7 @@ const AGENT_HINT_PHRASES = [
   'opening range', 'mean reversion', 'breakout',
   'market open', 'market close',
   'let orion', 'have orion', 'orion, ',
-  'set me up', 'set up',
-  'take me back',
   'previous symbol',
-  'park the',
-  'quarter past',
-  'half an hour',
-  'fifteen-minute',
-  'fifteen minute',
-  'bar',
-  'give me the',
 ];
 
 export function classifyOrionIntent(rawMessage: string): IntentClassification {
