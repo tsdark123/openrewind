@@ -224,8 +224,11 @@ export async function executeAgentPlan(
       result.errorCode = stoppedReceipt.errorCode;
       result.errorMessage = `Plan stopped at ${stoppedAtStepId}: ${stoppedReceipt.message}.`;
     } else {
-      result.errorCode = 'PLAN_EXECUTION_FAILED';
-      result.errorMessage = 'One or more required steps failed.';
+      // No required step failed. Surface the first failing receipt so the
+      // caller sees the real precondition/capability error.
+      const firstFailing = receipts.find((r) => !r.success);
+      result.errorCode = firstFailing?.errorCode ?? 'PLAN_EXECUTION_FAILED';
+      result.errorMessage = firstFailing?.message ?? 'One or more required steps failed.';
     }
   }
 

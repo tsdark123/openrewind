@@ -122,6 +122,8 @@ async function setupAapl(ctx: AgentContext) {
   expect(r.ok).toBe(true);
   expect(ctx.getState().symbol).toBe('AAPL');
   expect(ctx.getState().sessionActive).toBe(true);
+  // Provide a synthetic candle buffer so up_to_cursor analyses can resolve.
+  ctx.getState().totalCandles = 100;
 }
 
 beforeEach(() => {
@@ -165,9 +167,19 @@ describe('qwen3:8b analysis semantic-intent acceptance', () => {
         ctx,
         setupReady: true,
       });
+      expect(r).toBeDefined();
+      expect(r.ok).toBe(true);
       expect(r.route).toMatch(/llm-plan/);
+      expect(r.plan).toBeDefined();
       if (r.ok && r.plan) {
-        expect(r.plan.steps.some((s) => s.capability === 'analysis.window_ohlc')).toBe(true);
+        const step = r.plan.steps.find((s) => s.capability === 'analysis.window_ohlc');
+        expect(step).toBeDefined();
+        const window = step!.args.window as { kind: string };
+        expect(['time_range', 'whole_session', 'first_n_minutes']).toContain(window.kind);
+        if (window.kind === 'time_range') {
+          expect(window.fromTime).toBe('09:30');
+          expect(window.toTime).toMatch(/^10(:00|:30)$/);
+        }
       }
     },
     TEST_TIMEOUT
@@ -183,9 +195,15 @@ describe('qwen3:8b analysis semantic-intent acceptance', () => {
         ctx,
         setupReady: true,
       });
+      expect(r).toBeDefined();
+      expect(r.ok).toBe(true);
       expect(r.route).toMatch(/llm-plan/);
+      expect(r.plan).toBeDefined();
       if (r.ok && r.plan) {
-        expect(r.plan.steps.some((s) => s.capability === 'analysis.window_volume')).toBe(true);
+        const step = r.plan.steps.find((s) => s.capability === 'analysis.window_volume');
+        expect(step).toBeDefined();
+        const window = step!.args.window as { kind: string };
+        expect(['whole_session', 'time_range', 'first_n_minutes']).toContain(window.kind);
       }
     },
     TEST_TIMEOUT
@@ -201,10 +219,14 @@ describe('qwen3:8b analysis semantic-intent acceptance', () => {
         ctx,
         setupReady: true,
       });
+      expect(r).toBeDefined();
+      expect(r.ok).toBe(true);
       expect(r.route).toMatch(/llm-plan/);
+      expect(r.plan).toBeDefined();
       if (r.ok && r.plan) {
         const caps = r.plan.steps.map((s) => s.capability);
-        expect(caps.filter((c) => c.startsWith('analysis.')).length).toBeGreaterThanOrEqual(2);
+        expect(caps.filter((c) => c.startsWith('analysis.')).length).toBeGreaterThanOrEqual(3);
+        expect(caps).toContain('analysis.window_change');
         expect(caps).toContain('analysis.window_volume');
         expect(caps).toContain('analysis.candle_shape');
       }
@@ -222,10 +244,16 @@ describe('qwen3:8b analysis semantic-intent acceptance', () => {
         ctx,
         setupReady: true,
       });
+      expect(r).toBeDefined();
+      expect(r.ok).toBe(true);
       expect(r.route).toMatch(/llm-plan/);
+      expect(r.plan).toBeDefined();
       if (r.ok && r.plan) {
         const caps = r.plan.steps.map((s) => s.capability);
         expect(caps).toContain('analysis.window_compare');
+        expect(caps).toContain('analysis.window_volume');
+        const compareStep = r.plan.steps.find((s) => s.capability === 'analysis.window_compare');
+        expect(compareStep).toBeDefined();
       }
     },
     TEST_TIMEOUT
@@ -241,9 +269,13 @@ describe('qwen3:8b analysis semantic-intent acceptance', () => {
         ctx,
         setupReady: true,
       });
+      expect(r).toBeDefined();
+      expect(r.ok).toBe(true);
       expect(r.route).toMatch(/llm-plan/);
+      expect(r.plan).toBeDefined();
       if (r.ok && r.plan) {
-        expect(r.plan.steps.some((s) => s.capability === 'analysis.candle_shape')).toBe(true);
+        const step = r.plan.steps.find((s) => s.capability === 'analysis.candle_shape');
+        expect(step).toBeDefined();
       }
     },
     TEST_TIMEOUT
@@ -259,11 +291,15 @@ describe('qwen3:8b analysis semantic-intent acceptance', () => {
         ctx,
         setupReady: true,
       });
+      expect(r).toBeDefined();
+      expect(r.ok).toBe(true);
       expect(r.route).toMatch(/llm-plan/);
+      expect(r.plan).toBeDefined();
       if (r.ok && r.plan) {
         const step = r.plan.steps.find((s) => s.capability.startsWith('analysis.'));
         expect(step).toBeDefined();
         const window = step!.args.window as { kind: string } | undefined;
+        expect(window).toBeDefined();
         if (window) {
           expect(window.kind).toBe('up_to_cursor');
         }
@@ -282,6 +318,8 @@ describe('qwen3:8b analysis semantic-intent acceptance', () => {
         ctx,
         setupReady: true,
       });
+      expect(r).toBeDefined();
+      expect(r.ok).toBe(false);
       expect(['unsupported', 'clarification'] as string[]).toContain(r.route);
       expect(r.result?.receipts ?? []).toHaveLength(0);
     },

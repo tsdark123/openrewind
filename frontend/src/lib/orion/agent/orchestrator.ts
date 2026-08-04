@@ -272,6 +272,7 @@ function looksLikeContextReference(text: string): boolean {
     /\b(?:do|run|perform)\s+(?:that|it|this|the same)(?:\s+(?:analysis|thing|one|again))?\s+(?:on|for|with)\s+[a-z0-9-]+\b/.test(t) ||
     /\b(?:again|same|repeat)\b.*\b(?:timeframe|time frame|date|session|candle)\b/.test(t) ||
     /\b(?:same|the same)\s+(?:timeframe|time frame|date|session)\b/.test(t) ||
+    /\b(?:same|the same)\s+(?:thing|one|analysis)(?:\s+(?:but|as|with))?\s+.*\b(?:first|last|hour|time|range|candle|window|volume|ohlc|change)\b/.test(t) ||
     /\bgo\s+back\s+(?:to\s+)?(?:the\s+)?(?:candle|stock|symbol|one)\b/.test(t) ||
     /\b(?:previous|last|prior)\s+(?:candle|one|stock|symbol|session)\b/.test(t) ||
     /\bcompare\s+(?:this|the|that)\s+candle\s+(?:with|to|against)\s+(?:the\s+)?(?:previous|last|prior|reported)\b/.test(t) ||
@@ -1331,7 +1332,7 @@ function composeCompoundSummary(result: AgentExecutionResult, final: WorldState)
   return fragments.join(', ') + '.';
 }
 
-function composeResponse(result: AgentExecutionResult, ctx: AgentContext): string {
+export function composeResponse(result: AgentExecutionResult, ctx: AgentContext): string {
   if (result.ok) {
     const final = result.finalWorldState as WorldState;
 

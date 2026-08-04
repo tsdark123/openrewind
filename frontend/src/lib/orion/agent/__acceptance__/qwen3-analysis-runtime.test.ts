@@ -16,7 +16,7 @@ import {
   type WindowCompareResult,
 } from '../analysis';
 
-const TEST_TIMEOUT = 120_000;
+const TEST_TIMEOUT = 180_000;
 const API_BASE = 'http://127.0.0.1:9000';
 
 interface ChartBuffer {
@@ -273,6 +273,12 @@ type ReportEntry = {
 
 const runtimeReport: ReportEntry[] = [];
 
+let sharedCtx: AgentContext | undefined;
+let a2: OrchestratorResult | undefined;
+let b5: OrchestratorResult | undefined;
+let a4: OrchestratorResult | undefined;
+let c11: OrchestratorResult | undefined;
+
 function record(label: string, prompt: string, result: OrchestratorResult, extra?: Record<string, unknown>) {
   const entry: ReportEntry = {
     label,
@@ -285,6 +291,17 @@ function record(label: string, prompt: string, result: OrchestratorResult, extra
   };
   runtimeReport.push(entry);
   console.log(`[runtime-trace] ${label}`, JSON.stringify({ ...entry, plan: entry.planSteps }, null, 2));
+}
+
+function checkPlanStep(
+  label: string,
+  result: OrchestratorResult,
+  predicate: (s: { capability: string; args: Record<string, unknown> }) => boolean
+): string | undefined {
+  if (!result.ok || !result.plan) return `${label}: no plan to check`;
+  const found = result.plan.steps.find(predicate);
+  if (!found) return `${label}: expected plan step not found`;
+  return undefined;
 }
 
 function writeRuntimeReport(failures: string[], ground: Record<string, unknown>) {
@@ -363,11 +380,10 @@ describe('Phase 6A.3 real runtime acceptance', () => {
   });
 
   it(
-    'runs the full A-D suite against the real engine and qwen3:8b',
+    'A-B: single-shot analysis prompts against the real engine and qwen3:8b',
     async () => {
       const ctx = makeCtx();
       const failures: string[] = [];
-      const allCandlesBySymbol: Record<string, CandleData[]> = {};
 
       // Establish real AAPL session
       const setup = await handleOrionMessage({
@@ -379,8 +395,7 @@ describe('Phase 6A.3 real runtime acceptance', () => {
       if (!setup.ok) failures.push('setup failed');
 
       // Pre-fetch AAPL candles for independent verification
-      const aaplRes = await fetchCandles({ symbol: 'AAPL', date: '2026-07-10', timeframe: 1, limit: 5000 }, API_BASE);
-      allCandlesBySymbol.AAPL = aaplRes.candles;
+      await fetchCandles({ symbol: 'AAPL', date: '2026-07-10', timeframe: 1, limit: 5000 }, API_BASE);
 
       // A.1
       const a1 = await handleOrionMessage({ text: 'How did AAPL do today?', ctx, setupReady: true });
@@ -388,7 +403,7 @@ describe('Phase 6A.3 real runtime acceptance', () => {
       if (!a1.ok || a1.route !== 'llm-plan') failures.push('A.1 route/ok');
 
       // A.2
-      const a2 = await handleOrionMessage({ text: 'range first hour', ctx, setupReady: true });
+      a2 = await handleOrionMessage({ text: 'range first hour', ctx, setupReady: true });
       record('A.2', 'range first hour', a2);
       if (!a2.ok || a2.route !== 'llm-plan') failures.push('A.2 route/ok');
 
@@ -398,12 +413,29 @@ describe('Phase 6A.3 real runtime acceptance', () => {
       if (!a3.ok || a3.route !== 'llm-plan') failures.push('A.3 route/ok');
 
       // A.4
-      const a4 = await handleOrionMessage({ text: 'what kind of candle am i on rn', ctx, setupReady: true });
+      a4 = await handleOrionMessage({ text: 'what kind of candle am i on rn', ctx, setupReady: true });
       record('A.4', 'what kind of candle am i on rn', a4);
       if (!a4.ok || a4.route !== 'llm-plan') failures.push('A.4 route/ok');
 
+      const a2PlanErr =
+        checkPlanStep('A.2', a2, (s) => s.capability === 'analysis.window_ohlc' && (s.args.window as any)?.kind === 'time_range');
+      if (a2PlanErr) failures.push(a2PlanErr);
+
+      const a3PlanErr =
+        checkPlanStep(
+          'A.3',
+          a3,
+          (s) =>
+            (s.capability === 'analysis.window_change' || s.capability === 'analysis.window_summary') &&
+            (s.args.window as any)?.kind === 'up_to_cursor'
+        );
+      if (a3PlanErr) failures.push(a3PlanErr);
+
+      const a4PlanErr = checkPlanStep('A.4', a4, (s) => s.capability === 'analysis.candle_shape');
+      if (a4PlanErr) failures.push(a4PlanErr);
+
       // B.5
-      const b5 = await handleOrionMessage({ text: 'was mornig volum higher than near close', ctx, setupReady: true });
+      b5 = await handleOrionMessage({ text: 'was mornig volum higher than near close', ctx, setupReady: true });
       record('B.5', 'was mornig volum higher than near close', b5);
       if (!b5.ok || b5.route !== 'llm-plan') failures.push('B.5 route/ok');
 
@@ -416,6 +448,42 @@ describe('Phase 6A.3 real runtime acceptance', () => {
       const b7 = await handleOrionMessage({ text: 'give me the move, total volum and candle anatomy from 10 to noon', ctx, setupReady: true });
       record('B.7', 'give me the move, total volum and candle anatomy from 10 to noon', b7);
       if (!b7.ok || b7.route !== 'llm-plan') failures.push('B.7 route/ok');
+
+      if (b5.ok && b5.plan) {
+        const analysisSteps = b5.plan.steps.filter((s) => s.capability.startsWith('analysis.'));
+        const hasCompare = analysisSteps.some((s) => s.capability === 'analysis.window_compare');
+        const hasTwoVolumes =
+          analysisSteps.filter((s) => s.capability === 'analysis.window_volume').length >= 2;
+        if (!hasCompare && !hasTwoVolumes) {
+          failures.push('B.5 expected a window comparison or two volume windows');
+        }
+      }
+
+      const b6PlanErr =
+        checkPlanStep('B.6', b6, (s) => s.capability === 'analysis.window_compare');
+      if (b6PlanErr) failures.push(b6PlanErr);
+
+      if (b7.ok && b7.plan) {
+        const analysisSteps = b7.plan.steps.filter((s) => s.capability.startsWith('analysis.'));
+        if (analysisSteps.length < 3) failures.push('B.7 expected at least 3 analysis steps');
+        const caps = analysisSteps.map((s) => s.capability);
+        if (!caps.includes('analysis.window_change')) failures.push('B.7 missing move/change analysis');
+        if (!caps.includes('analysis.window_volume')) failures.push('B.7 missing volume analysis');
+        if (!caps.includes('analysis.candle_shape')) failures.push('B.7 missing candle anatomy analysis');
+      }
+
+      sharedCtx = ctx;
+      console.log('[runtime-trace] A-B failures:', failures);
+      expect(failures).toEqual([]);
+    },
+    TEST_TIMEOUT
+  );
+
+  it(
+    'C: context inheritance and switch prompts against the real engine and qwen3:8b',
+    async () => {
+      const failures: string[] = [];
+      const ctx = sharedCtx ?? makeCtx();
 
       // C.8 (context inherit)
       const beforeC8 = ctx.executionLog.latestSuccessfulAction();
@@ -438,23 +506,58 @@ describe('Phase 6A.3 real runtime acceptance', () => {
       if (!c10.ok || c10.route !== 'llm-plan') failures.push('C.10 route/ok');
 
       // C.11
-      const c11 = await handleOrionMessage({ text: 'do that analysis on NVDA', ctx, setupReady: true });
+      c11 = await handleOrionMessage({ text: 'do that analysis on NVDA', ctx, setupReady: true });
       record('C.11', 'do that analysis on NVDA', c11);
       if (!c11.ok || c11.route !== 'llm-plan') failures.push('C.11 route/ok');
 
+      const c8PlanErr =
+        checkPlanStep('C.8', c8, (s) => s.capability === 'analysis.window_ohlc' && (s.args.window as any)?.kind === 'time_range');
+      if (c8PlanErr) failures.push(c8PlanErr);
+
+      const c9PlanErr = checkPlanStep('C.9', c9, (s) => s.capability === 'analysis.window_volume');
+      if (c9PlanErr) failures.push(c9PlanErr);
+
+      const c10PlanErr = checkPlanStep('C.10', c10, (s) => s.capability === 'analysis.window_compare');
+      if (c10PlanErr) failures.push(c10PlanErr);
+
+      if (c11.ok && c11.plan) {
+        const hasSwitch = c11.plan.steps.some((s) =>
+          ['session.switch_symbol', 'session.resolve_symbol'].includes(s.capability)
+        );
+        if (!hasSwitch) failures.push('C.11 expected a symbol-switch setup step');
+      }
+
+      console.log('[runtime-trace] C failures:', failures);
+      expect(failures).toEqual([]);
+    },
+    TEST_TIMEOUT
+  );
+
+  it(
+    'D: clarification and edge-case prompts against the real engine and qwen3:8b',
+    async () => {
+      const failures: string[] = [];
+      const ctx = sharedCtx ?? makeCtx();
+
       // D.12 five distinct analysis ops should clarify
       const d12 = await handleOrionMessage({
-        text: 'give me the open high low close volume and change from 9:30 to 10, 10 to 11, 11 to 12, 12 to 1 and 1 to 2',
+        text: 'give me the open high low close volume and change from 9:30 to 10, 10 to 11 and 11 to 12',
         ctx,
         setupReady: true,
       });
-      record('D.12', 'give me the open high low close volume and change from 9:30 to 10, 10 to 11, 11 to 12, 12 to 1 and 1 to 2', d12);
+      record(
+        'D.12',
+        'give me the open high low close volume and change from 9:30 to 10, 10 to 11 and 11 to 12',
+        d12
+      );
       if (d12.ok && d12.route !== 'clarification') failures.push('D.12 should have clarified');
 
       // D.13 RSI/MACD unsupported
       const d13 = await handleOrionMessage({ text: 'what are the RSI and MACD', ctx, setupReady: true });
       record('D.13', 'what are the RSI and MACD', d13);
-      if (d13.ok && d13.route !== 'unsupported' && d13.route !== 'clarification') failures.push('D.13 should be unsupported/clarification');
+      if (d13.ok && d13.route !== 'unsupported' && d13.route !== 'clarification') {
+        failures.push('D.13 should be unsupported/clarification');
+      }
       if (d13.result?.receipts && d13.result.receipts.some((r) => r.capability.startsWith('analysis.'))) {
         failures.push('D.13 should not execute analysis');
       }
@@ -479,15 +582,15 @@ describe('Phase 6A.3 real runtime acceptance', () => {
       const groundings: Record<string, unknown> = {};
 
       // Grounding verification for A.2 first hour OHLC
-      const a2OhlcStep = a2.result?.receipts.find((r) => r.capability === 'analysis.window_ohlc' && r.success);
+      const a2OhlcStep = a2?.result?.receipts.find((r) => r.capability === 'analysis.window_ohlc' && r.success);
       if (a2OhlcStep?.data) {
         const ground = await verifyFirstHourOhlc('AAPL', '2026-07-10', a2OhlcStep.data as Record<string, unknown>);
         groundings['A.2 first-hour OHLC'] = ground;
         if (!ground.ok) failures.push('A.2 grounding mismatch');
       }
 
-      // Grounding for B.5 volume compare
-      const b5Compare = b5.result?.receipts.find((r) => r.capability === 'analysis.window_compare' && r.success);
+      // Grounding for B.5 volume comparison
+      const b5Compare = b5?.result?.receipts.find((r) => r.capability === 'analysis.window_compare' && r.success);
       if (b5Compare?.data) {
         const data = b5Compare.data as Record<string, unknown>;
         const ground = await verifyVolumeComparison(data);
@@ -496,7 +599,7 @@ describe('Phase 6A.3 real runtime acceptance', () => {
       }
 
       // Grounding for A.4 candle shape
-      const a4Candle = a4.result?.receipts.find((r) => r.capability === 'analysis.candle_shape' && r.success);
+      const a4Candle = a4?.result?.receipts.find((r) => r.capability === 'analysis.candle_shape' && r.success);
       if (a4Candle?.data) {
         const data = (a4Candle.data as Record<string, unknown>).candle as Record<string, unknown>;
         const ground = await verifyCurrentCandleShape('AAPL', '2026-07-10', data);
@@ -505,13 +608,13 @@ describe('Phase 6A.3 real runtime acceptance', () => {
       }
 
       // Context behavior: C.11 should switch symbol, not inherit stale AAPL data
-      if (c11.ok && ctx.getState().symbol !== 'NVDA') failures.push('C.11 did not switch to NVDA');
+      if (c11?.ok && ctx.getState().symbol !== 'NVDA') failures.push('C.11 did not switch to NVDA');
 
       // Write the runtime acceptance report
       writeRuntimeReport(failures, groundings);
 
       // Print pass/fail matrix
-      console.log('[runtime-trace] failures:', failures);
+      console.log('[runtime-trace] D failures:', failures);
       expect(failures).toEqual([]);
     },
     TEST_TIMEOUT

@@ -588,9 +588,11 @@ export function compileChartActionIntent(
   }
 
   // 9. Deterministic chart analysis requests.
-  // Each analysis is independent and optional (required:false).  They are not
-  // chained to one another or to prior chart steps; the executor will still
-  // skip them if an earlier required step has failed.
+  // Each analysis is optional (required:false) and independent of other
+  // analyses.  If a mutating setup step (symbol, date, timeframe, seek,
+  // playback) has already been emitted, all analyses depend on that last
+  // mutating step so a failed setup prevents them from running.  Otherwise,
+  // in an analysis-only plan, they run without explicit dependencies.
   if (intent.analysisRequests && intent.analysisRequests.length > 0) {
     const seen = new Set<string>();
     let emitted = 0;
@@ -599,7 +601,7 @@ export function compileChartActionIntent(
       if (seen.has(key)) continue;
       seen.add(key);
       const step = compileAnalysisStep(emitted, request);
-      step.dependsOn = [];
+      step.dependsOn = lastMutatingStepId ? [lastMutatingStepId] : [];
       pushStep(step);
       emitted++;
     }

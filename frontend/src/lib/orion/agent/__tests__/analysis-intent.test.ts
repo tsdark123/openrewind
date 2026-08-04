@@ -207,6 +207,20 @@ describe('compileChartActionIntent for analysis', () => {
     expect(plan.steps).toHaveLength(2);
   });
 
+  it('keeps the same capability with different windows as distinct steps', () => {
+    const intent: ChartActionIntent = {
+      kind: 'chart_action',
+      analysisRequests: [
+        { kind: 'window_ohlc', window: { kind: 'time_range', fromTime: '09:30', toTime: '10:00' } },
+        { kind: 'window_ohlc', window: { kind: 'time_range', fromTime: '10:00', toTime: '11:00' } },
+      ],
+    };
+    const plan = compileChartActionIntent(intent);
+    expect(plan.steps).toHaveLength(2);
+    expect(plan.steps[0].args).toEqual({ window: { kind: 'time_range', fromTime: '09:30', toTime: '10:00' } });
+    expect(plan.steps[1].args).toEqual({ window: { kind: 'time_range', fromTime: '10:00', toTime: '11:00' } });
+  });
+
   it('defaults an omitted window to whole_session', () => {
     const intent: ChartActionIntent = {
       kind: 'chart_action',
@@ -230,9 +244,21 @@ describe('compileChartActionIntent for analysis', () => {
     expect(plan.steps.some((s) => s.capability === 'chart.set_timeframe')).toBe(true);
     const analysisStep = plan.steps.find((s) => s.capability === 'analysis.window_change');
     expect(analysisStep).toBeDefined();
-    // Analysis steps are optional and not chained to each other or prior steps.
+    // Analysis steps are optional and not chained to each other, but they must
+    // depend on the last mutating setup step so a failed setup prevents them.
     expect(analysisStep!.required).toBe(false);
-    expect(analysisStep!.dependsOn).toEqual([]);
+    const lastMutating = plan.steps
+      .filter((s) =>
+        [
+          'session.resolve_symbol',
+          'session.switch_symbol',
+          'session.switch_to_previous_symbol',
+          'chart.set_timeframe',
+        ].includes(s.capability)
+      )
+      .pop();
+    expect(lastMutating).toBeDefined();
+    expect(analysisStep!.dependsOn).toEqual([lastMutating!.id]);
   });
 });
 
@@ -242,6 +268,8 @@ describe('resolveContextReference for analysis follow-ups', () => {
     recordAction(ctx, {
       kind: 'chart_action',
       symbol: 'AAPL',
+      date: { kind: 'absolute', value: '2026-07-10' },
+      timeframeMinutes: 5,
       analysisRequests: [{ kind: 'window_ohlc', window: { kind: 'time_range', fromTime: '09:30', toTime: '10:30' } }],
     });
     const r = resolveContextReference(
@@ -251,7 +279,78 @@ describe('resolveContextReference for analysis follow-ups', () => {
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.intent.symbol).toBe('NVDA');
+    expect(r.intent.date).toEqual({ kind: 'absolute', value: '2026-07-10' });
+    expect(r.intent.timeframeMinutes).toBe(5);
     expect(r.intent.analysisRequests).toEqual([{ kind: 'window_ohlc', window: { kind: 'time_range', fromTime: '09:30', toTime: '10:30' } }]);
+  });
+
+  it('"do that analysis on NVDA" replaces the symbol and inherits analysis, date and timeframe', () => {
+    const ctx = makeContext();
+    recordAction(ctx, {
+      kind: 'chart_action',
+      symbol: 'AAPL',
+      date: { kind: 'absolute', value: '2026-07-10' },
+      timeframeMinutes: 5,
+      analysisRequests: [
+        { kind: 'window_ohlc', window: { kind: 'time_range', fromTime: '09:30', toTime: '10:30' } },
+        { kind: 'window_volume', window: { kind: 'time_range', fromTime: '09:30', toTime: '10:30' } },
+      ],
+    });
+    const r = resolveContextReference(
+      { kind: 'chart_action', symbol: 'NVDA', contextReference: { source: 'latest_successful_action', mode: 'repeat' } },
+      ctx
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.intent.symbol).toBe('NVDA');
+    expect(r.intent.date).toEqual({ kind: 'absolute', value: '2026-07-10' });
+    expect(r.intent.timeframeMinutes).toBe(5);
+    expect(r.intent.analysisRequests).toEqual([
+      { kind: 'window_ohlc', window: { kind: 'time_range', fromTime: '09:30', toTime: '10:30' } },
+      { kind: 'window_volume', window: { kind: 'time_range', fromTime: '09:30', toTime: '10:30' } },
+    ]);
+  });
+
+  it('explicit date, timeframe and window overrides win over inherited values', () => {
+    const ctx = makeContext();
+    recordAction(ctx, {
+      kind: 'chart_action',
+      symbol: 'AAPL',
+      date: { kind: 'absolute', value: '2026-07-10' },
+      timeframeMinutes: 5,
+      analysisRequests: [{ kind: 'window_ohlc', window: { kind: 'time_range', fromTime: '09:30', toTime: '16:00' } }],
+    });
+    const r = resolveContextReference(
+      {
+        kind: 'chart_action',
+        symbol: 'NVDA',
+        date: { kind: 'absolute', value: '2026-07-11' },
+        timeframeMinutes: 15,
+        contextReference: { source: 'latest_successful_action', mode: 'repeat' },
+        analysisRequests: [{ kind: 'window_ohlc', window: { kind: 'time_range', fromTime: '09:30', toTime: '10:30' } }],
+      },
+      ctx
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.intent.symbol).toBe('NVDA');
+    expect(r.intent.date).toEqual({ kind: 'absolute', value: '2026-07-11' });
+    expect(r.intent.timeframeMinutes).toBe(15);
+    expect(r.intent.analysisRequests).toEqual([{ kind: 'window_ohlc', window: { kind: 'time_range', fromTime: '09:30', toTime: '10:30' } }]);
+  });
+
+  it('a plain new-symbol request with no context reference does not inherit prior analysis state', () => {
+    const ctx = makeContext();
+    recordAction(ctx, {
+      kind: 'chart_action',
+      symbol: 'AAPL',
+      analysisRequests: [{ kind: 'window_ohlc', window: { kind: 'time_range', fromTime: '09:30', toTime: '10:30' } }],
+    });
+    const r = resolveContextReference({ kind: 'chart_action', symbol: 'NVDA' }, ctx);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.intent.symbol).toBe('NVDA');
+    expect(r.intent.analysisRequests).toBeUndefined();
   });
 
   it('"same thing but first hour" inherits the operation and overrides the window', () => {
@@ -355,6 +454,20 @@ describe('sanitizeIntentGrounding for analysisRequests', () => {
     expect(r.ok).toBe(true);
     if (r.ok) {
       expect(r.intent!.analysisRequests).toBeUndefined();
+    }
+  });
+
+  it('keeps analysisRequests with a "same thing but first hour" anaphora', () => {
+    const ctx = makeContext();
+    const resolved: ChartActionIntent = {
+      kind: 'chart_action',
+      contextReference: { source: 'latest_successful_action', mode: 'inherit', inherit: ['analysisRequests'] },
+      analysisRequests: [{ kind: 'window_ohlc', window: { kind: 'time_range', fromTime: '09:30', toTime: '10:30' } }],
+    };
+    const r = sanitizeIntentGrounding(resolved, 'same thing but first hour', resolved.contextReference, ctx);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.intent!.analysisRequests).toHaveLength(1);
     }
   });
 });
