@@ -3,6 +3,11 @@
 // and grounding sanitizer. Centralizing these helpers keeps the pipeline
 // consistent and lets the pre-validation sanitizer strip ungrounded optional
 // fields before strict validation.
+//
+// This file implements one bounded, tokenized lexical detector for analysis
+// language. It uses a closed vocabulary of analytical stems, conservative
+// edit-distance (Damerau-Levenshtein / Optimal String Alignment) and prefix
+// matching. It does not rely on exact full-sentence regexes.
 // =============================================================================
 
 import { extractDateInput, extractTimeframe, type ChartCommand } from '../planner';
@@ -83,47 +88,449 @@ export function textRequestsPlaybackControl(t: string): boolean {
   return /\b(?:play|pause|rewind|fast[-\s]?forward|fastforward|speed up|slow down|set\s+speed)\b/.test(t);
 }
 
-export function textRequestsCandleQuery(t: string): boolean {
-  if (/\b(?:candle|bar|ohlc)\s+(?:at|for|around|about)\b/i.test(t)) return true;
-  if (/\b(?:current|this|the|latest)\s+(?:candle|bar|ohlc)\b/i.test(t)) return true;
-  if (/\b(?:candle|bar|ohlc)\s+(?:now|here|right now|at this time|at the cursor)\b/i.test(t)) return true;
-  if (/\b(?:what|which|tell|show|give)\s+(?:me\s+)?(?:the\s+)?(?:what\s+)?(?:candle|bar|ohlc)\b/i.test(t)) return true;
-  if (/\b(?:price|worth|value)\b/i.test(t)) {
-    return /\b(?:what|tell|give|show|which|the)\s+(?:price|worth|value)\b/i.test(t) ||
-      /\b(?:price|worth|value)\s+(?:at|of)\b/i.test(t);
-  }
-  return false;
-}
-
 export function textRequestsPreviousSymbol(t: string): boolean {
   return /\b(?:take me back|previous symbol|previous stock|stock i was just on|was just on)\b/i.test(t);
 }
 
+// ---------------------------------------------------------------------------
+// Bounded lexical analysis-language detector
+// ---------------------------------------------------------------------------
+
+interface ConceptDef {
+  kind: 'window' | 'shape' | 'candle' | 'price' | 'summary' | 'time' | 'compare' | 'direction';
+  /** canonical stems / inflections for this concept */
+  terms: string[];
+}
+
+const ANALYSIS_CONCEPTS: Record<string, ConceptDef> = {
+  volume: { kind: 'window', terms: ['volume', 'volumes', 'vol', 'volumetric'] },
+  range: { kind: 'window', terms: ['range', 'ranges', 'rang'] },
+  change: { kind: 'window', terms: ['change', 'changes', 'changed', 'changing'] },
+  move: { kind: 'window', terms: ['move', 'moved', 'moves', 'moving', 'movement', 'mover'] },
+  high: { kind: 'window', terms: ['high', 'higher', 'highest', 'highs'] },
+  low: { kind: 'window', terms: ['low', 'lower', 'lowest', 'lows'] },
+  open: { kind: 'window', terms: ['open', 'opening', 'opened', 'opens'] },
+  close: { kind: 'window', terms: ['close', 'closing', 'closed', 'closes'] },
+  body: { kind: 'shape', terms: ['body', 'bodies'] },
+  wick: { kind: 'shape', terms: ['wick', 'wicks'] },
+  shadow: { kind: 'shape', terms: ['shadow', 'shadows'] },
+  anatomy: { kind: 'shape', terms: ['anatomy'] },
+  shape: { kind: 'shape', terms: ['shape', 'shapes', 'shaped', 'kind', 'kinds', 'type', 'types', 'sort', 'sorts'] },
+  compare: { kind: 'compare', terms: ['compare', 'compared', 'comparing', 'comparison', 'vs', 'versus', 'against'] },
+  summary: { kind: 'summary', terms: ['summary', 'overview', 'recap', 'did', 'do', 'does', 'done', 'doing'] },
+  session: { kind: 'time', terms: ['session', 'sessions', 'today', 'day', 'days'] },
+  morning: { kind: 'window', terms: ['morning', 'mornings', 'mornin'] },
+  afternoon: { kind: 'window', terms: ['afternoon', 'afternoons'] },
+  hour: { kind: 'window', terms: ['hour', 'hours', 'hr', 'hrs'] },
+  minute: { kind: 'window', terms: ['minute', 'minutes', 'min', 'mins'] },
+  first: { kind: 'window', terms: ['first'] },
+  last: { kind: 'window', terms: ['last'] },
+  candle: { kind: 'candle', terms: ['candle', 'candles', 'bar', 'bars', 'ohlc'] },
+  price: { kind: 'price', terms: ['price', 'prices', 'worth', 'value', 'cost'] },
+  direction: { kind: 'direction', terms: ['up', 'down', 'higher', 'lower'] },
+  now: { kind: 'time', terms: ['now', 'here', 'rn', 'currently', 'current', 'cursor', 'latest'] },
+  analysis: { kind: 'summary', terms: ['analysis', 'analyses', 'analyze'] },
+  total: { kind: 'window', terms: ['total', 'totals'] },
+  average: { kind: 'window', terms: ['average', 'avg', 'averages'] },
+};
+
+// Tokens that are a one-edit typo of an analytical stem but are common words
+// and must not fire the detector. They are unrelated in meaning.
+const NON_ANALYSIS_TOKENS: ReadonlySet<string> = new Set([
+  'more',
+  'some',
+  'make',
+  'made',
+  'come',
+  'home',
+  'done',
+  'none',
+  'love',
+  'live',
+  'have',
+]);
+
+// If the user is talking about playback/seek, a "move" token is not a price
+// movement request.
+const PLAYBACK_CONTEXT: ReadonlySet<string> = new Set([
+  'replay',
+  'play',
+  'playhead',
+  'earlier',
+  'later',
+  'back',
+  'forward',
+  'skip',
+  'jump',
+  'rewind',
+  'fastforward',
+  'cursor',
+]);
+
+// Query cues that turn a candle/price mention into a candle lookup.
+const CANDLE_QUERY_CUES: ReadonlySet<string> = new Set([
+  'what',
+  'which',
+  'tell',
+  'show',
+  'give',
+  'where',
+  'when',
+  'this',
+  'that',
+]);
+
+// Summary cues need a session/subject/window partner so bare "do it" is not
+// treated as an analysis request.
+const SUMMARY_SUBJECTS: ReadonlySet<string> = new Set([
+  'it',
+  'stock',
+  'market',
+  'symbol',
+  'today',
+  'session',
+  'day',
+  'now',
+  'here',
+  'rn',
+  'current',
+  'cursor',
+  'up',
+  'down',
+  'higher',
+  'lower',
+  'morning',
+  'afternoon',
+  'hour',
+  'minute',
+  'first',
+  'last',
+  'total',
+  'average',
+  'analysis',
+]);
+
+function tokenizeForAnalysis(text: string): string[] {
+  return text
+    .toLowerCase()
+    .replace(/[’']/g, '')
+    .replace(/[^a-z0-9:\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .split(' ')
+    .filter((t) => t.length > 0 && !/^\d+$/.test(t));
+}
+
+/**
+ * Optimal String Alignment (Damerau-Levenshtein restricted to adjacent
+ * transpositions). Sufficient for the bounded typo set in the prompt.
+ */
+function optimalStringAlignment(a: string, b: string): number {
+  const m = a.length;
+  const n = b.length;
+  if (m === 0) return n;
+  if (n === 0) return m;
+
+  const d: number[][] = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+  for (let i = 0; i <= m; i++) d[i][0] = i;
+  for (let j = 0; j <= n; j++) d[0][j] = j;
+
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      d[i][j] = Math.min(
+        d[i - 1][j] + 1,     // deletion
+        d[i][j - 1] + 1,     // insertion
+        d[i - 1][j - 1] + cost // substitution
+      );
+      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) {
+        d[i][j] = Math.min(d[i][j], d[i - 2][j - 2] + cost); // transposition
+      }
+    }
+  }
+  return d[m][n];
+}
+
+function maxPrefixDiff(tokenLength: number): number {
+  if (tokenLength <= 3) return 0;
+  if (tokenLength <= 5) return 1;
+  return 2;
+}
+
+function maxFuzzyDistance(tokenLength: number): number {
+  if (tokenLength <= 4) return 0;
+  if (tokenLength <= 7) return 1;
+  return 2;
+}
+
+function isFuzzyConceptMatch(token: string, term: string): boolean {
+  if (token === term) return true;
+  if (token.length < term.length && term.startsWith(token) && term.length - token.length <= maxPrefixDiff(token.length)) {
+    return true;
+  }
+  if (term.length < token.length && token.startsWith(term) && token.length - term.length <= maxPrefixDiff(token.length)) {
+    return true;
+  }
+  const dist = optimalStringAlignment(token, term);
+  return dist > 0 && dist <= maxFuzzyDistance(token.length);
+}
+
+interface DetectedConcepts {
+  tokens: string[];
+  concepts: Set<string>;
+  kinds: Record<ConceptDef['kind'], boolean>;
+  hasPlaybackContext: boolean;
+}
+
+function detectAnalysisConcepts(text: string): DetectedConcepts {
+  const tokens = tokenizeForAnalysis(text);
+  const concepts = new Set<string>();
+  const kinds: Record<ConceptDef['kind'], boolean> = {
+    window: false,
+    shape: false,
+    candle: false,
+    price: false,
+    summary: false,
+    time: false,
+    compare: false,
+    direction: false,
+  };
+  const hasPlaybackContext = tokens.some((t) => PLAYBACK_CONTEXT.has(t));
+
+  for (const token of tokens) {
+    if (NON_ANALYSIS_TOKENS.has(token)) continue;
+    for (const [concept, def] of Object.entries(ANALYSIS_CONCEPTS)) {
+      for (const term of def.terms) {
+        if (isFuzzyConceptMatch(token, term)) {
+          concepts.add(concept);
+          kinds[def.kind] = true;
+          break;
+        }
+      }
+    }
+  }
+
+  // Suppress "move" when it appears in a playback/seek context.
+  if (concepts.has('move') && hasPlaybackContext) {
+    concepts.delete('move');
+    if (!concepts.has('change')) kinds.window = false;
+  }
+
+  return { tokens, concepts, kinds, hasPlaybackContext };
+}
+
+function conceptMatched(c: DetectedConcepts, name: string): boolean {
+  return c.concepts.has(name);
+}
+
 export function textRequestsAnalysis(t: string): boolean {
-  const text = t.toLowerCase();
-  return (
-    /\b(range|ohlc|open high low close|high low)\b/i.test(text) ||
-    /\b(?:it|price|stock|this|the\s+stock)\s+(?:has\s+|did\s+)?(?:move|moved|moves)\b|\b(?:move|moved|moves)\s+(?:up|down|by|from|to|higher|lower|against)\b|\b(movement|change|changed|how did|do today|performed)\b/i.test(text) ||
-    /\b(?:volum|vol|volume|total volume|average volume)\b/i.test(text) ||
-    /\b(compare|vs|versus|compared to|against|higher than|lower than|more volume|less volume)\b/i.test(text) ||
-    /\b(candle anatomy|body|wick|upper wick|lower wick|shadow|candle shape|what kind of candle|kind of candle|candle am i on|candle i'm on)\b/i.test(text) ||
-    /\b(summary|overview|recap)\b/i.test(text) ||
-    /\b(first|last)\s+\d+\s*(?:min|minute|hour|hr)s?\b/i.test(text) ||
-    /\b(first hour|last hour|opening hour|closing hour|morning|mornig|afternoon|up to (?:cursor|here|where i)|where i'?m at|right now|rn)\b/i.test(text) ||
-    /\bfrom\s+\d{1,2}:\d{2}\s+to\s+\d{1,2}:\d{2}\b/i.test(text) ||
-    /\bfrom\s+\d{1,2}(?::\d{2})?\b.*\bto\s+\d{1,2}(?::\d{2})?\b/i.test(text)
-  );
+  const d = detectAnalysisConcepts(t);
+  if (textRequestsCandleShape(t)) return true;
+  if (textRequestsWindowAnalysis(t)) return true;
+  if (textRequestsSummary(t)) return true;
+  return false;
+}
+
+// Core window-metric concepts that can trigger a window analysis on their own.
+const CORE_WINDOW_CONCEPTS: ReadonlySet<string> = new Set([
+  'volume',
+  'range',
+  'change',
+  'move',
+  'high',
+  'low',
+  'open',
+  'close',
+  'compare',
+  'morning',
+  'afternoon',
+  'total',
+  'average',
+]);
+
+// Window-boundary concepts.  They need a duration partner so "half an hour"
+// (a seek duration) is not mistaken for a window analysis.
+const WINDOW_BOUNDARY_CONCEPTS: ReadonlySet<string> = new Set([
+  'first',
+  'last',
+  'morning',
+  'afternoon',
+]);
+
+// Durations that are only analytical when paired with a boundary or core metric.
+const WINDOW_DURATION_CONCEPTS: ReadonlySet<string> = new Set(['hour', 'minute']);
+
+// Tokens that turn an "open"/"close" mention into a UI action or market
+// time-of-day instead of an OHLC analysis request.
+const OHLC_ACTION_CONTEXT: ReadonlySet<string> = new Set(['market', 'chart', 'app', 'window', 'terminal']);
+
+export function textRequestsWindowAnalysis(t: string): boolean {
+  const d = detectAnalysisConcepts(t);
+  const coreHit = Array.from(d.concepts).some((c) => CORE_WINDOW_CONCEPTS.has(c));
+  const hasDuration = d.concepts.has('hour') || d.concepts.has('minute');
+  const hasBoundary = Array.from(d.concepts).some((c) => WINDOW_BOUNDARY_CONCEPTS.has(c));
+
+  if ((d.concepts.has('open') || d.concepts.has('close')) && d.tokens.some((tok) => OHLC_ACTION_CONTEXT.has(tok))) {
+    // "market open", "close the chart", etc. are not window analysis unless
+    // there is another window metric present.
+    const otherCore = Array.from(d.concepts).some(
+      (c) => c !== 'open' && c !== 'close' && (CORE_WINDOW_CONCEPTS.has(c) || WINDOW_BOUNDARY_CONCEPTS.has(c))
+    );
+    if (!otherCore && !(hasDuration && hasBoundary)) return false;
+  }
+
+  if (coreHit) return true;
+  if (hasDuration && hasBoundary) return true;
+  return false;
 }
 
 export function textRequestsCandleShape(t: string): boolean {
-  const text = t.toLowerCase();
-  return /\b(candle anatomy|body|wick|upper wick|lower wick|shadow|candle shape|what kind of candle|kind of candle|candle am i on|candle i'm on)\b/i.test(text);
+  const d = detectAnalysisConcepts(t);
+  // Unambiguous shape parts need no explicit "candle" token.
+  if (d.concepts.has('body') || d.concepts.has('wick') || d.concepts.has('shadow') || d.concepts.has('anatomy')) {
+    return true;
+  }
+  // Generic shape words (kind/type/shape) need a candle context.
+  if ((d.concepts.has('shape') || d.concepts.has('kind') || d.concepts.has('type')) &&
+      (d.concepts.has('candle') || d.concepts.has('bar') || d.concepts.has('ohlc'))) {
+    return true;
+  }
+  return false;
+}
+
+const CANDLE_CONTEXT_TERMS: ReadonlySet<string> = new Set([
+  'candle', 'candles', 'bar', 'bars', 'ohlc',
+  'price', 'prices', 'worth', 'value', 'cost',
+]);
+const NOW_TOKENS: ReadonlySet<string> = new Set(['now', 'here', 'rn', 'currently', 'current', 'cursor', 'latest']);
+
+function isTimeToken(token: string): boolean {
+  if (/^\d{1,2}:\d{2}(?::\d{2})?$/.test(token)) return true;
+  return textRequestsAbsoluteTime(token);
+}
+
+function isCandleContextToken(token: string): boolean {
+  for (const term of CANDLE_CONTEXT_TERMS) {
+    if (isFuzzyConceptMatch(token, term)) return true;
+  }
+  return false;
+}
+
+function hasNearbyCandleSignal(d: DetectedConcepts): boolean {
+  const contextIdx: number[] = [];
+  d.tokens.forEach((tok, i) => {
+    if (isCandleContextToken(tok)) contextIdx.push(i);
+  });
+  if (contextIdx.length === 0) return false;
+
+  const compareTerms = ANALYSIS_CONCEPTS.compare.terms;
+  for (let i = 0; i < d.tokens.length; i++) {
+    const tok = d.tokens[i];
+    const isSignal =
+      CANDLE_QUERY_CUES.has(tok) ||
+      isTimeToken(tok) ||
+      NOW_TOKENS.has(tok) ||
+      compareTerms.includes(tok);
+    if (!isSignal) continue;
+    for (const idx of contextIdx) {
+      if (Math.abs(i - idx) <= 4) return true;
+    }
+  }
+  return false;
+}
+
+export function textRequestsCandleQuery(t: string): boolean {
+  if (textRequestsCandleShape(t) || textRequestsWindowAnalysis(t)) return false;
+  const d = detectAnalysisConcepts(t);
+  const hasCandleContext = d.concepts.has('candle') || d.concepts.has('bar') || d.concepts.has('ohlc') || d.concepts.has('price');
+  if (!hasCandleContext) return false;
+  return hasNearbyCandleSignal(d);
+}
+
+function textRequestsSummary(t: string): boolean {
+  const d = detectAnalysisConcepts(t);
+  const summaryCues = new Set(['summary', 'overview', 'recap', 'did', 'do', 'does', 'done', 'doing', 'how', 'what']);
+  const hasCue = Array.from(d.concepts).some((c) => summaryCues.has(c));
+  if (!hasCue) return false;
+
+  const hasSubject =
+    d.tokens.some((tok) => SUMMARY_SUBJECTS.has(tok) && !(tok === 'session' && textRequestsDate(t))) ||
+    d.concepts.has('it');
+  const hasWindowOrShape = d.kinds.window || d.kinds.shape;
+  const hasSession = d.concepts.has('today') || d.concepts.has('day') || d.concepts.has('now');
+
+  // "Up" and "down" are only directional summaries when they are not part of
+  // a common phrasal verb (set up, look up, give up, ...).
+  const phrasalHeads = new Set(['set', 'get', 'make', 'look', 'turn', 'shut', 'pick', 'take', 'give', 'fill', 'wake', 'clean', 'put']);
+  const directionTerms = ANALYSIS_CONCEPTS.direction.terms;
+  let hasDirection = false;
+  for (let i = 1; i < d.tokens.length; i++) {
+    const tok = d.tokens[i];
+    if (!directionTerms.includes(tok)) continue;
+    if (phrasalHeads.has(d.tokens[i - 1])) continue;
+    hasDirection = true;
+    break;
+  }
+
+  return hasSubject || hasWindowOrShape || hasSession || hasDirection;
+}
+
+// ---------------------------------------------------------------------------
+// Unsupported indicator detection
+// ---------------------------------------------------------------------------
+
+const INDICATOR_CONCEPTS: ReadonlySet<string> = new Set([
+  'rsi',
+  'macd',
+  'bollinger',
+  'bollingerband',
+  'bollingerbands',
+  'ema',
+  'sma',
+  'atr',
+  'stochastic',
+  'vwap',
+  'cci',
+  'adx',
+  'obv',
+  'momentum',
+  'williams',
+  'williamsr',
+  'fibonacci',
+  'support',
+  'resistance',
+  'breakout',
+  'pattern',
+  'patterns',
+  'trend',
+  'trends',
+  'trendline',
+  'trendlines',
+  'volatility',
+  'vwap',
+  'backtest',
+]);
+
+function stripNumericSuffix(token: string): string {
+  return token.replace(/\d+s?$/, '').replace(/s$/, '');
 }
 
 export function textRequestsUnsupportedIndicator(t: string): boolean {
-  const text = t.toLowerCase();
-  return /\b(rsi|macd|bollinger|ema\d*|sma\d*|atr|stochastic|vwap|cci|adx|obv|momentum|williams %r|fibonacci|support|resistance|breakout|pattern|trend line)\b/i.test(text);
+  const tokens = tokenizeForAnalysis(t);
+  for (let i = 0; i < tokens.length; i++) {
+    const token = stripNumericSuffix(tokens[i]);
+    if (INDICATOR_CONCEPTS.has(token)) return true;
+    if (token === 'bollinger' && i + 1 < tokens.length) {
+      const next = tokens[i + 1];
+      if (next === 'band' || next === 'bands') return true;
+    }
+  }
+  return false;
 }
+
+// ---------------------------------------------------------------------------
+// Dimension aggregation
+// ---------------------------------------------------------------------------
 
 export function getRequestedDimensions(
   text: string,
@@ -133,7 +540,11 @@ export function getRequestedDimensions(
   const t = text;
   const dims = new Set<ActionDimension>();
 
-  const switchHint = (cmd.intent === 'switch' || (cmd.intent === 'unknown' && looksLikeSwitch(text))) && !textRequestsAnalysis(t);
+  const isAnalysis = textRequestsAnalysis(t);
+  const isCandleShape = textRequestsCandleShape(t);
+  const isCandleQuery = textRequestsCandleQuery(t) || (cmd.intent === 'candle_query' && !isAnalysis);
+
+  const switchHint = (cmd.intent === 'switch' || (cmd.intent === 'unknown' && looksLikeSwitch(text))) && !isAnalysis;
   if (cmd.symbol || switchHint) {
     dims.add('symbol');
   }
@@ -147,13 +558,14 @@ export function getRequestedDimensions(
   } else if (textRequestsTimeframe(t)) {
     dims.add('timeframe');
   }
-  const wantsCandle = textRequestsCandleQuery(t) || (cmd.intent === 'candle_query' && !textRequestsAnalysis(t));
-  if ((cmd.startTime || cmd.endTime) && (!textRequestsAnalysis(t) || wantsCandle)) {
+
+  const wantsCandle = isCandleQuery;
+  if ((cmd.startTime || cmd.endTime) && (!isAnalysis || wantsCandle)) {
     dims.add('absoluteTime');
-  } else if (textRequestsAbsoluteTime(t) && !textRequestsAnalysis(t)) {
+  } else if (textRequestsAbsoluteTime(t) && !isAnalysis) {
     dims.add('absoluteTime');
   }
-  if (!textRequestsAnalysis(t)) {
+  if (!isAnalysis) {
     if (cmd.relativeMinutes !== undefined) {
       dims.add('relativeSeek');
     } else if (textRequestsRelativeSeek(t)) {
@@ -162,7 +574,7 @@ export function getRequestedDimensions(
   }
   if (
     (cmd.speed !== undefined || ['play', 'pause', 'rewind', 'fast_forward', 'set_speed', 'seek'].includes(cmd.intent)) &&
-    !textRequestsAnalysis(t)
+    !isAnalysis
   ) {
     dims.add('playbackControl');
   } else if (textRequestsPlaybackControl(t)) {
@@ -174,7 +586,7 @@ export function getRequestedDimensions(
   if (textRequestsPreviousSymbol(t)) {
     dims.add('previousSymbol');
   }
-  if (textRequestsAnalysis(t)) {
+  if (isAnalysis) {
     dims.add('analysisRequest');
   }
   return dims;

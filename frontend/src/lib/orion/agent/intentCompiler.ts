@@ -588,6 +588,9 @@ export function compileChartActionIntent(
   }
 
   // 9. Deterministic chart analysis requests.
+  // Each analysis is independent and optional (required:false).  They are not
+  // chained to one another or to prior chart steps; the executor will still
+  // skip them if an earlier required step has failed.
   if (intent.analysisRequests && intent.analysisRequests.length > 0) {
     const seen = new Set<string>();
     let emitted = 0;
@@ -596,9 +599,7 @@ export function compileChartActionIntent(
       if (seen.has(key)) continue;
       seen.add(key);
       const step = compileAnalysisStep(emitted, request);
-      if (lastMutatingStepId && !step.dependsOn) {
-        step.dependsOn = [lastMutatingStepId];
-      }
+      step.dependsOn = [];
       pushStep(step);
       emitted++;
     }
@@ -629,14 +630,25 @@ export function compileChartActionIntent(
   };
 }
 
+function sortKeys<T>(value: T): T {
+  if (value === null || value === undefined || typeof value !== 'object') return value;
+  if (Array.isArray(value)) return value.map(sortKeys) as unknown as T;
+  const keys = Object.keys(value).sort();
+  const out: Record<string, unknown> = {};
+  for (const k of keys) {
+    out[k] = sortKeys((value as Record<string, unknown>)[k]);
+  }
+  return out as T;
+}
+
 function canonicalRequestKey(request: AnalysisRequest): string {
   if (request.kind === 'window_compare') {
-    return JSON.stringify({ kind: request.kind, left: request.left, right: request.right });
+    return JSON.stringify(sortKeys({ kind: request.kind, left: request.left, right: request.right }));
   }
   if (request.kind === 'candle_shape') {
-    return JSON.stringify({ kind: request.kind, source: request.source, marketTime: request.marketTime });
+    return JSON.stringify(sortKeys({ kind: request.kind, source: request.source, marketTime: request.marketTime }));
   }
-  return JSON.stringify({ kind: request.kind, window: (request as { window: AnalysisWindow }).window });
+  return JSON.stringify(sortKeys({ kind: request.kind, window: (request as { window: AnalysisWindow }).window }));
 }
 
 function compileAnalysisStep(index: number, request: AnalysisRequest): AgentStep {
@@ -649,7 +661,7 @@ function compileAnalysisStep(index: number, request: AnalysisRequest): AgentStep
         id: `step-analysis-${index + 1}`,
         capability: `analysis.${request.kind}`,
         args: { window: request.window ?? defaultAnalysisWindow() },
-        required: true,
+        required: false,
       };
     case 'window_compare':
       return {
@@ -659,14 +671,14 @@ function compileAnalysisStep(index: number, request: AnalysisRequest): AgentStep
           left: request.left ?? defaultAnalysisWindow(),
           right: request.right ?? defaultAnalysisWindow(),
         },
-        required: true,
+        required: false,
       };
     case 'candle_shape':
       return {
         id: `step-analysis-${index + 1}`,
         capability: 'analysis.candle_shape',
         args: { source: request.source, ...(request.marketTime ? { marketTime: request.marketTime } : {}) },
-        required: true,
+        required: false,
       };
   }
 }

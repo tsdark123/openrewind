@@ -199,11 +199,14 @@ export async function executeAgentPlan(
   }
 
   const after = ctx.getState();
-  const success = !receipts.some(
-    (r) =>
-      !r.success &&
-      requiredStepStatus(plan, r.stepId)
+  const requiredFailed = receipts.some(
+    (r) => !r.success && requiredStepStatus(plan, r.stepId)
   );
+  const anyStepSucceeded = receipts.some((r) => r.success);
+  // A plan is successful if no required step failed and at least one step
+  // produced a useful result. Optional-only plans that fail completely are
+  // still reported as failures so callers can distinguish empty sessions.
+  const success = !requiredFailed && anyStepSucceeded;
 
   const result: AgentExecutionResult = {
     ok: success,

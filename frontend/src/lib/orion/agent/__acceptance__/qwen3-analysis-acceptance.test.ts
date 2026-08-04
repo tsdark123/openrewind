@@ -5,7 +5,7 @@ import { handleOrionMessage } from '../orchestrator';
 import { clearSessionHistory } from '../capabilities';
 import { createExecutionContext } from '../executionContext';
 
-const TEST_TIMEOUT = 600_000;
+const TEST_TIMEOUT = 120_000;
 
 function baseAppState(): AppState {
   return {

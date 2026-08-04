@@ -60,6 +60,9 @@ src-tauri/binaries/openreplay-engine-*
 # --- Root node_modules (Tauri CLI) ---
 node_modules/
 
+# --- Generated reports ---
+docs/ORION_RUNTIME_6A3_REPORT.md
+
 # --- OS ---
 .DS_Store
 Thumbs.db
