@@ -55,6 +55,7 @@ export interface RawModelFidelity {
   rawFieldAccuracy: number;
   rawHallucinationRate: number;
   rawExactMatch: boolean;
+  ollamaFinal?: Record<string, unknown>;
 }
 
 export interface ProductionPipelineResult {

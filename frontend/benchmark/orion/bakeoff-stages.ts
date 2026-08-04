@@ -192,6 +192,7 @@ export async function extractAndStage(opts: {
   };
   const first = await opts.callOllama(messages);
   lastMetrics = first.metrics;
+  const firstFinal = first.final;
   const raw: RawModelFidelity = {
     rawText: first.rawText,
     jsonOk: false,
@@ -202,6 +203,7 @@ export async function extractAndStage(opts: {
     rawFieldAccuracy: 0,
     rawHallucinationRate: 0,
     rawExactMatch: false,
+    ollamaFinal: firstFinal,
   };
 
   const pipeline: ProductionPipelineResult = {
@@ -256,6 +258,7 @@ export async function extractAndStage(opts: {
       finalValidation = rv;
       raw.repairValid = rv.ok;
     }
+    raw.ollamaFinal = repair.final;
   }
 
   const finalMessages: OllamaMessage[] =

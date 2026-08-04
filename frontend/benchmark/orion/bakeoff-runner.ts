@@ -43,6 +43,7 @@ export async function runOneRepetition(
       numPredict: opts.numPredict ?? 160,
       temperature: opts.temperature ?? 0,
       seed: opts.seed ?? 42,
+      think: false,
       keepAlive: '10m',
       stream: true,
     });

@@ -55,10 +55,15 @@ export function formatScorecard(scorecard: ModelScorecard): string {
   return lines.join('\n');
 }
 
-export function writeResultsJson(path: string, results: RepetitionResult[]): string {
-  const payload = {
+export function writeResultsJson(
+  path: string,
+  results: RepetitionResult[],
+  options?: Record<string, unknown>
+): string {
+  const payload: Record<string, unknown> = {
     generatedAt: new Date().toISOString(),
     count: results.length,
+    options: options ?? {},
     results: results.map((r) => ({
       promptId: r.promptId,
       model: r.model,

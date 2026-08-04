@@ -15,6 +15,7 @@ export interface OllamaCallOptions {
   numPredict?: number;
   temperature?: number;
   seed?: number;
+  think?: boolean;
   keepAlive?: string;
   stream?: boolean;
 }
@@ -31,6 +32,7 @@ function buildBody(opts: OllamaCallOptions, stream: boolean) {
     messages: opts.messages,
     stream,
     ...(opts.format ? { format: opts.format } : {}),
+    ...(opts.think !== undefined ? { think: opts.think } : {}),
     options: {
       ...(opts.numCtx !== undefined ? { num_ctx: opts.numCtx } : {}),
       ...(opts.numPredict !== undefined ? { num_predict: opts.numPredict } : {}),
