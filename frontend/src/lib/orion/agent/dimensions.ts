@@ -257,22 +257,29 @@ function maxPrefixDiff(tokenLength: number): number {
   return 2;
 }
 
-function maxFuzzyDistance(tokenLength: number): number {
-  if (tokenLength <= 4) return 0;
-  if (tokenLength <= 7) return 1;
-  return 2;
-}
-
 function isFuzzyConceptMatch(token: string, term: string): boolean {
   if (token === term) return true;
-  if (token.length < term.length && term.startsWith(token) && term.length - token.length <= maxPrefixDiff(token.length)) {
-    return true;
+
+  const [short, long] = token.length < term.length ? [token, term] : [term, token];
+  if (long.startsWith(short)) {
+    if (long.length - short.length <= maxPrefixDiff(short.length)) return true;
   }
-  if (term.length < token.length && token.startsWith(term) && token.length - term.length <= maxPrefixDiff(token.length)) {
-    return true;
+
+  if (token.length === term.length && token.length >= 3) {
+    const dist = optimalStringAlignment(token, term);
+    if (dist === 1) return true;
   }
-  const dist = optimalStringAlignment(token, term);
-  return dist > 0 && dist <= maxFuzzyDistance(token.length);
+
+  // A single internal insertion/deletion that keeps the first and last
+  // characters intact is a typical typo (e.g. "mornig" vs "morning").
+  // Deletions or insertions at the very start/end are handled by the
+  // prefix/suffix rules above.
+  if (token.length > 2 && term.length > 2 && token[0] === term[0] && token[token.length - 1] === term[term.length - 1]) {
+    const dist = optimalStringAlignment(token, term);
+    if (dist === 1) return true;
+  }
+
+  return false;
 }
 
 interface DetectedConcepts {
@@ -319,12 +326,7 @@ function detectAnalysisConcepts(text: string): DetectedConcepts {
   return { tokens, concepts, kinds, hasPlaybackContext };
 }
 
-function conceptMatched(c: DetectedConcepts, name: string): boolean {
-  return c.concepts.has(name);
-}
-
 export function textRequestsAnalysis(t: string): boolean {
-  const d = detectAnalysisConcepts(t);
   if (textRequestsCandleShape(t)) return true;
   if (textRequestsWindowAnalysis(t)) return true;
   if (textRequestsSummary(t)) return true;
@@ -357,18 +359,23 @@ const WINDOW_BOUNDARY_CONCEPTS: ReadonlySet<string> = new Set([
   'afternoon',
 ]);
 
-// Durations that are only analytical when paired with a boundary or core metric.
-const WINDOW_DURATION_CONCEPTS: ReadonlySet<string> = new Set(['hour', 'minute']);
-
 // Tokens that turn an "open"/"close" mention into a UI action or market
 // time-of-day instead of an OHLC analysis request.
 const OHLC_ACTION_CONTEXT: ReadonlySet<string> = new Set(['market', 'chart', 'app', 'window', 'terminal']);
 
+const QUESTION_WORDS: ReadonlySet<string> = new Set(['what', 'how', 'which', 'where', 'when', 'why']);
+
 export function textRequestsWindowAnalysis(t: string): boolean {
   const d = detectAnalysisConcepts(t);
-  const coreHit = Array.from(d.concepts).some((c) => CORE_WINDOW_CONCEPTS.has(c));
+  const coreConcepts = Array.from(d.concepts).filter((c) => CORE_WINDOW_CONCEPTS.has(c));
+  const coreHit = coreConcepts.length > 0;
   const hasDuration = d.concepts.has('hour') || d.concepts.has('minute');
   const hasBoundary = Array.from(d.concepts).some((c) => WINDOW_BOUNDARY_CONCEPTS.has(c));
+  const hasQuestion = d.tokens.some((tok) => QUESTION_WORDS.has(tok));
+  const hasMultipleCores = coreConcepts.length >= 2;
+  // A single bare core word (or a one-token typo of a core word) is enough
+  // on its own, but a core word next to an unrelated non-analytical word is not.
+  const singleCoreWord = coreConcepts.length === 1 && d.tokens.length === 1;
 
   if ((d.concepts.has('open') || d.concepts.has('close')) && d.tokens.some((tok) => OHLC_ACTION_CONTEXT.has(tok))) {
     // "market open", "close the chart", etc. are not window analysis unless
@@ -379,8 +386,8 @@ export function textRequestsWindowAnalysis(t: string): boolean {
     if (!otherCore && !(hasDuration && hasBoundary)) return false;
   }
 
-  if (coreHit) return true;
-  if (hasDuration && hasBoundary) return true;
+  if (!coreHit) return false;
+  if ((hasDuration && hasBoundary) || hasQuestion || hasMultipleCores || singleCoreWord) return true;
   return false;
 }
 
@@ -447,15 +454,21 @@ export function textRequestsCandleQuery(t: string): boolean {
   return hasNearbyCandleSignal(d);
 }
 
-function textRequestsSummary(t: string): boolean {
+export function textRequestsSummary(t: string): boolean {
   const d = detectAnalysisConcepts(t);
   const summaryCues = new Set(['summary', 'overview', 'recap', 'did', 'do', 'does', 'done', 'doing', 'how', 'what']);
-  const hasCue = Array.from(d.concepts).some((c) => summaryCues.has(c));
-  if (!hasCue) return false;
+  const summaryCuesFound = Array.from(d.concepts).filter((c) => summaryCues.has(c));
+  if (summaryCuesFound.length === 0) return false;
 
-  const hasSubject =
-    d.tokens.some((tok) => SUMMARY_SUBJECTS.has(tok) && !(tok === 'session' && textRequestsDate(t))) ||
-    d.concepts.has('it');
+  const subjectTokens = d.tokens.filter(
+    (tok) => SUMMARY_SUBJECTS.has(tok) && !(tok === 'session' && textRequestsDate(t))
+  );
+  const onlySubjectIsIt = subjectTokens.length === 1 && subjectTokens[0] === 'it';
+  // "do it" has only the imperative "do" and the pronoun "it"; without a
+  // question word or a second summary cue it is not a summary request.
+  if (onlySubjectIsIt && summaryCuesFound.length < 2) return false;
+
+  const hasSubject = subjectTokens.length > 0;
   const hasWindowOrShape = d.kinds.window || d.kinds.shape;
   const hasSession = d.concepts.has('today') || d.concepts.has('day') || d.concepts.has('now');
 
@@ -541,7 +554,6 @@ export function getRequestedDimensions(
   const dims = new Set<ActionDimension>();
 
   const isAnalysis = textRequestsAnalysis(t);
-  const isCandleShape = textRequestsCandleShape(t);
   const isCandleQuery = textRequestsCandleQuery(t) || (cmd.intent === 'candle_query' && !isAnalysis);
 
   const switchHint = (cmd.intent === 'switch' || (cmd.intent === 'unknown' && looksLikeSwitch(text))) && !isAnalysis;
