@@ -172,13 +172,17 @@ describe('qwen3:8b analysis semantic-intent acceptance', () => {
       expect(r.route).toMatch(/llm-plan/);
       expect(r.plan).toBeDefined();
       if (r.ok && r.plan) {
-        const step = r.plan.steps.find((s) => s.capability === 'analysis.window_ohlc');
-        expect(step).toBeDefined();
-        const window = step!.args.window as { kind: string };
-        expect(['time_range', 'whole_session', 'first_n_minutes']).toContain(window.kind);
+        const analysisSteps = r.plan.steps.filter((s) => s.capability.startsWith('analysis.'));
+        expect(analysisSteps).toHaveLength(1);
+        const step = analysisSteps[0];
+        expect(step.capability).toBe('analysis.window_ohlc');
+        const window = step.args.window as { kind: string; n?: number; fromTime?: string; toTime?: string };
+        expect(['time_range', 'first_n_minutes']).toContain(window.kind);
         if (window.kind === 'time_range') {
           expect(window.fromTime).toBe('09:30');
-          expect(window.toTime).toMatch(/^10(:00|:30)$/);
+          expect(window.toTime).toBe('10:30');
+        } else {
+          expect(window.n).toBe(60);
         }
       }
     },
@@ -200,10 +204,14 @@ describe('qwen3:8b analysis semantic-intent acceptance', () => {
       expect(r.route).toMatch(/llm-plan/);
       expect(r.plan).toBeDefined();
       if (r.ok && r.plan) {
-        const step = r.plan.steps.find((s) => s.capability === 'analysis.window_volume');
-        expect(step).toBeDefined();
-        const window = step!.args.window as { kind: string };
-        expect(['whole_session', 'time_range', 'first_n_minutes']).toContain(window.kind);
+        const analysisSteps = r.plan.steps.filter((s) => s.capability.startsWith('analysis.'));
+        expect(analysisSteps).toHaveLength(1);
+        const step = analysisSteps[0];
+        expect(step.capability).toBe('analysis.window_volume');
+        const window = step.args.window as { kind: string; fromTime?: string; toTime?: string };
+        expect(window.kind).toBe('time_range');
+        expect(window.fromTime).toBe('09:30');
+        expect(window.toTime).toBe('12:00');
       }
     },
     TEST_TIMEOUT
@@ -224,11 +232,31 @@ describe('qwen3:8b analysis semantic-intent acceptance', () => {
       expect(r.route).toMatch(/llm-plan/);
       expect(r.plan).toBeDefined();
       if (r.ok && r.plan) {
-        const caps = r.plan.steps.map((s) => s.capability);
-        expect(caps.filter((c) => c.startsWith('analysis.')).length).toBeGreaterThanOrEqual(3);
-        expect(caps).toContain('analysis.window_change');
-        expect(caps).toContain('analysis.window_volume');
-        expect(caps).toContain('analysis.candle_shape');
+        const analysisSteps = r.plan.steps.filter((s) => s.capability.startsWith('analysis.'));
+        expect(analysisSteps).toHaveLength(3);
+
+        const changeStep = analysisSteps.find(
+          (s) => s.capability === 'analysis.window_change' || s.capability === 'analysis.window_summary'
+        );
+        expect(changeStep).toBeDefined();
+        const volumeStep = analysisSteps.find((s) => s.capability === 'analysis.window_volume');
+        expect(volumeStep).toBeDefined();
+        const candleStep = analysisSteps.find((s) => s.capability === 'analysis.candle_shape');
+        expect(candleStep).toBeDefined();
+
+        const expectedWindow = { kind: 'time_range', fromTime: '10:00', toTime: '12:00' };
+        expect((changeStep!.args.window as any)).toEqual(expectedWindow);
+        expect((volumeStep!.args.window as any)).toEqual(expectedWindow);
+
+        const candleArgs = candleStep!.args as { source: string; marketTime?: string };
+        expect(candleArgs.source).toBe('market_time');
+        expect(candleArgs.marketTime).toBe('12:00');
+
+        expect(r.result?.receipts.length ?? 0).toBeGreaterThanOrEqual(3);
+        const messages = r.result!.receipts.map((rc) => rc.message).join(' ').toLowerCase();
+        expect(messages).toMatch(/\b(change|move)\b/);
+        expect(messages).toMatch(/\bvolume\b/);
+        expect(messages).toMatch(/\b(body|wick|anatomy|shape)\b/);
       }
     },
     TEST_TIMEOUT
@@ -249,11 +277,26 @@ describe('qwen3:8b analysis semantic-intent acceptance', () => {
       expect(r.route).toMatch(/llm-plan/);
       expect(r.plan).toBeDefined();
       if (r.ok && r.plan) {
-        const caps = r.plan.steps.map((s) => s.capability);
-        expect(caps).toContain('analysis.window_compare');
-        expect(caps).toContain('analysis.window_volume');
-        const compareStep = r.plan.steps.find((s) => s.capability === 'analysis.window_compare');
+        const analysisSteps = r.plan.steps.filter((s) => s.capability.startsWith('analysis.'));
+        expect(analysisSteps).toHaveLength(2);
+
+        const compareStep = analysisSteps.find((s) => s.capability === 'analysis.window_compare');
         expect(compareStep).toBeDefined();
+        const volumeStep = analysisSteps.find((s) => s.capability === 'analysis.window_volume');
+        expect(volumeStep).toBeDefined();
+
+        const compareArgs = compareStep!.args as {
+          left: { kind: string; fromTime?: string; toTime?: string };
+          right: { kind: string; fromTime?: string; toTime?: string };
+        };
+        expect(compareArgs.left).toEqual({ kind: 'time_range', fromTime: '09:30', toTime: '12:00' });
+        expect(compareArgs.right).toEqual({ kind: 'time_range', fromTime: '12:00', toTime: '16:00' });
+
+        const volumeArgs = volumeStep!.args as { window: { kind: string; fromTime?: string; toTime?: string } };
+        expect(volumeArgs.window).toEqual({ kind: 'time_range', fromTime: '09:30', toTime: '16:00' });
+
+        const messages = r.result!.receipts.map((rc) => rc.message).join(' ').toLowerCase();
+        expect(messages).toMatch(/\b(volume|higher|lower|more|less)\b/);
       }
     },
     TEST_TIMEOUT
@@ -296,13 +339,18 @@ describe('qwen3:8b analysis semantic-intent acceptance', () => {
       expect(r.route).toMatch(/llm-plan/);
       expect(r.plan).toBeDefined();
       if (r.ok && r.plan) {
-        const step = r.plan.steps.find((s) => s.capability.startsWith('analysis.'));
-        expect(step).toBeDefined();
-        const window = step!.args.window as { kind: string } | undefined;
-        expect(window).toBeDefined();
-        if (window) {
-          expect(window.kind).toBe('up_to_cursor');
-        }
+        const analysisSteps = r.plan.steps.filter((s) => s.capability.startsWith('analysis.'));
+        expect(analysisSteps).toHaveLength(1);
+
+        const step = analysisSteps[0];
+        expect(['analysis.window_change', 'analysis.window_summary']).toContain(step.capability);
+        const window = step.args.window as { kind: string };
+        expect(window.kind).toBe('up_to_cursor');
+
+        const successReceipt = r.result!.receipts.find((rc) => rc.success);
+        expect(successReceipt).toBeDefined();
+        const msg = (successReceipt?.message ?? '').toLowerCase();
+        expect(msg).toMatch(/\b(change|move|open|close|%)\b/);
       }
     },
     TEST_TIMEOUT

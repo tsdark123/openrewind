@@ -43,6 +43,7 @@ import {
   textRequestsPlaybackControl,
   textRequestsAnalysis,
   textRequestsCandleShape,
+  textRequestsContextReference,
   textRequestsUnsupportedIndicator,
 } from './dimensions';
 import { SYMBOL_ALIASES } from '../symbolAliases';
@@ -265,19 +266,9 @@ async function handleCanonicalRepeat(
   };
 }
 
-function looksLikeContextReference(text: string): boolean {
-  const t = text.trim().toLowerCase();
-  return (
-    /\b(?:do|run|perform)\s+(?:that|it|this|the same)\s+(?:analysis|thing|one|again)\b/.test(t) ||
-    /\b(?:do|run|perform)\s+(?:that|it|this|the same)(?:\s+(?:analysis|thing|one|again))?\s+(?:on|for|with)\s+[a-z0-9-]+\b/.test(t) ||
-    /\b(?:again|same|repeat)\b.*\b(?:timeframe|time frame|date|session|candle)\b/.test(t) ||
-    /\b(?:same|the same)\s+(?:timeframe|time frame|date|session)\b/.test(t) ||
-    /\b(?:same|the same)\s+(?:thing|one|analysis)(?:\s+(?:but|as|with))?\s+.*\b(?:first|last|hour|time|range|candle|window|volume|ohlc|change)\b/.test(t) ||
-    /\bgo\s+back\s+(?:to\s+)?(?:the\s+)?(?:candle|stock|symbol|one)\b/.test(t) ||
-    /\b(?:previous|last|prior)\s+(?:candle|one|stock|symbol|session)\b/.test(t) ||
-    /\bcompare\s+(?:this|the|that)\s+candle\s+(?:with|to|against)\s+(?:the\s+)?(?:previous|last|prior|reported)\b/.test(t) ||
-    /\b(?:the|a)\s+candle\s+we\s+were\s+discussing\b/.test(t)
-  );
+function looksLikeContextReference(text: string, ctx: AgentContext): boolean {
+  const hasPriorAction = ctx.executionLog.latestSuccessfulAction() !== null;
+  return textRequestsContextReference(text, hasPriorAction);
 }
 
 function looksLikePlayOrPause(text: string): boolean {
@@ -508,9 +499,7 @@ function formatParsedTime(t: ParsedTime): string {
   return `${t.hour.toString().padStart(2, '0')}:${t.minute.toString().padStart(2, '0')}`;
 }
 
-function isCompareRequest(text: string): boolean {
-  return /\bcompare\b/i.test(text) || /\b(?:this|the|that)\s+candle\s+(?:with|to|against)\s+(?:the\s+)?(?:previous|last|prior|reported)\b/i.test(text);
-}
+
 
 function isCurrentCandleRequest(text: string): boolean {
   return /\b(?:current|now|latest)\s+(?:candle|price|bar)\b/i.test(text);
@@ -575,7 +564,7 @@ export function sanitizeIntentGrounding(
   const cmd = parseChartCommand(text, ctx.availableTickers, SYMBOL_ALIASES, ctx.getState().replayDate);
   const baseDate = ctx.getState().replayDate;
   const requested = getRequestedDimensions(text, cmd, baseDate);
-  const anaphoric = looksLikeContextReference(text);
+  const anaphoric = originalContextReference !== undefined;
   const state = ctx.getState();
 
   const allowed = new Set<ActionDimension>(requested);
@@ -599,7 +588,7 @@ export function sanitizeIntentGrounding(
     }
   }
 
-  if (resolved.finalQuery === 'compare_candles' && (anaphoric || isCompareRequest(text))) {
+  if (resolved.finalQuery === 'compare_candles' && (anaphoric || textRequestsCandleQuery(text))) {
     allowed.add('candleQuery');
   }
 
@@ -751,7 +740,7 @@ export function sanitizeIntentGrounding(
 
   // Compare
   if (sanitized.compare) {
-    if (sanitized.finalQuery === 'compare_candles' && (anaphoric || isCompareRequest(text) || allowed.has('candleQuery'))) {
+    if (sanitized.finalQuery === 'compare_candles' && (anaphoric || textRequestsCandleQuery(text) || allowed.has('candleQuery'))) {
       trace.kept.push('compare');
     } else {
       delete sanitized.compare;
@@ -794,7 +783,7 @@ export function sanitizeIntentGrounding(
   if (sanitized.finalQuery) {
     const fq = sanitized.finalQuery;
     if (fq === 'compare_candles') {
-      if (sanitized.compare && (anaphoric || isCompareRequest(text) || allowed.has('candleQuery'))) {
+      if (sanitized.compare && (anaphoric || textRequestsCandleQuery(text) || allowed.has('candleQuery'))) {
         trace.kept.push(`finalQuery:${fq}`);
       } else {
         delete sanitized.finalQuery;
@@ -989,7 +978,7 @@ async function routeMessage(
 
   // 3b. Anaphoric / context-reference requests should not be answered by the
   // deterministic chart parser because it has no access to execution context.
-  const anaphoric = looksLikeContextReference(text);
+  const anaphoric = looksLikeContextReference(text, ctx);
 
   // 3. Conversation heuristics / classifier.
   let routeChat = isConversation(text);

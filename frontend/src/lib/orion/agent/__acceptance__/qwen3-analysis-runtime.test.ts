@@ -11,12 +11,13 @@ import { fetchCandles } from '../../tools';
 import { toEngineTs } from '../../planner';
 import {
   computeWindowOhlc,
+  computeWindowVolume,
   computeWindowCompare,
   type ResolvedWindowMeta,
   type WindowCompareResult,
 } from '../analysis';
 
-const TEST_TIMEOUT = 180_000;
+const TEST_TIMEOUT = 120_000;
 const API_BASE = 'http://127.0.0.1:9000';
 
 interface ChartBuffer {
@@ -229,6 +230,17 @@ async function verifyFirstHourOhlc(symbol: string, date: string, receipt: Record
   };
 }
 
+async function verifyVolumeReceipt(symbol: string, date: string, fromTime: string, toTime: string, receipt: Record<string, unknown>) {
+  const candles = await fetchWindow(symbol, date, fromTime, toTime);
+  const meta = buildMeta('time_range', symbol, date, 1, candles, fromTime, toTime);
+  const expected = computeWindowVolume(candles, meta);
+  return {
+    ok: expected.totalVolume === receipt.totalVolume,
+    expected: { totalVolume: expected.totalVolume },
+    received: { totalVolume: receipt.totalVolume },
+  };
+}
+
 async function verifyVolumeComparison(receipt: Record<string, unknown>) {
   const result = receipt as unknown as WindowCompareResult;
   const leftMeta = result.left;
@@ -302,6 +314,41 @@ function checkPlanStep(
   const found = result.plan.steps.find(predicate);
   if (!found) return `${label}: expected plan step not found`;
   return undefined;
+}
+
+function isTimeRange(w: unknown, fromTime: string, toTime: string): boolean {
+  const arg = w as { kind?: string; fromTime?: string; toTime?: string } | undefined;
+  return arg?.kind === 'time_range' && arg.fromTime === fromTime && arg.toTime === toTime;
+}
+
+function isFirstHourWindow(w: unknown): boolean {
+  const arg = w as { kind?: string; n?: number } | undefined;
+  if (arg?.kind === 'first_n_minutes') return arg.n === 60;
+  return isTimeRange(w, '09:30', '10:30');
+}
+
+function isMorningWindow(w: unknown): boolean {
+  return isTimeRange(w, '09:30', '12:00');
+}
+
+function isLastHourWindow(w: unknown): boolean {
+  return isTimeRange(w, '15:00', '16:00');
+}
+
+function isLast30Window(w: unknown): boolean {
+  return isTimeRange(w, '15:30', '16:00');
+}
+
+function isTenToNoonWindow(w: unknown): boolean {
+  return isTimeRange(w, '10:00', '12:00');
+}
+
+function findAnalysisStep(result: OrchestratorResult, capability: string) {
+  return result.plan?.steps.find((s) => s.capability === capability);
+}
+
+function getWindow(step: { args: Record<string, unknown> } | undefined) {
+  return step?.args.window as { kind: string; fromTime?: string; toTime?: string; n?: number } | undefined;
 }
 
 function writeRuntimeReport(failures: string[], ground: Record<string, unknown>) {
@@ -400,76 +447,169 @@ describe('Phase 6A.3 real runtime acceptance', () => {
       // A.1
       const a1 = await handleOrionMessage({ text: 'How did AAPL do today?', ctx, setupReady: true });
       record('A.1', 'How did AAPL do today?', a1);
-      if (!a1.ok || a1.route !== 'llm-plan') failures.push('A.1 route/ok');
+      if (!a1.ok || a1.route !== 'llm-plan') {
+        failures.push('A.1 route/ok');
+      } else {
+        const analysisSteps = a1.plan!.steps.filter((s) => s.capability.startsWith('analysis.'));
+        if (analysisSteps.length !== 1) failures.push(`A.1 expected 1 analysis step, got ${analysisSteps.length}`);
+        const step = analysisSteps[0];
+        if (step && step.capability !== 'analysis.window_summary') {
+          failures.push(`A.1 expected window_summary, got ${step.capability}`);
+        }
+        if (step && (step.args.window as any)?.kind !== 'whole_session') {
+          failures.push('A.1 expected whole_session window');
+        }
+      }
 
       // A.2
       a2 = await handleOrionMessage({ text: 'range first hour', ctx, setupReady: true });
       record('A.2', 'range first hour', a2);
-      if (!a2.ok || a2.route !== 'llm-plan') failures.push('A.2 route/ok');
+      if (!a2.ok || a2.route !== 'llm-plan') {
+        failures.push('A.2 route/ok');
+      } else {
+        const analysisSteps = a2.plan!.steps.filter((s) => s.capability.startsWith('analysis.'));
+        if (analysisSteps.length !== 1) failures.push(`A.2 expected 1 analysis step, got ${analysisSteps.length}`);
+        const step = analysisSteps[0];
+        if (step?.capability !== 'analysis.window_ohlc') failures.push('A.2 expected window_ohlc');
+        if (step && !isFirstHourWindow(step.args.window)) failures.push('A.2 expected first-hour window');
+      }
 
       // A.3
       const a3 = await handleOrionMessage({ text: 'how much did it move up to where im at', ctx, setupReady: true });
       record('A.3', 'how much did it move up to where im at', a3);
-      if (!a3.ok || a3.route !== 'llm-plan') failures.push('A.3 route/ok');
+      if (!a3.ok || a3.route !== 'llm-plan') {
+        failures.push('A.3 route/ok');
+      } else {
+        const analysisSteps = a3.plan!.steps.filter((s) => s.capability.startsWith('analysis.'));
+        if (analysisSteps.length !== 1) failures.push(`A.3 expected 1 analysis step, got ${analysisSteps.length}`);
+        const step = analysisSteps[0];
+        if (!['analysis.window_change', 'analysis.window_summary'].includes(step?.capability ?? '')) {
+          failures.push('A.3 expected window_change or window_summary');
+        }
+        if (step && (step.args.window as any)?.kind !== 'up_to_cursor') failures.push('A.3 expected up_to_cursor window');
+        if (a3.result) {
+          const receipt = a3.result.receipts.find((r) => r.success && r.capability.startsWith('analysis.'));
+          if (!receipt) {
+            failures.push('A.3 missing successful analysis receipt');
+          } else {
+            const msg = receipt.message.toLowerCase();
+            if (!/\b(change|move|open|close|up|down|%|percent)\b/.test(msg)) {
+              failures.push('A.3 receipt does not describe a move/change');
+            }
+          }
+        }
+      }
 
       // A.4
       a4 = await handleOrionMessage({ text: 'what kind of candle am i on rn', ctx, setupReady: true });
       record('A.4', 'what kind of candle am i on rn', a4);
-      if (!a4.ok || a4.route !== 'llm-plan') failures.push('A.4 route/ok');
-
-      const a2PlanErr =
-        checkPlanStep('A.2', a2, (s) => s.capability === 'analysis.window_ohlc' && (s.args.window as any)?.kind === 'time_range');
-      if (a2PlanErr) failures.push(a2PlanErr);
-
-      const a3PlanErr =
-        checkPlanStep(
-          'A.3',
-          a3,
-          (s) =>
-            (s.capability === 'analysis.window_change' || s.capability === 'analysis.window_summary') &&
-            (s.args.window as any)?.kind === 'up_to_cursor'
-        );
-      if (a3PlanErr) failures.push(a3PlanErr);
-
-      const a4PlanErr = checkPlanStep('A.4', a4, (s) => s.capability === 'analysis.candle_shape');
-      if (a4PlanErr) failures.push(a4PlanErr);
+      if (!a4.ok || a4.route !== 'llm-plan') {
+        failures.push('A.4 route/ok');
+      } else {
+        const analysisSteps = a4.plan!.steps.filter((s) => s.capability.startsWith('analysis.'));
+        if (analysisSteps.length !== 1) failures.push(`A.4 expected 1 analysis step, got ${analysisSteps.length}`);
+        const step = analysisSteps[0];
+        if (step?.capability !== 'analysis.candle_shape') failures.push('A.4 expected candle_shape');
+        const args = step?.args as { source?: string; marketTime?: string } | undefined;
+        if (args?.source !== 'current_chart_candle') failures.push('A.4 expected source current_chart_candle');
+        if (args?.marketTime !== undefined) failures.push('A.4 should not set marketTime for current chart candle');
+      }
 
       // B.5
       b5 = await handleOrionMessage({ text: 'was mornig volum higher than near close', ctx, setupReady: true });
       record('B.5', 'was mornig volum higher than near close', b5);
-      if (!b5.ok || b5.route !== 'llm-plan') failures.push('B.5 route/ok');
+      if (!b5.ok || b5.route !== 'llm-plan') {
+        failures.push('B.5 route/ok');
+      } else {
+        const analysisSteps = b5.plan!.steps.filter((s) => s.capability.startsWith('analysis.'));
+        if (analysisSteps.length === 0) failures.push('B.5 expected at least 1 analysis step');
+
+        const compareStep = analysisSteps.find((s) => s.capability === 'analysis.window_compare');
+        if (compareStep) {
+          if (analysisSteps.length !== 1) failures.push(`B.5 expected 1 step with compare, got ${analysisSteps.length}`);
+          const args = compareStep.args as { left: { kind: string }; right: { kind: string } };
+          if (!isMorningWindow(args.left)) failures.push('B.5 compare left should be morning 09:30-12:00');
+          if (!isLast30Window(args.right) && !isLastHourWindow(args.right)) failures.push('B.5 compare right should be 15:30-16:00 or 15:00-16:00');
+        } else {
+          const volumeSteps = analysisSteps.filter((s) => s.capability === 'analysis.window_volume');
+          if (volumeSteps.length !== 2) failures.push(`B.5 expected 2 volume steps or 1 compare, got ${analysisSteps.length} steps`);
+          const windows = volumeSteps.map((s) => getWindow(s));
+          const hasMorning = windows.some((w) => isMorningWindow(w));
+          const hasNearClose = windows.some((w) => isLast30Window(w) || isLastHourWindow(w));
+          if (!hasMorning) failures.push('B.5 two-volume mode missing morning window');
+          if (!hasNearClose) failures.push('B.5 two-volume mode missing near-close window');
+
+          if (b5.result) {
+            const volumeReceipts = b5.result.receipts.filter((r) => r.capability === 'analysis.window_volume' && r.success);
+            if (volumeReceipts.length !== 2) failures.push('B.5 two-volume mode needs 2 successful volume receipts');
+            const msg = b5.result.receipts.map((r) => r.message).join(' ').toLowerCase();
+            const totalMatches = (msg.match(/\b\d{4,}\b/g) ?? []).length;
+            if (totalMatches < 2) {
+              failures.push('B.5 response must contain the two volume totals');
+            }
+          }
+        }
+      }
 
       // B.6
       const b6 = await handleOrionMessage({ text: 'yo compare the first 30 mins to the last 30', ctx, setupReady: true });
       record('B.6', 'yo compare the first 30 mins to the last 30', b6);
-      if (!b6.ok || b6.route !== 'llm-plan') failures.push('B.6 route/ok');
+      if (!b6.ok || b6.route !== 'llm-plan') {
+        failures.push('B.6 route/ok');
+      } else {
+        const analysisSteps = b6.plan!.steps.filter((s) => s.capability.startsWith('analysis.'));
+        if (analysisSteps.length !== 1) failures.push(`B.6 expected 1 analysis step, got ${analysisSteps.length}`);
+        const step = analysisSteps[0];
+        if (step?.capability !== 'analysis.window_compare') failures.push('B.6 expected window_compare');
+        const args = step?.args as { left: { kind: string; fromTime?: string; toTime?: string }; right: { kind: string; fromTime?: string; toTime?: string } } | undefined;
+        if (args?.left?.kind !== 'time_range' || args.left.fromTime !== '09:30') {
+          failures.push('B.6 left should start at 09:30');
+        }
+        if (args?.right?.kind !== 'time_range' || args.right.fromTime !== '15:30') {
+          failures.push('B.6 right should start at 15:30');
+        }
+        if (b6.result) {
+          const compareReceipt = b6.result.receipts.find((r) => r.capability === 'analysis.window_compare' && r.success);
+          if (!compareReceipt) {
+            failures.push('B.6 missing successful window_compare receipt');
+          } else {
+            const msg = compareReceipt.message.toLowerCase();
+            if (!/\b(candle|vs|volume|delta|close)\b/.test(msg)) {
+              failures.push('B.6 response must describe a comparison');
+            }
+          }
+        }
+      }
 
       // B.7
       const b7 = await handleOrionMessage({ text: 'give me the move, total volum and candle anatomy from 10 to noon', ctx, setupReady: true });
       record('B.7', 'give me the move, total volum and candle anatomy from 10 to noon', b7);
-      if (!b7.ok || b7.route !== 'llm-plan') failures.push('B.7 route/ok');
-
-      if (b5.ok && b5.plan) {
-        const analysisSteps = b5.plan.steps.filter((s) => s.capability.startsWith('analysis.'));
-        const hasCompare = analysisSteps.some((s) => s.capability === 'analysis.window_compare');
-        const hasTwoVolumes =
-          analysisSteps.filter((s) => s.capability === 'analysis.window_volume').length >= 2;
-        if (!hasCompare && !hasTwoVolumes) {
-          failures.push('B.5 expected a window comparison or two volume windows');
+      if (!b7.ok || b7.route !== 'llm-plan') {
+        failures.push('B.7 route/ok');
+      } else {
+        const analysisSteps = b7.plan!.steps.filter((s) => s.capability.startsWith('analysis.'));
+        if (analysisSteps.length !== 3) failures.push(`B.7 expected exactly 3 analysis steps, got ${analysisSteps.length}`);
+        const caps = analysisSteps.map((s) => s.capability).sort();
+        if (caps[0] !== 'analysis.candle_shape' || caps[1] !== 'analysis.window_change' || caps[2] !== 'analysis.window_volume') {
+          failures.push(`B.7 expected change+volume+candle, got ${caps.join(', ')}`);
         }
-      }
-
-      const b6PlanErr =
-        checkPlanStep('B.6', b6, (s) => s.capability === 'analysis.window_compare');
-      if (b6PlanErr) failures.push(b6PlanErr);
-
-      if (b7.ok && b7.plan) {
-        const analysisSteps = b7.plan.steps.filter((s) => s.capability.startsWith('analysis.'));
-        if (analysisSteps.length < 3) failures.push('B.7 expected at least 3 analysis steps');
-        const caps = analysisSteps.map((s) => s.capability);
-        if (!caps.includes('analysis.window_change')) failures.push('B.7 missing move/change analysis');
-        if (!caps.includes('analysis.window_volume')) failures.push('B.7 missing volume analysis');
-        if (!caps.includes('analysis.candle_shape')) failures.push('B.7 missing candle anatomy analysis');
+        const changeStep = analysisSteps.find((s) => s.capability === 'analysis.window_change');
+        const volumeStep = analysisSteps.find((s) => s.capability === 'analysis.window_volume');
+        const candleStep = analysisSteps.find((s) => s.capability === 'analysis.candle_shape');
+        if (changeStep && !isTenToNoonWindow(changeStep.args.window)) failures.push('B.7 change window should be 10:00-12:00');
+        if (volumeStep && !isTenToNoonWindow(volumeStep.args.window)) failures.push('B.7 volume window should be 10:00-12:00');
+        const candleArgs = candleStep?.args as { source?: string; marketTime?: string } | undefined;
+        if (candleArgs?.source !== 'market_time' || candleArgs?.marketTime !== '12:00') {
+          failures.push('B.7 candle shape should be market_time 12:00');
+        }
+        if (b7.result) {
+          const successReceipts = b7.result.receipts.filter((r) => r.success);
+          if (successReceipts.length < 3) failures.push(`B.7 expected 3 successful receipts, got ${successReceipts.length}`);
+          const msg = b7.result.receipts.map((r) => r.message).join(' ').toLowerCase();
+          if (!/\b(change|move|open.*close)\b/.test(msg)) failures.push('B.7 response missing move/change');
+          if (!/\bvolume\b/.test(msg)) failures.push('B.7 response missing volume');
+          if (!/\b(body|wick|anatomy|shape|upper|lower)\b/.test(msg)) failures.push('B.7 response missing candle anatomy');
+        }
       }
 
       sharedCtx = ctx;
@@ -493,38 +633,99 @@ describe('Phase 6A.3 real runtime acceptance', () => {
         'context before': beforeC8?.template,
         'context after': afterC8?.template,
       });
-      if (!c8.ok || c8.route !== 'llm-plan') failures.push('C.8 route/ok');
+      if (!c8.ok || c8.route !== 'llm-plan') {
+        failures.push('C.8 route/ok');
+      } else {
+        const analysisSteps = c8.plan!.steps.filter((s) => s.capability.startsWith('analysis.'));
+        if (analysisSteps.length < 1) failures.push(`C.8 expected at least 1 analysis step, got ${analysisSteps.length}`);
+        for (const step of analysisSteps) {
+          if (step.capability === 'analysis.window_compare') {
+            const args = step.args as { left: unknown; right: unknown };
+            if (!isFirstHourWindow(args.left) || !isFirstHourWindow(args.right)) {
+              failures.push(`C.8 compare windows should both be first hour`);
+            }
+          } else if (step.args.window && !isFirstHourWindow(step.args.window)) {
+            failures.push(`C.8 all windows should be first hour, got ${JSON.stringify(step.args.window)}`);
+          }
+        }
+      }
 
       // C.9
       const c9 = await handleOrionMessage({ text: 'what about volume?', ctx, setupReady: true });
       record('C.9', 'what about volume?', c9);
-      if (!c9.ok || c9.route !== 'llm-plan') failures.push('C.9 route/ok');
+      if (!c9.ok || c9.route !== 'llm-plan') {
+        failures.push('C.9 route/ok');
+      } else {
+        const analysisSteps = c9.plan!.steps.filter((s) => s.capability.startsWith('analysis.'));
+        if (analysisSteps.length !== 1) failures.push(`C.9 expected 1 analysis step, got ${analysisSteps.length}`);
+        const step = analysisSteps[0];
+        if (step?.capability !== 'analysis.window_volume') failures.push('C.9 expected window_volume');
+        if (step && !isFirstHourWindow(step.args.window)) {
+          failures.push(`C.9 volume should inherit first-hour window, got ${JSON.stringify(step.args.window)}`);
+        }
+      }
 
       // C.10
       const c10 = await handleOrionMessage({ text: 'compare that with the last hour', ctx, setupReady: true });
       record('C.10', 'compare that with the last hour', c10);
-      if (!c10.ok || c10.route !== 'llm-plan') failures.push('C.10 route/ok');
+      if (!c10.ok || c10.route !== 'llm-plan') {
+        failures.push('C.10 route/ok');
+      } else {
+        const analysisSteps = c10.plan!.steps.filter((s) => s.capability.startsWith('analysis.'));
+        if (analysisSteps.length < 1) failures.push(`C.10 expected at least 1 analysis step, got ${analysisSteps.length}`);
+        const compareStep = analysisSteps.find((s) => s.capability === 'analysis.window_compare');
+        if (!compareStep) failures.push('C.10 expected window_compare');
+        const volumeStep = analysisSteps.find((s) => s.capability === 'analysis.window_volume');
+        if (!volumeStep) failures.push('C.10 expected a volume step alongside the comparison');
+
+        const args = compareStep?.args as { left: { kind: string; fromTime?: string; toTime?: string }; right: { kind: string; fromTime?: string; toTime?: string } } | undefined;
+        if (args?.left?.kind !== 'time_range' || args?.right?.kind !== 'time_range') {
+          failures.push('C.10 compare sides should be time ranges');
+        } else {
+          if (args.right.fromTime !== args.left.toTime) {
+            failures.push('C.10 compare right should start where left ends');
+          }
+        }
+
+        if (volumeStep) {
+          const vWin = getWindow(volumeStep);
+          if (vWin?.kind !== 'time_range' || vWin.fromTime !== args?.left?.fromTime || vWin.toTime !== args?.right?.toTime) {
+            failures.push('C.10 volume window should span the compared range');
+          }
+        }
+      }
 
       // C.11
       c11 = await handleOrionMessage({ text: 'do that analysis on NVDA', ctx, setupReady: true });
       record('C.11', 'do that analysis on NVDA', c11);
-      if (!c11.ok || c11.route !== 'llm-plan') failures.push('C.11 route/ok');
-
-      const c8PlanErr =
-        checkPlanStep('C.8', c8, (s) => s.capability === 'analysis.window_ohlc' && (s.args.window as any)?.kind === 'time_range');
-      if (c8PlanErr) failures.push(c8PlanErr);
-
-      const c9PlanErr = checkPlanStep('C.9', c9, (s) => s.capability === 'analysis.window_volume');
-      if (c9PlanErr) failures.push(c9PlanErr);
-
-      const c10PlanErr = checkPlanStep('C.10', c10, (s) => s.capability === 'analysis.window_compare');
-      if (c10PlanErr) failures.push(c10PlanErr);
-
-      if (c11.ok && c11.plan) {
-        const hasSwitch = c11.plan.steps.some((s) =>
+      if (!c11.ok || c11.route !== 'llm-plan') {
+        failures.push('C.11 route/ok');
+      } else {
+        const switchSteps = c11.plan!.steps.filter((s) =>
           ['session.switch_symbol', 'session.resolve_symbol'].includes(s.capability)
         );
-        if (!hasSwitch) failures.push('C.11 expected a symbol-switch setup step');
+        if (switchSteps.length === 0) failures.push('C.11 expected symbol switch/resolve steps');
+        if (ctx.getState().symbol !== 'NVDA') failures.push('C.11 did not switch to NVDA');
+
+        const analysisSteps = c11.plan!.steps.filter((s) => s.capability.startsWith('analysis.'));
+        if (analysisSteps.length < 1) failures.push(`C.11 expected at least 1 analysis step, got ${analysisSteps.length}`);
+        const compareStep = analysisSteps.find((s) => s.capability === 'analysis.window_compare');
+        const volumeStep = analysisSteps.find((s) => s.capability === 'analysis.window_volume');
+
+        if (!compareStep) failures.push('C.11 expected inherited window_compare step');
+        if (!volumeStep) failures.push('C.11 expected inherited window_volume step');
+
+        const compareArgs = compareStep?.args as { left: { kind: string; fromTime?: string; toTime?: string }; right: { kind: string; fromTime?: string; toTime?: string } } | undefined;
+        if (compareArgs?.left?.kind !== 'time_range' || compareArgs?.right?.kind !== 'time_range') {
+          failures.push('C.11 compare sides should be time ranges');
+        } else if (compareArgs.right.fromTime !== compareArgs.left.toTime) {
+          failures.push('C.11 compare right should start where left ends');
+        }
+
+        const vWin = getWindow(volumeStep);
+        if (vWin && (vWin.fromTime !== compareArgs?.left?.fromTime || vWin.toTime !== compareArgs?.right?.toTime)) {
+          failures.push('C.11 volume window should span the inherited compare range');
+        }
       }
 
       console.log('[runtime-trace] C failures:', failures);
@@ -539,18 +740,21 @@ describe('Phase 6A.3 real runtime acceptance', () => {
       const failures: string[] = [];
       const ctx = sharedCtx ?? makeCtx();
 
-      // D.12 five distinct analysis ops should clarify
+      // D.12 five distinct analysis ops should clarify or be rejected
       const d12 = await handleOrionMessage({
-        text: 'give me the open high low close volume and change from 9:30 to 10, 10 to 11 and 11 to 12',
+        text: 'give me the open high low close volume and change from 9:30 to 10, 10 to 11, 11 to 12, 12 to 1 and 1 to 2',
         ctx,
         setupReady: true,
       });
       record(
         'D.12',
-        'give me the open high low close volume and change from 9:30 to 10, 10 to 11 and 11 to 12',
+        'give me the open high low close volume and change from 9:30 to 10, 10 to 11, 11 to 12, 12 to 1 and 1 to 2',
         d12
       );
-      if (d12.ok && d12.route !== 'clarification') failures.push('D.12 should have clarified');
+      if (!['clarification', 'error'].includes(d12.route)) failures.push('D.12 should have clarified or rejected the over-limit request');
+      if (d12.plan?.steps.some((s) => s.capability.startsWith('analysis.'))) {
+        failures.push('D.12 should not execute any analysis capability');
+      }
 
       // D.13 RSI/MACD unsupported
       const d13 = await handleOrionMessage({ text: 'what are the RSI and MACD', ctx, setupReady: true });
@@ -596,6 +800,17 @@ describe('Phase 6A.3 real runtime acceptance', () => {
         const ground = await verifyVolumeComparison(data);
         groundings['B.5 volume compare'] = ground;
         if (!ground.ok) failures.push('B.5 grounding mismatch');
+      } else if (b5?.result) {
+        const volumeReceipts = b5.result.receipts.filter((r) => r.capability === 'analysis.window_volume' && r.success);
+        for (const r of volumeReceipts) {
+          const data = r.data as Record<string, unknown>;
+          const meta = data.window as { fromTime?: string; toTime?: string } | undefined;
+          if (meta?.fromTime && meta?.toTime) {
+            const ground = await verifyVolumeReceipt('AAPL', '2026-07-10', meta.fromTime, meta.toTime, data);
+            groundings[`B.5 volume ${meta.fromTime}-${meta.toTime}`] = ground;
+            if (!ground.ok) failures.push(`B.5 grounding mismatch for ${meta.fromTime}-${meta.toTime}`);
+          }
+        }
       }
 
       // Grounding for A.4 candle shape
