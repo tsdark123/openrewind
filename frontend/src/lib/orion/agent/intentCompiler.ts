@@ -649,7 +649,7 @@ function compileAnalysisStep(index: number, request: AnalysisRequest): AgentStep
         id: `step-analysis-${index + 1}`,
         capability: `analysis.${request.kind}`,
         args: { window: request.window ?? defaultAnalysisWindow() },
-        required: false,
+        required: true,
       };
     case 'window_compare':
       return {
@@ -659,14 +659,14 @@ function compileAnalysisStep(index: number, request: AnalysisRequest): AgentStep
           left: request.left ?? defaultAnalysisWindow(),
           right: request.right ?? defaultAnalysisWindow(),
         },
-        required: false,
+        required: true,
       };
     case 'candle_shape':
       return {
         id: `step-analysis-${index + 1}`,
         capability: 'analysis.candle_shape',
         args: { source: request.source, ...(request.marketTime ? { marketTime: request.marketTime } : {}) },
-        required: false,
+        required: true,
       };
   }
 }

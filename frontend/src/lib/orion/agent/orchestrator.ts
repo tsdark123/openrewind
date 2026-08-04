@@ -42,6 +42,8 @@ import {
   textRequestsCandleQuery,
   textRequestsPlaybackControl,
   textRequestsAnalysis,
+  textRequestsCandleShape,
+  textRequestsUnsupportedIndicator,
 } from './dimensions';
 import { SYMBOL_ALIASES } from '../symbolAliases';
 import { classifyOrionIntent } from '../router';
@@ -266,7 +268,8 @@ async function handleCanonicalRepeat(
 function looksLikeContextReference(text: string): boolean {
   const t = text.trim().toLowerCase();
   return (
-    /\b(?:do|run|perform)\s+(?:that|it|this|the same)\s+(?:again|thing|one)\b/.test(t) ||
+    /\b(?:do|run|perform)\s+(?:that|it|this|the same)\s+(?:analysis|thing|one|again)\b/.test(t) ||
+    /\b(?:do|run|perform)\s+(?:that|it|this|the same)(?:\s+(?:analysis|thing|one|again))?\s+(?:on|for|with)\s+[a-z0-9-]+\b/.test(t) ||
     /\b(?:again|same|repeat)\b.*\b(?:timeframe|time frame|date|session|candle)\b/.test(t) ||
     /\b(?:same|the same)\s+(?:timeframe|time frame|date|session)\b/.test(t) ||
     /\bgo\s+back\s+(?:to\s+)?(?:the\s+)?(?:candle|stock|symbol|one)\b/.test(t) ||
@@ -620,6 +623,8 @@ export function sanitizeIntentGrounding(
     sanitized = validation.intent;
   }
 
+  const hadCandleShapeFinalQuery = sanitized.finalQuery === 'current_candle';
+
   // Symbol
   if (sanitized.symbol !== undefined) {
     if (allowed.has('symbol')) {
@@ -794,6 +799,21 @@ export function sanitizeIntentGrounding(
       delete sanitized.finalQuery;
       trace.stripped.push(`finalQuery:${fq}`);
     }
+  }
+
+  // Fallback: if the model emitted a candle query for a clearly analysis-shaped
+  // candle-shape request (e.g. "what kind of candle am I on"), convert it to a
+  // candle_shape analysis so the request does not evaporate entirely.
+  if (
+    hadCandleShapeFinalQuery &&
+    sanitized.finalQuery === undefined &&
+    !sanitized.analysisRequests?.length &&
+    textRequestsAnalysis(text) &&
+    textRequestsCandleShape(text)
+  ) {
+    sanitized.analysisRequests = [{ kind: 'candle_shape', source: 'current_chart_candle' }];
+    trace.stripped = trace.stripped.filter((s) => s !== 'finalQuery:current_candle');
+    trace.kept.push('analysisRequests:1 (candle_shape fallback)');
   }
 
   // A sanitized intent must still be meaningful. A date without a symbol is
@@ -974,6 +994,17 @@ async function routeMessage(
     routeChat = false;
     classification = { intent: 'agent', confidence: 1, reasons: ['analysis request'] };
   }
+
+  if (textRequestsUnsupportedIndicator(text)) {
+    agentTrace('route', 'unsupported', { text });
+    return {
+      ok: false,
+      message: 'I can only answer window OHLC, volume, change, compare, and candle-shape questions right now.',
+      wasChat: false,
+      route: 'unsupported',
+    };
+  }
+
   // Candle comparison is a read-only query, but it is not chat.
   if (/\bcompare\b.*\bcandle\b/i.test(text)) {
     classification = { intent: 'agent', confidence: 1, reasons: ['candle comparison override'] };
@@ -1038,7 +1069,7 @@ async function routeMessage(
   }
 
   // 5. Incomplete or unresolved switch: let resolve_symbol handle it.
-  if (!anaphoric && ((cmd.intent === 'switch' && !cmd.symbol) || (cmd.intent === 'unknown' && looksLikeSwitch(text)))) {
+  if (!anaphoric && !textRequestsAnalysis(text) && ((cmd.intent === 'switch' && !cmd.symbol) || (cmd.intent === 'unknown' && looksLikeSwitch(text)))) {
     const query = extractSymbolCandidate(text);
     const resolvePlan = makeResolvePlan(query);
     const resolveResult = await executeAgentPlan(resolvePlan, ctx, token);
