@@ -1013,10 +1013,8 @@ export default function App() {
       {showIntro && (
         <IntroSplash
           lightMode={lightMode}
-          onFinished={() => {
-            setShowIntro(false);
-            setView('menu');
-          }}
+          onFadeStart={() => setView('menu')}
+          onFinished={() => setShowIntro(false)}
         />
       )}
       {view === 'menu' && (

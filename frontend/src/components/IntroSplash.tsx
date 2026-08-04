@@ -3,16 +3,20 @@ import { GradientShimmer } from './ui/gradient-shimmer';
 
 interface IntroSplashProps {
   onFinished: () => void;
+  onFadeStart?: () => void;
   lightMode?: boolean;
 }
 
-export function IntroSplash({ onFinished, lightMode = false }: IntroSplashProps) {
+export function IntroSplash({ onFinished, onFadeStart, lightMode = false }: IntroSplashProps) {
   const [fadeOut, setFadeOut] = useState(false);
   const onFinishedRef = useRef(onFinished);
   onFinishedRef.current = onFinished;
+  const onFadeStartRef = useRef(onFadeStart);
+  onFadeStartRef.current = onFadeStart;
 
   useEffect(() => {
     const hold = setTimeout(() => {
+      onFadeStartRef.current?.();
       setFadeOut(true);
       setTimeout(() => onFinishedRef.current(), 400);
     }, 1500);
