@@ -14,14 +14,14 @@ export function IntroSplash({ onFinished, lightMode = false }: IntroSplashProps)
   useEffect(() => {
     const hold = setTimeout(() => {
       setFadeOut(true);
-      setTimeout(() => onFinishedRef.current(), 600);
-    }, 2500);
+      setTimeout(() => onFinishedRef.current(), 400);
+    }, 2000);
     return () => clearTimeout(hold);
   }, []);
 
   return (
     <div
-      className={`fixed inset-0 z-[100] flex items-center justify-center transition-opacity duration-600 ease-in-out ${
+      className={`fixed inset-0 z-[100] flex items-center justify-center transition-opacity duration-400 ease-out ${
         fadeOut ? 'opacity-0 pointer-events-none' : 'opacity-100'
       } ${lightMode ? 'bg-white' : 'bg-[#0a0a0a]'}`}
       aria-label="OpenRewind intro"
