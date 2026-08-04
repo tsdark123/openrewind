@@ -8,6 +8,58 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
+#include <ctime>
+#include <set>
+
+// =============================================================================
+// Command-line helpers
+// =============================================================================
+
+namespace {
+
+// Quote a single argument for std::system() on Windows.  Implements the
+// CommandLineToArgvW escaping rules: wrap the argument in double quotes and
+// double every backslash that precedes a closing quote or the end of the
+// argument, and escape any embedded quotes with a backslash.
+std::string quote_shell_arg(const std::string& arg) {
+    std::string out;
+    out.push_back('"');
+
+    std::size_t backslash_run = 0;
+    for (char c : arg) {
+        if (c == '\\') {
+            ++backslash_run;
+        } else if (c == '"') {
+            out.append(backslash_run * 2, '\\');
+            backslash_run = 0;
+            out += "\\\"";
+        } else {
+            out.append(backslash_run, '\\');
+            backslash_run = 0;
+            out += c;
+        }
+    }
+
+    // Double the trailing backslashes before the closing quote.
+    out.append(backslash_run * 2, '\\');
+    out.push_back('"');
+    return out;
+}
+
+// Build a python scripts/fetch_data.py command line for the current platform.
+std::string build_ingest_command(const std::string& mode,
+                                 const std::string& data_dir,
+                                 int port) {
+    std::ostringstream cmd;
+    cmd << "python ";
+    cmd << quote_shell_arg("scripts/fetch_data.py");
+    cmd << " --mode " << quote_shell_arg(mode);
+    cmd << " --data-dir " << quote_shell_arg(data_dir);
+    cmd << " --port " << std::to_string(port);
+    return cmd.str();
+}
+
+} // namespace
 
 // =============================================================================
 // OpenRewindServer — Implementation
@@ -77,18 +129,33 @@ void OpenRewindServer::start_ingest_worker() {
     ingest_stop_.store(false);
     ingest_thread_ = std::thread([this]() {
         using namespace std::chrono_literals;
+        using std::chrono::system_clock;
         constexpr auto INTERVAL = std::chrono::minutes(30);
 
-        std::cout << "[OpenRewind] auto-ingest worker started — kicking off "
-                     "initial fetch_data.py --mode full\n";
+        const auto now_ms = []() {
+            return std::chrono::duration_cast<std::chrono::milliseconds>(
+                system_clock::now().time_since_epoch()).count();
+        };
 
         // Initial kickoff: fetch the full rolling 30-day window every time the
         // engine boots, so the user can pick any date in the last month. The
         // 30-minute periodic ticks stay on append mode to keep it fast.
-        int rc0 = std::system("python scripts/fetch_data.py --mode full");
+        const std::string full_cmd = build_ingest_command("full", data_dir_, port_);
+
+        std::cout << "[OpenRewind] auto-ingest worker started — kicking off\n"
+                  << "  " << full_cmd << "\n";
+
+        broadcast("data_sync_started", json{{"mode", "full"}, {"timestamp", now_ms()}});
+
+        int rc0 = std::system(full_cmd.c_str());
         if (rc0 != 0) {
             std::cerr << "[OpenRewind] ingest worker: initial fetch_data.py "
                          "exited with " << rc0 << " (continuing)\n";
+            broadcast("data_sync_failed", json{
+                {"mode", "full"},
+                {"exit_code", rc0},
+                {"timestamp", now_ms()}
+            });
         }
 
         while (!ingest_stop_.load()) {
@@ -100,12 +167,21 @@ void OpenRewindServer::start_ingest_worker() {
             }
             lk.unlock();
 
-            std::cout << "[OpenRewind] auto-ingest tick — running "
-                         "fetch_data.py --mode append\n";
-            int rc = std::system("python scripts/fetch_data.py --mode append");
+            const std::string append_cmd = build_ingest_command("append", data_dir_, port_);
+            std::cout << "[OpenRewind] auto-ingest tick — running\n"
+                      << "  " << append_cmd << "\n";
+
+            broadcast("data_sync_started", json{{"mode", "append"}, {"timestamp", now_ms()}});
+
+            int rc = std::system(append_cmd.c_str());
             if (rc != 0) {
                 std::cerr << "[OpenRewind] ingest worker: fetch_data.py "
                              "exited with " << rc << "\n";
+                broadcast("data_sync_failed", json{
+                    {"mode", "append"},
+                    {"exit_code", rc},
+                    {"timestamp", now_ms()}
+                });
             }
         }
 
@@ -520,6 +596,84 @@ void OpenRewindServer::setup_rest_routes() {
 
         return crow::response(200, "application/json",
             json{{"ok", true}}.dump());
+    });
+
+    // =========================================================================
+    // GET /api/available_dates
+    //
+    // Returns every YYYY-MM-DD session that is present in the local cache for a
+    // given symbol.  This lets the frontend pick a real, available session
+    // instead of defaulting to the current weekday and hoping data exists.
+    //
+    // Query params:
+    //   symbol     (required)
+    //   data_dir   (optional)  — override the engine's configured data directory
+    //
+    // Response:
+    //   { "symbol": "AAPL", "dates": ["2026-07-06", ...],
+    //     "earliest": "2026-07-06", "latest": "2026-08-04", "count": 22 }
+    // =========================================================================
+
+    CROW_ROUTE(app_, "/api/available_dates").methods(crow::HTTPMethod::GET)
+    ([this](const crow::request& req) {
+        const char* sym_param = req.url_params.get("symbol");
+        if (!sym_param || std::string(sym_param).empty()) {
+            return crow::response(400, "application/json",
+                json{{"error", "Missing required query param: symbol"}}.dump());
+        }
+        std::string symbol = sym_param;
+
+        const char* dir_param = req.url_params.get("data_dir");
+        std::string data_dir = dir_param ? dir_param : data_dir_;
+
+        std::vector<Candle> candles;
+        try {
+            // Load the entire rolling history; the 1m master file is bounded to
+            // 30 days (~10k rows) so this is small and keeps the implementation
+            // identical to /api/candles.
+            candles = CsvLoader::load_symbol(symbol, data_dir, "");
+        } catch (const std::exception& e) {
+            return crow::response(200, "application/json",
+                json{
+                    {"symbol",  symbol},
+                    {"dates",   json::array()},
+                    {"earliest", nullptr},
+                    {"latest",   nullptr},
+                    {"count",    0},
+                    {"missing",  true},
+                    {"reason",   e.what()}
+                }.dump());
+        }
+
+        std::set<std::string> unique_dates;
+        for (const auto& c : candles) {
+            // timestamps are integer seconds; convert to "YYYY-MM-DD".
+            std::time_t t = static_cast<std::time_t>(c.timestamp);
+            std::tm tm_buf{};
+#if defined(_WIN32)
+            gmtime_s(&tm_buf, &t);
+#else
+            gmtime_r(&t, &tm_buf);
+#endif
+            char buf[16];
+            std::strftime(buf, sizeof(buf), "%Y-%m-%d", &tm_buf);
+            unique_dates.insert(buf);
+        }
+
+        json arr = json::array();
+        for (const auto& d : unique_dates) {
+            arr.push_back(d);
+        }
+
+        return crow::response(200, "application/json",
+            json{
+                {"symbol",   symbol},
+                {"dates",    arr},
+                {"earliest", unique_dates.empty() ? nullptr : *unique_dates.begin()},
+                {"latest",   unique_dates.empty() ? nullptr : *unique_dates.rbegin()},
+                {"count",    unique_dates.size()},
+                {"missing",  false}
+            }.dump());
     });
 
 }

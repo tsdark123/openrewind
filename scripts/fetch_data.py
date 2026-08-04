@@ -43,12 +43,55 @@ Usage
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 import sys
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
+
+
+def _configure_console_encoding() -> None:
+    """Make stdout/stderr emit UTF-8 on Windows cp1252 consoles without crashing.
+
+    Uses stream.reconfigure() when available and falls back to wrapping the
+    underlying buffer.  Redirected or captured streams where neither works are
+    left untouched, and any other stream exceptions are swallowed so the script
+    never fails to run because of console configuration.
+    """
+    if sys.platform != "win32":
+        return
+
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name)
+        if stream is None:
+            continue
+
+        try:
+            if hasattr(stream, "reconfigure"):
+                stream.reconfigure(encoding="utf-8", errors="replace")
+                continue
+        except (AttributeError, OSError, ValueError):
+            pass
+
+        try:
+            if hasattr(stream, "buffer"):
+                wrapper = io.TextIOWrapper(
+                    stream.buffer,
+                    encoding="utf-8",
+                    errors="replace",
+                    line_buffering=True,
+                )
+                setattr(sys, name, wrapper)
+                continue
+        except (AttributeError, OSError, ValueError):
+            pass
+
+
+# Call this as early as possible so every subsequent print() can use Unicode
+# symbols (box-drawing arrows, etc.) safely on Windows consoles.
+_configure_console_encoding()
 
 import pandas as pd
 import yfinance as yf
