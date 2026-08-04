@@ -34,7 +34,7 @@ export function CoreSpinLoader() {
             absolute inset-0 rounded-full border border-dashed
             border-[#3b6fff]/40
             dark:border-[#3b6fff]/20
-            animate-[spin_10s_linear_infinite]
+            animate-[spin_10.3s_linear_infinite]
           "
         />
 
@@ -46,7 +46,7 @@ export function CoreSpinLoader() {
             dark:border-t-[#3b6fff]
             shadow-[0_0_6px_rgba(59,111,255,0.5)]
             dark:shadow-[0_0_10px_rgba(59,111,255,0.4)]
-            animate-[spin_2s_linear_infinite]
+            animate-[spin_2.3s_linear_infinite]
           "
         />
 
@@ -58,7 +58,7 @@ export function CoreSpinLoader() {
             dark:border-b-[#3b6fff]
             shadow-[0_0_6px_rgba(59,111,255,0.4)]
             dark:shadow-[0_0_10px_rgba(59,111,255,0.4)]
-            animate-[spin_3s_linear_infinite_reverse]
+            animate-[spin_3.3s_linear_infinite_reverse]
           "
         />
 
@@ -68,12 +68,12 @@ export function CoreSpinLoader() {
             absolute inset-5 rounded-full border border-transparent
             border-l-[#3b6fff]/60
             dark:border-l-[#3b6fff]/50
-            animate-[spin_1s_ease-in-out_infinite]
+            animate-[spin_1.3s_ease-in-out_infinite]
           "
         />
 
         {/* Orbital Dot */}
-        <div className="absolute inset-0 animate-[spin_4s_linear_infinite]">
+        <div className="absolute inset-0 animate-[spin_4.3s_linear_infinite]">
           <div
             className="
               absolute top-0 left-1/2 -translate-x-1/2
