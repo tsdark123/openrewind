@@ -22,6 +22,7 @@ import type { ChartHandle } from '../Chart';
 
 const ORION_MODEL = ((import.meta as any).env?.VITE_ORION_AGENT_MODEL as string | undefined) ?? 'llama3.2';
 const MIN_BOOT_MS = 1200; // show the spinner for at least this long on fast boots
+const READY_FADE_DELAY_MS = 400; // extra visible spinner time before fading to the terminal
 
 const WELCOME_TEXT = `[SYSTEM INITIALIZED] - Orion Terminal v1.0
 
@@ -141,6 +142,9 @@ export function OrionTerminal({
         if (attemptId !== bootAttemptIdRef.current) {
           console.log('[orion-terminal] boot attempt', attemptId, 'ignored (stale)');
           return;
+        }
+        if (stage === 'ready') {
+          await new Promise((resolve) => setTimeout(resolve, READY_FADE_DELAY_MS));
         }
         setSetupStage(stage);
       };
