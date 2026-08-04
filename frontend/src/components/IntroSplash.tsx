@@ -37,7 +37,7 @@ export function IntroSplash({ onFinished, onFadeStart, lightMode = false }: Intr
         spread={3}
         angle={105}
         pauseBetween={800}
-        className={`text-6xl font-bold tracking-tight whitespace-nowrap sm:text-8xl ${
+        className={`text-6xl font-bold tracking-tight whitespace-nowrap sm:text-7xl ${
           lightMode ? 'text-gray-900' : 'text-white'
         }`}
       >
