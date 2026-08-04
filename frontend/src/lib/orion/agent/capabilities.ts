@@ -1250,7 +1250,7 @@ async function resolveSingleCandle(
   planId: string,
   step: AgentStep,
   ctx: AgentContext
-): Promise<{ ok: true; candle: CandleData } | { ok: false; receipt: ExecutionReceipt }> {
+): Promise<{ ok: true; candle: CandleData; sessionPolicy: SessionPolicy } | { ok: false; receipt: ExecutionReceipt }> {
   const state = ctx.getState();
   if (!state.sessionActive) {
     return { ok: false, receipt: failureReceipt(planId, step, 'PRECONDITION_FAILED', 'No active session to analyze a candle.') };
@@ -1311,7 +1311,9 @@ async function resolveSingleCandle(
     return { ok: false, receipt: failureReceipt(planId, step, 'PRECONDITION_FAILED', v.message) };
   }
 
-  return { ok: true, candle };
+  const sessionPolicy: SessionPolicy =
+    source === 'current_chart_candle' ? 'chart_buffer_up_to_cursor' : 'engine_returned_candles_for_requested_date';
+  return { ok: true, candle, sessionPolicy };
 }
 
 // ---------------------------------------------------------------------------
@@ -1531,7 +1533,14 @@ registerCapability({
     if (!resolved.ok) return resolved.receipt;
 
     const state = ctx.getState();
-    const result = computeCandleShape(resolved.candle, state.symbol, state.replayDate ?? '', state.timeframe);
+    const result = computeCandleShape(
+      resolved.candle,
+      state.symbol,
+      state.replayDate ?? '',
+      state.timeframe,
+      state.replayDate ?? '',
+      resolved.sessionPolicy
+    );
     return successReceipt(planId, step, formatCandleShapeMessage(result), result);
   },
 });

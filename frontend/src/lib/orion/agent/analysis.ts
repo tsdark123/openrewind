@@ -45,6 +45,8 @@ export interface CandleInfo {
   low: number;
   close: number;
   volume: number;
+  requestedDate?: string;
+  sessionPolicy?: SessionPolicy;
 }
 
 export interface WindowOhlcResult {
@@ -303,7 +305,9 @@ export function computeCandleShape(
   candle: CandleData,
   symbol: string,
   date: string,
-  timeframe: number
+  timeframe: number,
+  requestedDate?: string,
+  sessionPolicy?: SessionPolicy
 ): CandleShapeResult {
   const v = validateCandle(candle);
   if (!v.ok) {
@@ -330,6 +334,8 @@ export function computeCandleShape(
       low,
       close,
       volume: candle.volume,
+      requestedDate,
+      sessionPolicy,
     },
     body: {
       direction,
