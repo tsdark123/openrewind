@@ -103,15 +103,26 @@ export function textRequestsAnalysis(t: string): boolean {
   const text = t.toLowerCase();
   return (
     /\b(range|ohlc|open high low close|high low)\b/i.test(text) ||
-    /\b(move|moved|movement|change|changed|how did|do today|performed)\b/i.test(text) ||
-    /\b(volum|vol|total volume|average volume)\b/i.test(text) ||
+    /\b(?:it|price|stock|this|the\s+stock)\s+(?:has\s+|did\s+)?(?:move|moved|moves)\b|\b(?:move|moved|moves)\s+(?:up|down|by|from|to|higher|lower|against)\b|\b(movement|change|changed|how did|do today|performed)\b/i.test(text) ||
+    /\b(?:volum|vol|volume|total volume|average volume)\b/i.test(text) ||
     /\b(compare|vs|versus|compared to|against|higher than|lower than|more volume|less volume)\b/i.test(text) ||
     /\b(candle anatomy|body|wick|upper wick|lower wick|shadow|candle shape|what kind of candle|kind of candle|candle am i on|candle i'm on)\b/i.test(text) ||
     /\b(summary|overview|recap)\b/i.test(text) ||
     /\b(first|last)\s+\d+\s*(?:min|minute|hour|hr)s?\b/i.test(text) ||
     /\b(first hour|last hour|opening hour|closing hour|morning|mornig|afternoon|up to (?:cursor|here|where i)|where i'?m at|right now|rn)\b/i.test(text) ||
-    /\bfrom\s+\d{1,2}:\d{2}\s+to\s+\d{1,2}:\d{2}\b/i.test(text)
+    /\bfrom\s+\d{1,2}:\d{2}\s+to\s+\d{1,2}:\d{2}\b/i.test(text) ||
+    /\bfrom\s+\d{1,2}(?::\d{2})?\b.*\bto\s+\d{1,2}(?::\d{2})?\b/i.test(text)
   );
+}
+
+export function textRequestsCandleShape(t: string): boolean {
+  const text = t.toLowerCase();
+  return /\b(candle anatomy|body|wick|upper wick|lower wick|shadow|candle shape|what kind of candle|kind of candle|candle am i on|candle i'm on)\b/i.test(text);
+}
+
+export function textRequestsUnsupportedIndicator(t: string): boolean {
+  const text = t.toLowerCase();
+  return /\b(rsi|macd|bollinger|ema\d*|sma\d*|atr|stochastic|vwap|cci|adx|obv|momentum|williams %r|fibonacci|support|resistance|breakout|pattern|trend line)\b/i.test(text);
 }
 
 export function getRequestedDimensions(
@@ -122,7 +133,8 @@ export function getRequestedDimensions(
   const t = text;
   const dims = new Set<ActionDimension>();
 
-  if (cmd.symbol || cmd.intent === 'switch' || (cmd.intent === 'unknown' && looksLikeSwitch(text))) {
+  const switchHint = (cmd.intent === 'switch' || (cmd.intent === 'unknown' && looksLikeSwitch(text))) && !textRequestsAnalysis(t);
+  if (cmd.symbol || switchHint) {
     dims.add('symbol');
   }
   if (cmd.date || cmd.dateInput || extractDateInput(text, baseDate)) {
@@ -141,10 +153,12 @@ export function getRequestedDimensions(
   } else if (textRequestsAbsoluteTime(t) && !textRequestsAnalysis(t)) {
     dims.add('absoluteTime');
   }
-  if (cmd.relativeMinutes !== undefined) {
-    dims.add('relativeSeek');
-  } else if (textRequestsRelativeSeek(t)) {
-    dims.add('relativeSeek');
+  if (!textRequestsAnalysis(t)) {
+    if (cmd.relativeMinutes !== undefined) {
+      dims.add('relativeSeek');
+    } else if (textRequestsRelativeSeek(t)) {
+      dims.add('relativeSeek');
+    }
   }
   if (
     (cmd.speed !== undefined || ['play', 'pause', 'rewind', 'fast_forward', 'set_speed', 'seek'].includes(cmd.intent)) &&

@@ -431,6 +431,7 @@ const INHERITABLE_FIELDS_SET: Set<InheritableField> = new Set([
   'relativeSeekMinutes',
   'playback',
   'finalQuery',
+  'analysisRequests',
 ]);
 
 export interface IntentValidationResult {

@@ -188,7 +188,7 @@ describe('compileChartActionIntent for analysis', () => {
     expect(plan.steps[0].capability).toBe('analysis.window_ohlc');
     expect(plan.steps[1].capability).toBe('analysis.window_volume');
     for (const step of plan.steps) {
-      expect(step.required).toBe(false);
+      expect(step.required).toBe(true);
     }
   });
 
