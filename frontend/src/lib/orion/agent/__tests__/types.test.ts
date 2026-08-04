@@ -11,8 +11,8 @@ import {
 } from '../types';
 
 describe('V1 capability set', () => {
-  it('contains exactly thirteen capabilities', () => {
-    expect(V1_CAPABILITIES).toHaveLength(13);
+  it('contains exactly nineteen capabilities', () => {
+    expect(V1_CAPABILITIES).toHaveLength(19);
   });
 
   it('contains all requested V1 names', () => {
@@ -29,6 +29,13 @@ describe('V1 capability set', () => {
       'playback.pause',
       'chart.get_current_candle',
       'chart.get_candle_at_time',
+      'analysis.compare_candles',
+      'analysis.window_ohlc',
+      'analysis.window_change',
+      'analysis.window_volume',
+      'analysis.window_compare',
+      'analysis.candle_shape',
+      'analysis.window_summary',
     ];
     for (const cap of expected) {
       expect(isV1Capability(cap), `missing: ${cap}`).toBe(true);

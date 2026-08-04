@@ -47,6 +47,12 @@ export const V1_CAPABILITIES = [
   'chart.get_current_candle',
   'chart.get_candle_at_time',
   'analysis.compare_candles',
+  'analysis.window_ohlc',
+  'analysis.window_change',
+  'analysis.window_volume',
+  'analysis.window_compare',
+  'analysis.candle_shape',
+  'analysis.window_summary',
 ] as const;
 
 export type V1Capability = (typeof V1_CAPABILITIES)[number];

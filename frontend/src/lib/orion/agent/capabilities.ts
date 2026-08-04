@@ -18,12 +18,31 @@
 // =============================================================================
 
 import type { AgentStep, ExecutionReceipt, AgentContext, CancellationToken, CandleSnapshot } from './types';
+import type { CandleData } from '../../../types';
 import { successReceipt, failureReceipt } from './receipts';
 import { buildWorldState } from '../worldState';
 import { resolveSymbol } from './resolveSymbol';
 import { resolveTradingDate } from './resolveTradingDate';
 import { fetchCandles } from '../tools';
 import { clampTimeframe, toEngineTs, toEtTime, formatTime } from '../planner';
+import {
+  type AnalysisWindow,
+  type ResolvedWindowMeta,
+  type SessionPolicy,
+  validateCandles,
+  computeWindowOhlc,
+  computeWindowChange,
+  computeWindowVolume,
+  computeCandleShape,
+  computeWindowCompare,
+  computeWindowSummary,
+  formatWindowOhlcMessage,
+  formatWindowChangeMessage,
+  formatWindowVolumeMessage,
+  formatCandleShapeMessage,
+  formatWindowCompareMessage,
+  formatWindowSummaryMessage,
+} from './analysis';
 
 // Tracks previous sessions so session.switch_to_previous_symbol can restore them.
 const sessionHistory: Array<{ symbol: string; date: string }> = [];
@@ -1020,5 +1039,543 @@ registerCapability({
     ].join(' · ');
 
     return successReceipt(planId, step, summary, data);
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Phase 6A window analysis helpers
+// ---------------------------------------------------------------------------
+
+type ResolveWindowOutcome =
+  | { ok: true; candles: CandleData[]; meta: ResolvedWindowMeta }
+  | { ok: false; receipt: ExecutionReceipt };
+
+function buildWindowMeta(
+  kind: AnalysisWindow['kind'],
+  symbol: string,
+  date: string,
+  timeframe: number,
+  candles: CandleData[],
+  sessionPolicy: SessionPolicy,
+  fromTime?: string,
+  toTime?: string
+): ResolvedWindowMeta {
+  return {
+    kind,
+    fromTime,
+    toTime,
+    requestedDate: date,
+    resolvedDate: date,
+    sessionPolicy,
+    symbol,
+    timeframe,
+    candleCount: candles.length,
+    firstTimestamp: candles[0].timestamp,
+    firstMarketTime: formatTime(toEtTime(candles[0].timestamp, date)),
+    lastTimestamp: candles[candles.length - 1].timestamp,
+    lastMarketTime: formatTime(toEtTime(candles[candles.length - 1].timestamp, date)),
+  };
+}
+
+async function resolveWindowCandles(
+  planId: string,
+  step: AgentStep,
+  ctx: AgentContext,
+  window: AnalysisWindow
+): Promise<ResolveWindowOutcome> {
+  const c = wasCancelled(planId, step, undefined);
+  if (c) return { ok: false, receipt: c };
+
+  const state = ctx.getState();
+  const symbol = state.symbol;
+  const date = state.replayDate;
+  const timeframe = state.timeframe;
+
+  if (!state.sessionActive) {
+    return {
+      ok: false,
+      receipt: failureReceipt(planId, step, 'PRECONDITION_FAILED', 'No active session to analyze a window.'),
+    };
+  }
+  if (!symbol || !date) {
+    return {
+      ok: false,
+      receipt: failureReceipt(planId, step, 'PRECONDITION_FAILED', 'No active symbol or date to analyze a window.'),
+    };
+  }
+
+  if (window.kind === 'up_to_cursor') {
+    const candles = ctx.chartRef?.current?.getRecentCandles(state.totalCandles) ?? [];
+    if (candles.length === 0) {
+      return {
+        ok: false,
+        receipt: failureReceipt(planId, step, 'PRECONDITION_FAILED', 'No chart candles available for up_to_cursor.'),
+      };
+    }
+    const v = validateCandles(candles, date);
+    if (!v.ok) {
+      return { ok: false, receipt: failureReceipt(planId, step, 'PRECONDITION_FAILED', v.message) };
+    }
+    return {
+      ok: true,
+      candles,
+      meta: buildWindowMeta('up_to_cursor', symbol, date, timeframe, candles, 'chart_buffer_up_to_cursor'),
+    };
+  }
+
+  // whole_session and time_range both fetch the full date from the engine.
+  let candles: CandleData[];
+  try {
+    const res = await fetchCandles(
+      { symbol, date, timeframe, limit: 5000, dataDir: ctx.dataDir },
+      ctx.apiBase
+    );
+
+    if (res.missing || res.candles.length === 0) {
+      return {
+        ok: false,
+        receipt: failureReceipt(
+          planId,
+          step,
+          'NO_DATA_FOR_DATE',
+          `No candles for ${symbol} on ${date} at ${timeframe}m.`,
+          { requestedDate: date, reason: res.reason }
+        ),
+      };
+    }
+
+    if (res.fallbackUsed) {
+      return {
+        ok: false,
+        receipt: failureReceipt(
+          planId,
+          step,
+          'NO_DATA_FOR_DATE',
+          `Requested date ${date} is unavailable; the engine returned fallback data for ${res.fallbackDate}. Analysis is blocked to prevent false reporting.`,
+          {
+            requestedDate: date,
+            availableFallbackDate: res.fallbackDate,
+          }
+        ),
+      };
+    }
+
+    candles = res.candles;
+  } catch (e) {
+    return {
+      ok: false,
+      receipt: failureReceipt(
+        planId,
+        step,
+        'ENGINE_ERROR',
+        `Failed to fetch candles: ${e instanceof Error ? e.message : String(e)}`
+      ),
+    };
+  }
+
+  const v = validateCandles(candles, date);
+  if (!v.ok) {
+    return { ok: false, receipt: failureReceipt(planId, step, 'PRECONDITION_FAILED', v.message) };
+  }
+
+  if (window.kind === 'whole_session') {
+    return {
+      ok: true,
+      candles,
+      meta: buildWindowMeta('whole_session', symbol, date, timeframe, candles, 'engine_returned_candles_for_requested_date'),
+    };
+  }
+
+  // time_range
+  const from = parseTimeString(window.fromTime ?? '');
+  const to = parseTimeString(window.toTime ?? '');
+  if (!from || !to) {
+    return {
+      ok: false,
+      receipt: failureReceipt(planId, step, 'INVALID_ARGUMENTS', `Could not parse time range "${window.fromTime}" to "${window.toTime}".`),
+    };
+  }
+  if (from.hour === to.hour && from.minute === to.minute) {
+    return {
+      ok: false,
+      receipt: failureReceipt(planId, step, 'INVALID_ARGUMENTS', 'time_range fromTime and toTime must differ.'),
+    };
+  }
+  if (to.hour < from.hour || (to.hour === from.hour && to.minute <= from.minute)) {
+    return {
+      ok: false,
+      receipt: failureReceipt(planId, step, 'INVALID_ARGUMENTS', 'time_range toTime must be later than fromTime.'),
+    };
+  }
+
+  const fromTs = toEngineTs(date, from.hour, from.minute);
+  const toTs = toEngineTs(date, to.hour, to.minute);
+  const sliced = candles.filter((c) => c.timestamp >= fromTs && c.timestamp < toTs);
+
+  if (sliced.length === 0) {
+    return {
+      ok: false,
+      receipt: failureReceipt(
+        planId,
+        step,
+        'INVALID_ARGUMENTS',
+        `No candles in time range ${window.fromTime}–${window.toTime} for ${symbol} on ${date}.`,
+        { requestedDate: date, fromTime: window.fromTime, toTime: window.toTime }
+      ),
+    };
+  }
+
+  const sv = validateCandles(sliced, date);
+  if (!sv.ok) {
+    return { ok: false, receipt: failureReceipt(planId, step, 'PRECONDITION_FAILED', sv.message) };
+  }
+
+  return {
+    ok: true,
+    candles: sliced,
+    meta: buildWindowMeta(
+      'time_range',
+      symbol,
+      date,
+      timeframe,
+      sliced,
+      'engine_returned_candles_for_requested_date',
+      window.fromTime,
+      window.toTime
+    ),
+  };
+}
+
+async function resolveSingleCandle(
+  planId: string,
+  step: AgentStep,
+  ctx: AgentContext
+): Promise<{ ok: true; candle: CandleData } | { ok: false; receipt: ExecutionReceipt }> {
+  const state = ctx.getState();
+  if (!state.sessionActive) {
+    return { ok: false, receipt: failureReceipt(planId, step, 'PRECONDITION_FAILED', 'No active session to analyze a candle.') };
+  }
+  const symbol = state.symbol;
+  const date = state.replayDate;
+  const timeframe = state.timeframe;
+  if (!symbol || !date) {
+    return { ok: false, receipt: failureReceipt(planId, step, 'PRECONDITION_FAILED', 'No active symbol or date to analyze a candle.') };
+  }
+
+  const source = String(step.args.source ?? '');
+  let candle: CandleData | undefined;
+
+  if (source === 'current_chart_candle') {
+    candle = ctx.chartRef?.current?.getRecentCandles(1)[0];
+    if (!candle) {
+      return { ok: false, receipt: failureReceipt(planId, step, 'PRECONDITION_FAILED', 'No current chart candle available.') };
+    }
+  } else if (source === 'market_time') {
+    const time = String(step.args.marketTime ?? '');
+    const parsed = parseTimeString(time);
+    if (!parsed) {
+      return { ok: false, receipt: failureReceipt(planId, step, 'INVALID_ARGUMENTS', `Could not parse market time "${time}".`) };
+    }
+    const target = toEngineTs(date, parsed.hour, parsed.minute);
+    try {
+      const res = await fetchCandles({ symbol, date, timeframe, limit: 5000, dataDir: ctx.dataDir }, ctx.apiBase);
+      if (res.missing || res.candles.length === 0) {
+        return { ok: false, receipt: failureReceipt(planId, step, 'NO_DATA_FOR_DATE', `No candles for ${symbol} on ${date} at ${timeframe}m.`) };
+      }
+      if (res.fallbackUsed) {
+        return {
+          ok: false,
+          receipt: failureReceipt(
+            planId,
+            step,
+            'NO_DATA_FOR_DATE',
+            `Requested date ${date} is unavailable; the engine returned fallback data for ${res.fallbackDate}. Analysis is blocked to prevent false reporting.`,
+            { requestedDate: date, availableFallbackDate: res.fallbackDate }
+          ),
+        };
+      }
+      const idx = res.candles.findIndex((c) => c.timestamp >= target);
+      candle = idx >= 0 ? res.candles[idx] : res.candles[res.candles.length - 1];
+      if (!candle || candle.timestamp < target) {
+        return { ok: false, receipt: failureReceipt(planId, step, 'INVALID_ARGUMENTS', `No candle at or after ${time} for ${symbol} on ${date}.`) };
+      }
+    } catch (e) {
+      return { ok: false, receipt: failureReceipt(planId, step, 'ENGINE_ERROR', `Failed to fetch candles: ${e instanceof Error ? e.message : String(e)}`) };
+    }
+  } else {
+    return { ok: false, receipt: failureReceipt(planId, step, 'INVALID_ARGUMENTS', `Unknown candle source "${source}".`) };
+  }
+
+  const v = validateCandles([candle], date);
+  if (!v.ok) {
+    return { ok: false, receipt: failureReceipt(planId, step, 'PRECONDITION_FAILED', v.message) };
+  }
+
+  return { ok: true, candle };
+}
+
+// ---------------------------------------------------------------------------
+// 14. analysis.window_ohlc
+// ---------------------------------------------------------------------------
+
+registerCapability({
+  name: 'analysis.window_ohlc',
+  kind: 'read',
+  description: 'Return open, high, low, close, high time and low time for a window.',
+  preconditions: ['Active session.', 'Window resolves to at least one candle.'],
+  argSchema: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['window'],
+    properties: {
+      window: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['kind'],
+        properties: {
+          kind: { enum: ['whole_session', 'up_to_cursor', 'time_range'] },
+          fromTime: { type: 'string' },
+          toTime: { type: 'string' },
+        },
+      },
+    },
+  },
+  delegatesTo: 'resolveWindowCandles + computeWindowOhlc',
+  execute: async (planId, step, ctx, token) => {
+    const c = wasCancelled(planId, step, token);
+    if (c) return c;
+
+    const window = step.args.window as AnalysisWindow;
+    if (!window || typeof window !== 'object' || !('kind' in window)) {
+      return failureReceipt(planId, step, 'INVALID_ARGUMENTS', 'Missing or malformed window argument.');
+    }
+
+    const resolved = await resolveWindowCandles(planId, step, ctx, window);
+    if (!resolved.ok) return resolved.receipt;
+
+    const result = computeWindowOhlc(resolved.candles, resolved.meta);
+    return successReceipt(planId, step, formatWindowOhlcMessage(result), result);
+  },
+});
+
+// ---------------------------------------------------------------------------
+// 15. analysis.window_change
+// ---------------------------------------------------------------------------
+
+registerCapability({
+  name: 'analysis.window_change',
+  kind: 'read',
+  description: 'Return absolute and percentage change for a window.',
+  preconditions: ['Active session.', 'Window resolves to at least one candle.'],
+  argSchema: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['window'],
+    properties: {
+      window: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['kind'],
+        properties: {
+          kind: { enum: ['whole_session', 'up_to_cursor', 'time_range'] },
+          fromTime: { type: 'string' },
+          toTime: { type: 'string' },
+        },
+      },
+    },
+  },
+  delegatesTo: 'resolveWindowCandles + computeWindowChange',
+  execute: async (planId, step, ctx, token) => {
+    const c = wasCancelled(planId, step, token);
+    if (c) return c;
+
+    const window = step.args.window as AnalysisWindow;
+    if (!window || typeof window !== 'object' || !('kind' in window)) {
+      return failureReceipt(planId, step, 'INVALID_ARGUMENTS', 'Missing or malformed window argument.');
+    }
+
+    const resolved = await resolveWindowCandles(planId, step, ctx, window);
+    if (!resolved.ok) return resolved.receipt;
+
+    const result = computeWindowChange(resolved.candles, resolved.meta);
+    return successReceipt(planId, step, formatWindowChangeMessage(result), result);
+  },
+});
+
+// ---------------------------------------------------------------------------
+// 16. analysis.window_volume
+// ---------------------------------------------------------------------------
+
+registerCapability({
+  name: 'analysis.window_volume',
+  kind: 'read',
+  description: 'Return total, average and largest volume for a window.',
+  preconditions: ['Active session.', 'Window resolves to at least one candle.'],
+  argSchema: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['window'],
+    properties: {
+      window: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['kind'],
+        properties: {
+          kind: { enum: ['whole_session', 'up_to_cursor', 'time_range'] },
+          fromTime: { type: 'string' },
+          toTime: { type: 'string' },
+        },
+      },
+    },
+  },
+  delegatesTo: 'resolveWindowCandles + computeWindowVolume',
+  execute: async (planId, step, ctx, token) => {
+    const c = wasCancelled(planId, step, token);
+    if (c) return c;
+
+    const window = step.args.window as AnalysisWindow;
+    if (!window || typeof window !== 'object' || !('kind' in window)) {
+      return failureReceipt(planId, step, 'INVALID_ARGUMENTS', 'Missing or malformed window argument.');
+    }
+
+    const resolved = await resolveWindowCandles(planId, step, ctx, window);
+    if (!resolved.ok) return resolved.receipt;
+
+    const result = computeWindowVolume(resolved.candles, resolved.meta);
+    return successReceipt(planId, step, formatWindowVolumeMessage(result), result);
+  },
+});
+
+// ---------------------------------------------------------------------------
+// 17. analysis.window_compare
+// ---------------------------------------------------------------------------
+
+registerCapability({
+  name: 'analysis.window_compare',
+  kind: 'read',
+  description: 'Compare two windows by close price and total volume.',
+  preconditions: ['Active session.', 'Both windows resolve to at least one candle.'],
+  argSchema: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['left', 'right'],
+    properties: {
+      left: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['kind'],
+        properties: {
+          kind: { enum: ['whole_session', 'up_to_cursor', 'time_range'] },
+          fromTime: { type: 'string' },
+          toTime: { type: 'string' },
+        },
+      },
+      right: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['kind'],
+        properties: {
+          kind: { enum: ['whole_session', 'up_to_cursor', 'time_range'] },
+          fromTime: { type: 'string' },
+          toTime: { type: 'string' },
+        },
+      },
+    },
+  },
+  delegatesTo: 'resolveWindowCandles × 2 + computeWindowCompare',
+  execute: async (planId, step, ctx, token) => {
+    const c = wasCancelled(planId, step, token);
+    if (c) return c;
+
+    const left = step.args.left as AnalysisWindow;
+    const right = step.args.right as AnalysisWindow;
+    if (!left || !right || typeof left !== 'object' || typeof right !== 'object' || !('kind' in left) || !('kind' in right)) {
+      return failureReceipt(planId, step, 'INVALID_ARGUMENTS', 'Missing or malformed left/right window arguments.');
+    }
+
+    const leftResolved = await resolveWindowCandles(planId, step, ctx, left);
+    if (!leftResolved.ok) return leftResolved.receipt;
+
+    const rightResolved = await resolveWindowCandles(planId, step, ctx, right);
+    if (!rightResolved.ok) return rightResolved.receipt;
+
+    const result = computeWindowCompare(leftResolved.candles, leftResolved.meta, rightResolved.candles, rightResolved.meta);
+    return successReceipt(planId, step, formatWindowCompareMessage(result), result);
+  },
+});
+
+// ---------------------------------------------------------------------------
+// 18. analysis.candle_shape
+// ---------------------------------------------------------------------------
+
+registerCapability({
+  name: 'analysis.candle_shape',
+  kind: 'read',
+  description: 'Return body, upper wick, lower wick and range for one candle.',
+  preconditions: ['Active session.', 'Requested candle is resolvable.'],
+  argSchema: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['source'],
+    properties: {
+      source: { enum: ['current_chart_candle', 'market_time'] },
+      marketTime: { type: 'string' },
+    },
+  },
+  delegatesTo: 'resolveSingleCandle + computeCandleShape',
+  execute: async (planId, step, ctx, token) => {
+    const c = wasCancelled(planId, step, token);
+    if (c) return c;
+
+    const resolved = await resolveSingleCandle(planId, step, ctx);
+    if (!resolved.ok) return resolved.receipt;
+
+    const state = ctx.getState();
+    const result = computeCandleShape(resolved.candle, state.symbol, state.replayDate ?? '', state.timeframe);
+    return successReceipt(planId, step, formatCandleShapeMessage(result), result);
+  },
+});
+
+// ---------------------------------------------------------------------------
+// 19. analysis.window_summary
+// ---------------------------------------------------------------------------
+
+registerCapability({
+  name: 'analysis.window_summary',
+  kind: 'read',
+  description: 'Return a grounded deterministic summary of a window: OHLC, change, volume, and average body/wick.',
+  preconditions: ['Active session.', 'Window resolves to at least one candle.'],
+  argSchema: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['window'],
+    properties: {
+      window: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['kind'],
+        properties: {
+          kind: { enum: ['whole_session', 'up_to_cursor', 'time_range'] },
+          fromTime: { type: 'string' },
+          toTime: { type: 'string' },
+        },
+      },
+    },
+  },
+  delegatesTo: 'resolveWindowCandles + computeWindowSummary',
+  execute: async (planId, step, ctx, token) => {
+    const c = wasCancelled(planId, step, token);
+    if (c) return c;
+
+    const window = step.args.window as AnalysisWindow;
+    if (!window || typeof window !== 'object' || !('kind' in window)) {
+      return failureReceipt(planId, step, 'INVALID_ARGUMENTS', 'Missing or malformed window argument.');
+    }
+
+    const resolved = await resolveWindowCandles(planId, step, ctx, window);
+    if (!resolved.ok) return resolved.receipt;
+
+    const result = computeWindowSummary(resolved.candles, resolved.meta);
+    return successReceipt(planId, step, formatWindowSummaryMessage(result), result);
   },
 });
