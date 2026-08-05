@@ -116,27 +116,31 @@ describe('candle-shape clarification fallback', () => {
     expect((r.plan?.steps[0].args as any)?.source).toBe('current_chart_candle');
   });
 
-  it('does not use current_chart_candle for "what kind of candle was the 11:30 candle?"', async () => {
+  it('resolves an explicit clock time to market_time for "what kind of candle was the 11:30 candle?"', async () => {
     const ctx = makeCtx();
     ctx.getState().sessionActive = true;
     ctx.getState().symbol = 'AAPL';
 
     const r = await handleOrionMessage({ text: 'what kind of candle was the 11:30 candle?', ctx, setupReady: true });
 
-    expect(r.route).toBe('clarification');
-    expect(r.plan).toBeUndefined();
-    expect(r.wasChat).toBe(true);
+    expect(r.wasChat).toBe(false);
+    expect(r.route).toBe('llm-plan');
+    expect(r.plan?.steps[0].capability).toBe('analysis.candle_shape');
+    expect((r.plan?.steps[0].args as any)?.source).toBe('market_time');
+    expect((r.plan?.steps[0].args as any)?.marketTime).toBe('11:30');
   });
 
-  it('does not use current_chart_candle for an explicit-time paraphrase', async () => {
+  it('resolves a natural-language explicit time to market_time for an explicit-time paraphrase', async () => {
     const ctx = makeCtx();
     ctx.getState().sessionActive = true;
     ctx.getState().symbol = 'AAPL';
 
     const r = await handleOrionMessage({ text: 'what was the shape of the candle at two in the afternoon?', ctx, setupReady: true });
 
-    expect(r.route).toBe('clarification');
-    expect(r.plan).toBeUndefined();
-    expect(r.wasChat).toBe(true);
+    expect(r.wasChat).toBe(false);
+    expect(r.route).toBe('llm-plan');
+    expect(r.plan?.steps[0].capability).toBe('analysis.candle_shape');
+    expect((r.plan?.steps[0].args as any)?.source).toBe('market_time');
+    expect((r.plan?.steps[0].args as any)?.marketTime).toBe('14:00');
   });
 });

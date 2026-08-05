@@ -22,6 +22,7 @@ import type { AgentContext } from './types';
 import { getCapability } from './capabilities';
 import { normalizeAnalysisWindow } from './intent';
 import { textRequestsContextReference, textRequestsWholeSession, textRequestsSummary } from './dimensions';
+import { extractTimes, formatTime, US_EQUITY_MARKET_OPEN, US_EQUITY_MARKET_CLOSE, MORNING_END, AFTERNOON_START } from '../planner';
 
 export interface CompileOptions {
   /** Anchor for relative_trading dates (YYYY-MM-DD). Defaults to today. */
@@ -63,16 +64,242 @@ function defaultAnalysisWindow(): AnalysisWindow {
   return { kind: 'whole_session' };
 }
 
+function windowsEqual(a: AnalysisWindow | undefined, b: AnalysisWindow | undefined): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  if (a.kind !== b.kind) return false;
+  if (a.kind === 'whole_session' || a.kind === 'up_to_cursor') return true;
+  if (a.kind === 'time_range' && b.kind === 'time_range') {
+    return a.fromTime === b.fromTime && a.toTime === b.toTime;
+  }
+  return false;
+}
+
+function isSessionComplement(
+  candidate: AnalysisWindow,
+  other: AnalysisWindow,
+  sessionOpen: string,
+  sessionClose: string
+): boolean {
+  if (candidate.kind !== 'time_range' || other.kind !== 'time_range') return false;
+  return (
+    (candidate.fromTime === sessionOpen && candidate.toTime === other.fromTime) ||
+    (candidate.toTime === sessionClose && candidate.fromTime === other.toTime)
+  );
+}
+
+function isTimeWithin(time: string, fromTime: string, toTime: string): boolean {
+  const toMin = (t: string) => {
+    const [h, m] = t.split(':').map(Number);
+    return h * 60 + m;
+  };
+  const t = toMin(time);
+  const f = toMin(fromTime);
+  const z = toMin(toTime);
+  return f <= t && t <= z;
+}
+
+function timeRangeFromWindow(win: AnalysisWindow | undefined): { fromTime: string; toTime: string } | undefined {
+  if (win?.kind === 'time_range') return { fromTime: win.fromTime, toTime: win.toTime };
+  return undefined;
+}
+
+function explicitCandidateMarketTime(text: string): string | undefined {
+  const times = extractTimes(text);
+  if (times.length > 0) {
+    const last = times[times.length - 1];
+    return formatTime(last);
+  }
+  const lower = text.toLowerCase();
+  if (/\b(?:market\s+open|opening\s+bell)\b/.test(lower)) return formatTime(US_EQUITY_MARKET_OPEN);
+  if (/\b(?:market\s+close|closing\s+bell)\b/.test(lower)) return formatTime(US_EQUITY_MARKET_CLOSE);
+  return undefined;
+}
+
+function siblingTimeRange(
+  resolvedSoFar: AnalysisRequest[],
+  pending: AnalysisRequest[]
+): { fromTime: string; toTime: string } | undefined {
+  for (const r of resolvedSoFar) {
+    const win = timeRangeFromWindow(analysisRequestWindow(r));
+    if (win) return win;
+    if (r.kind === 'window_compare') {
+      const l = timeRangeFromWindow(r.left);
+      if (l) return l;
+      const right = timeRangeFromWindow(r.right);
+      if (right) return right;
+    }
+  }
+  for (const r of pending) {
+    if (r.kind === 'window_compare') {
+      const left = timeRangeFromWindow(normalizeAnalysisWindow(r.left) as AnalysisWindow | undefined);
+      if (left) return left;
+      const right = timeRangeFromWindow(normalizeAnalysisWindow(r.right) as AnalysisWindow | undefined);
+      if (right) return right;
+    } else if ((r as { window?: AnalysisWindow }).window) {
+      const w = timeRangeFromWindow(normalizeAnalysisWindow((r as { window?: AnalysisWindow }).window) as AnalysisWindow | undefined);
+      if (w) return w;
+    }
+  }
+  return undefined;
+}
+
+function resolveCandleShape(
+  cur: { source: 'current_chart_candle' | 'market_time'; marketTime?: string },
+  resolvedSoFar: AnalysisRequest[],
+  pending: AnalysisRequest[],
+  text: string
+): { source: 'current_chart_candle' | 'market_time'; marketTime?: string } {
+  const sibling = siblingTimeRange(resolvedSoFar, pending);
+  const explicit = explicitCandidateMarketTime(text);
+
+  const boundaryTimes = sibling ? new Set([sibling.fromTime, sibling.toTime]) : new Set<string>();
+  // If the user names a single non-boundary time inside a compound window
+  // (e.g. "candle at 11:30 and the move from 10 to 12"), prefer that time.
+  let candidate: string | undefined;
+  if (sibling && explicit && !boundaryTimes.has(explicit)) {
+    if (isTimeWithin(explicit, sibling.fromTime, sibling.toTime)) {
+      candidate = explicit;
+    }
+  }
+  if (candidate === undefined) {
+    if (sibling) {
+      candidate = sibling.toTime;
+    } else if (explicit) {
+      candidate = explicit;
+    }
+  }
+
+  if (candidate) {
+    // Explicit/sibling time always beats current chart, seek position,
+    // and ungrounded model alternatives.
+    if (cur.source === 'market_time' && cur.marketTime && cur.marketTime === candidate) {
+      return { source: 'market_time', marketTime: cur.marketTime };
+    }
+    return { source: 'market_time', marketTime: candidate };
+  }
+
+  // No explicit/sibling candidate. Trust a model market_time only if it has a
+  // marketTime; otherwise keep or revert to current_chart_candle so deictic
+  // requests ("what kind of candle am I on") stay on the current candle.
+  if (cur.source === 'market_time' && cur.marketTime) {
+    return { source: 'market_time', marketTime: cur.marketTime };
+  }
+  return { source: 'current_chart_candle' };
+}
+
+function newWindowFromText(text: string): AnalysisWindow | undefined {
+  const t = text.toLowerCase();
+
+  const lastHour = /\b(?:last|final|closing)\s+(?:hour|hr)\b/;
+  const firstHour = /\b(?:first|opening)\s+(?:hour|hr)\b/;
+  const morning = /\bmorning\b/;
+  const afternoon = /\bafternoon\b/;
+
+  if (lastHour.test(t)) return normalizeAnalysisWindow({ kind: 'last_hour' }) as AnalysisWindow;
+  if (firstHour.test(t)) return normalizeAnalysisWindow({ kind: 'first_hour' }) as AnalysisWindow;
+
+  const nMinutesMatch = t.match(/\b(?:first|opening|last|final|closing)\s+(\d+)\s*(?:minute|minutes|min|mins)\b/);
+  if (nMinutesMatch) {
+    const n = parseInt(nMinutesMatch[1], 10);
+    const isLast = /\b(?:last|final|closing)\b/.test(nMinutesMatch[0]);
+    const win = { kind: isLast ? 'last_n_minutes' : 'first_n_minutes', n };
+    return normalizeAnalysisWindow(win) as AnalysisWindow;
+  }
+
+  if (morning.test(t)) {
+    return { kind: 'time_range', fromTime: formatTime(US_EQUITY_MARKET_OPEN), toTime: formatTime(MORNING_END) } as AnalysisWindow;
+  }
+  if (afternoon.test(t)) {
+    return { kind: 'time_range', fromTime: formatTime(AFTERNOON_START), toTime: formatTime(US_EQUITY_MARKET_CLOSE) } as AnalysisWindow;
+  }
+
+  const times = extractTimes(text);
+  if (times.length === 2) {
+    return { kind: 'time_range', fromTime: formatTime(times[0]), toTime: formatTime(times[1]) };
+  }
+
+  return undefined;
+}
+
+function resolveComparisonWindows(
+  left: AnalysisWindow | undefined,
+  right: AnalysisWindow | undefined,
+  inherited: AnalysisWindow | undefined,
+  sessionOpen: string,
+  sessionClose: string,
+  text: string = ''
+): { left: AnalysisWindow; right: AnalysisWindow } | null {
+  if (!left && !right) {
+    if (inherited) return { left: inherited, right: inherited };
+    return null;
+  }
+
+  if (!left) left = right ?? inherited ?? defaultAnalysisWindow();
+  if (!right) right = left ?? inherited ?? defaultAnalysisWindow();
+
+  if (!inherited) {
+    return { left, right };
+  }
+
+  // 1. Inherited side is already correctly placed.
+  if (windowsEqual(left, inherited)) return { left, right };
+  if (windowsEqual(right, inherited)) return { left, right };
+
+  // 2. The model copied the new window to both sides; keep the new side and use
+  // the inherited window for the other.
+  if (windowsEqual(left, right)) {
+    return { left: inherited, right };
+  }
+
+  // 3. One side is the complement of the other across the session. The side that
+  // is NOT the complement is the new window the user asked for.
+  const leftIsComplement = isSessionComplement(left, right, sessionOpen, sessionClose);
+  const rightIsComplement = isSessionComplement(right, left, sessionOpen, sessionClose);
+
+  if (leftIsComplement && !rightIsComplement) {
+    return { left: inherited, right };
+  }
+  if (rightIsComplement && !leftIsComplement) {
+    return { left, right: inherited };
+  }
+
+  if (leftIsComplement && rightIsComplement) {
+    // Both sides partition the session (e.g. morning vs afternoon, or first hour
+    // vs the rest of the day). Try to identify the user's intended new window
+    // from the text; the other side is the complement to be replaced with the
+    // inherited prior window.
+    const requested = newWindowFromText(text);
+    if (requested) {
+      if (windowsEqual(left, requested)) {
+        return { left, right: inherited };
+      }
+      if (windowsEqual(right, requested)) {
+        return { left: inherited, right };
+      }
+    }
+    // Fall through and keep the original windows if we cannot disambiguate.
+  }
+
+  return { left, right };
+}
+
 function mergeAnalysisRequests(
   base: AnalysisRequest[] | undefined,
-  current: AnalysisRequest[] | undefined
+  current: AnalysisRequest[] | undefined,
+  text: string = '',
+  isContextual: boolean = false
 ): { ok: true; requests: AnalysisRequest[] } | { ok: false; error: string } {
   if (!current) return { ok: true, requests: base ?? [] };
   if (!base) {
     // No previous analysis to inherit from; current must be complete.
     for (let i = 0; i < current.length; i++) {
       const r = current[i];
-      if (r.kind === 'candle_shape') continue; // source is required, no window needed
+      if (r.kind === 'candle_shape') {
+        // Candle shape with no prior analysis is still resolvable from explicit
+        // time text and/or sibling windows in the same request.
+        continue;
+      }
       if (r.kind === 'window_compare') {
         if (!r.left || !r.right) {
           return { ok: false, error: `analysisRequests[${i}] is missing left/right windows and no prior analysis exists to inherit from.` };
@@ -86,6 +313,8 @@ function mergeAnalysisRequests(
 
   const lastBase = base[base.length - 1];
   const baseWindow = lastBase ? analysisRequestWindow(lastBase) : undefined;
+  const sessionOpen = formatTime(US_EQUITY_MARKET_OPEN);
+  const sessionClose = formatTime(US_EQUITY_MARKET_CLOSE);
 
   const resolved: AnalysisRequest[] = [];
   for (let i = 0; i < current.length; i++) {
@@ -93,44 +322,73 @@ function mergeAnalysisRequests(
     const baseReq = i < base.length ? base[i] : lastBase;
     const inheritedWindow = baseReq ? analysisRequestWindow(baseReq) : baseWindow;
 
-    if (cur.kind === 'window_compare') {
-      let left = cur.left ??
-        (baseReq?.kind === 'window_compare' ? baseReq.left : inheritedWindow) ??
-        defaultAnalysisWindow();
-      const right = cur.right ??
-        (baseReq?.kind === 'window_compare' ? baseReq.right : inheritedWindow) ??
-        defaultAnalysisWindow();
+    if (cur.kind === 'candle_shape') {
+      const other = resolved.concat(current.slice(i + 1));
+      resolved.push({
+        kind: 'candle_shape',
+        ...resolveCandleShape(cur, resolved, other, text),
+      } as AnalysisRequest);
+      continue;
+    }
 
-      // Contextual comparison follow-ups ("compare that with the last hour")
-      // sometimes copy the new window into both sides. If left and right are
-      // identical, prefer the inherited window for the left side.
-      if (
-        inheritedWindow &&
-        left &&
-        right &&
-        JSON.stringify(left) === JSON.stringify(right) &&
-        JSON.stringify(left) !== JSON.stringify(inheritedWindow)
-      ) {
-        left = inheritedWindow;
+    if (cur.kind === 'window_compare') {
+      let left = (cur.left ? normalizeAnalysisWindow(cur.left) : undefined) as AnalysisWindow | undefined;
+      let right = (cur.right ? normalizeAnalysisWindow(cur.right) : undefined) as AnalysisWindow | undefined;
+
+      if (isUngroundedWholeSession(left, text, isContextual)) left = undefined;
+      if (isUngroundedWholeSession(right, text, isContextual)) right = undefined;
+
+      if (baseReq || inheritedWindow) {
+        const baseCompareLeft = baseReq?.kind === 'window_compare' ? baseReq.left : inheritedWindow;
+        const baseCompareRight = baseReq?.kind === 'window_compare' ? baseReq.right : inheritedWindow;
+
+        if (!left && !right) {
+          if (baseReq?.kind === 'window_compare' && baseReq.left && baseReq.right) {
+            left = baseReq.left;
+            right = baseReq.right;
+          } else {
+            left = inheritedWindow ?? defaultAnalysisWindow();
+            right = inheritedWindow ?? defaultAnalysisWindow();
+          }
+        } else {
+          if (!left) left = baseCompareLeft ?? right ?? defaultAnalysisWindow();
+          if (!right) right = baseCompareRight ?? left ?? defaultAnalysisWindow();
+
+          const compare = resolveComparisonWindows(left, right, inheritedWindow, sessionOpen, sessionClose, text);
+          if (compare) {
+            left = compare.left;
+            right = compare.right;
+          }
+        }
+      } else {
+        if (!left || !right) {
+          return { ok: false, error: 'Please specify both windows to compare.' };
+        }
+      }
+
+      if (!left || !right) {
+        return { ok: false, error: 'Could not resolve the comparison windows.' };
       }
 
       resolved.push({ kind: 'window_compare', left, right });
       continue;
     }
 
-    if (cur.kind === 'candle_shape') {
-      resolved.push({
-        kind: 'candle_shape',
-        source: cur.source,
-        marketTime: cur.marketTime,
-      });
-      continue;
-    }
-
     const kind = cur.kind;
     if (!kind) return { ok: false, error: `analysisRequests[${i}] has no kind and cannot be resolved.` };
-    const window = cur.window ?? inheritedWindow ?? defaultAnalysisWindow();
-    resolved.push({ kind, window } as AnalysisRequest);
+
+    let win = (cur.window ? normalizeAnalysisWindow(cur.window) : undefined) as AnalysisWindow | undefined;
+    if (isUngroundedWholeSession(win, text, isContextual)) win = undefined;
+
+    if (win) {
+      resolved.push({ kind, window: win } as AnalysisRequest);
+    } else if (inheritedWindow) {
+      resolved.push({ kind, window: inheritedWindow } as AnalysisRequest);
+    } else if (isContextual) {
+      return { ok: false, error: "I need to know which time window you'd like." };
+    } else {
+      resolved.push({ kind, window: defaultAnalysisWindow() } as AnalysisRequest);
+    }
   }
   return { ok: true, requests: resolved };
 }
@@ -184,6 +442,9 @@ export function resolveAnalysisInheritance(
   const lastBase = base && base.length > 0 ? base[base.length - 1] : undefined;
   const baseWindow = lastBase ? analysisRequestWindow(lastBase) : undefined;
 
+  const sessionOpen = formatTime(US_EQUITY_MARKET_OPEN);
+  const sessionClose = formatTime(US_EQUITY_MARKET_CLOSE);
+
   const resolved: AnalysisRequest[] = [];
   for (let i = 0; i < current.length; i++) {
     const cur = current[i];
@@ -191,7 +452,11 @@ export function resolveAnalysisInheritance(
     const inheritedWindow = baseReq ? analysisRequestWindow(baseReq) : baseWindow;
 
     if (cur.kind === 'candle_shape') {
-      resolved.push({ kind: 'candle_shape', source: cur.source, marketTime: cur.marketTime });
+      const other = resolved.concat(current.slice(i + 1));
+      resolved.push({
+        kind: 'candle_shape',
+        ...resolveCandleShape(cur, resolved, other, opts.text),
+      } as AnalysisRequest);
       continue;
     }
 
@@ -219,19 +484,10 @@ export function resolveAnalysisInheritance(
           if (!left) left = baseCompareLeft ?? right ?? defaultAnalysisWindow();
           if (!right) right = baseCompareRight ?? left ?? defaultAnalysisWindow();
 
-          // Contextual comparison follow-ups sometimes copy the new window into
-          // both sides (e.g. "compare that with the last hour"). When left and
-          // right are identical and different from the inherited window, the
-          // left side should be the inherited prior window.
-          if (
-            isContextual &&
-            left &&
-            right &&
-            baseCompareLeft &&
-            JSON.stringify(left) === JSON.stringify(right) &&
-            JSON.stringify(left) !== JSON.stringify(baseCompareLeft)
-          ) {
-            left = baseCompareLeft;
+          const compare = resolveComparisonWindows(left, right, inheritedWindow, sessionOpen, sessionClose, opts.text);
+          if (compare) {
+            left = compare.left;
+            right = compare.right;
           }
         }
       } else {
@@ -372,7 +628,8 @@ export function resolveCompareOperands(
 
 export function resolveContextReference(
   intent: ChartActionIntent,
-  ctx: AgentContext
+  ctx: AgentContext,
+  requestText: string = ''
 ): ContextResolutionResult {
   // Candle comparisons resolve both explicit sides before compilation.
   if (intent.finalQuery === 'compare_candles') {
@@ -546,7 +803,8 @@ export function resolveContextReference(
     ref.mode === 'repeat' ||
     (ref.mode === 'inherit' && ref.inherit?.includes('analysisRequests'));
   if (shouldInheritAnalysis && merged.analysisRequests) {
-    const mergedAnalysis = mergeAnalysisRequests(source.analysisRequests, merged.analysisRequests);
+    const isContextual = textRequestsContextReference(requestText, ctx.executionLog.latestSuccessfulAction() !== undefined);
+    const mergedAnalysis = mergeAnalysisRequests(source.analysisRequests, merged.analysisRequests, requestText, isContextual);
     if (!mergedAnalysis.ok) {
       return { ok: false, error: mergedAnalysis.error };
     }

@@ -32,7 +32,7 @@ import type {
   ExecutionContextEntry,
 } from './types';
 import { createCancellationSource, type CancellationSource } from './types';
-import { parseChartCommand, extractTimes, clampTimeframe, SUPPORTED_TIMEFRAMES, type ChartCommand, type ParsedTime } from '../planner';
+import { parseChartCommand, extractTimes, clampTimeframe, formatTime, SUPPORTED_TIMEFRAMES, type ChartCommand, type ParsedTime } from '../planner';
 import {
   type ActionDimension,
   ALL_ACTION_DIMENSIONS,
@@ -232,7 +232,7 @@ async function handleCanonicalRepeat(
 
   // Resolve the stored template again so context-dependent fields (e.g.
   // compare_candles) are re-bound to the current execution log.
-  const resolution = resolveContextReference(prior.template, ctx);
+  const resolution = resolveContextReference(prior.template, ctx, text);
   if (!resolution.ok) {
     return {
       ok: false,
@@ -1182,7 +1182,7 @@ async function routeMessage(
     agentTrace('llm intent end', { ok: extraction.ok ? 'intent' : extraction.kind });
 
     if (extraction.ok) {
-      const resolution = resolveContextReference(extraction.intent, ctx);
+      const resolution = resolveContextReference(extraction.intent, ctx, text);
       if (!resolution.ok) {
         agentTrace('route', 'clarification', { reason: resolution.error });
         return {
@@ -1309,29 +1309,57 @@ async function routeMessage(
         candleRequested.has('absoluteTime') || cmd.startTime !== undefined || cmd.endTime !== undefined;
       const isCandleShapeContext =
         textRequestsCandleShape(text) || candleRequested.has('candleQuery');
-      if (state.sessionActive && isCandleShapeContext && !hasExplicitTime) {
-        const plan: AgentPlan = {
-          id: makePlanId(),
-          summary: 'Current candle shape',
-          kind: 'query',
-          steps: [
-            {
-              id: 'step-candle',
-              capability: 'analysis.candle_shape',
-              args: { source: 'current_chart_candle' },
-              required: false,
-            },
-          ],
-        };
-        const result = await executeAgentPlan(plan, ctx, token);
-        return {
-          ok: result.ok,
-          message: composeResponse(result, ctx),
-          wasChat: false,
-          route: 'llm-plan',
-          plan,
-          result,
-        };
+      if (state.sessionActive && isCandleShapeContext) {
+        if (!hasExplicitTime) {
+          const plan: AgentPlan = {
+            id: makePlanId(),
+            summary: 'Current candle shape',
+            kind: 'query',
+            steps: [
+              {
+                id: 'step-candle',
+                capability: 'analysis.candle_shape',
+                args: { source: 'current_chart_candle' },
+                required: false,
+              },
+            ],
+          };
+          const result = await executeAgentPlan(plan, ctx, token);
+          return {
+            ok: result.ok,
+            message: composeResponse(result, ctx),
+            wasChat: false,
+            route: 'llm-plan',
+            plan,
+            result,
+          };
+        }
+
+        const explicitTime = cmd.endTime ?? cmd.startTime;
+        if (explicitTime) {
+          const plan: AgentPlan = {
+            id: makePlanId(),
+            summary: `Candle shape at ${formatTime(explicitTime)}`,
+            kind: 'query',
+            steps: [
+              {
+                id: 'step-candle',
+                capability: 'analysis.candle_shape',
+                args: { source: 'market_time', marketTime: formatTime(explicitTime) },
+                required: false,
+              },
+            ],
+          };
+          const result = await executeAgentPlan(plan, ctx, token);
+          return {
+            ok: result.ok,
+            message: composeResponse(result, ctx),
+            wasChat: false,
+            route: 'llm-plan',
+            plan,
+            result,
+          };
+        }
       }
 
       agentTrace('route', 'clarification');

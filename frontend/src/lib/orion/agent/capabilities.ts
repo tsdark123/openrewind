@@ -115,6 +115,23 @@ function wasCancelled(planId: string, step: AgentStep, token?: CancellationToken
   return failureReceipt(planId, step, 'CANCELLED', 'Plan was cancelled.');
 }
 
+function findCandleAtMarketTime(
+  candles: CandleData[],
+  target: number,
+  timeframe: number
+): CandleData | undefined {
+  const tfSeconds = (timeframe || 1) * 60;
+  // Find the last candle whose start is at or before the target. The bar at
+  // that start covers [start, start + tfSeconds).
+  for (let i = candles.length - 1; i >= 0; i--) {
+    const c = candles[i];
+    if (c.timestamp <= target && target < c.timestamp + tfSeconds) {
+      return c;
+    }
+  }
+  return undefined;
+}
+
 function parseTimeString(input: string): { hour: number; minute: number } | null {
   const t = input.trim().toLowerCase();
   const m1 = t.match(/\b(\d{1,2}):(\d{2})(?::\d{2})?\s*(am|pm)?\b/);
@@ -783,8 +800,10 @@ registerCapability({
         return failureReceipt(planId, step, 'NO_DATA_FOR_DATE', `No candles for ${symbol} ${date} at ${timeframe}m.`);
       }
 
-      const idx = res.candles.findIndex((c) => c.timestamp >= target);
-      const candle = idx >= 0 ? res.candles[idx] : res.candles[res.candles.length - 1];
+      const candle = findCandleAtMarketTime(res.candles, target, timeframe);
+      if (!candle) {
+        return failureReceipt(planId, step, 'INVALID_ARGUMENTS', `No candle at ${time} for ${symbol} on ${date}.`);
+      }
       const explanation = `For "price" at this time, the OHLCV is open ${candle.open}, high ${candle.high}, low ${candle.low}, close ${candle.close}.`;
       return successReceipt(planId, step, explanation, {
         timestamp: candle.timestamp,
@@ -1293,11 +1312,11 @@ async function resolveSingleCandle(
           ),
         };
       }
-      const idx = res.candles.findIndex((c) => c.timestamp >= target);
-      candle = idx >= 0 ? res.candles[idx] : res.candles[res.candles.length - 1];
-      if (!candle || candle.timestamp < target) {
-        return { ok: false, receipt: failureReceipt(planId, step, 'INVALID_ARGUMENTS', `No candle at or after ${time} for ${symbol} on ${date}.`) };
+      const found = findCandleAtMarketTime(res.candles, target, timeframe);
+      if (!found) {
+        return { ok: false, receipt: failureReceipt(planId, step, 'INVALID_ARGUMENTS', `No candle at ${time} for ${symbol} on ${date}.`) };
       }
+      candle = found;
     } catch (e) {
       return { ok: false, receipt: failureReceipt(planId, step, 'ENGINE_ERROR', `Failed to fetch candles: ${e instanceof Error ? e.message : String(e)}`) };
     }

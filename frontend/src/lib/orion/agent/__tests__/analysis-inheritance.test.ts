@@ -175,4 +175,235 @@ describe('resolveAnalysisInheritance', () => {
       right: { kind: 'time_range', fromTime: '15:00', toTime: '16:00' },
     });
   });
+
+  describe('contextual comparison with complement-side hallucinations', () => {
+    const priorFirstHour: AnalysisRequest = {
+      kind: 'window_ohlc',
+      window: { kind: 'time_range', fromTime: '09:30', toTime: '10:30' },
+    };
+
+    it('replaces a session-complement left side with the inherited prior window', () => {
+      // "Compare that with the last hour" after "first hour range".
+      // Model hallucinated: left = 09:30-15:00, right = 15:00-16:00.
+      const current: AnalysisRequest[] = [
+        {
+          kind: 'window_compare',
+          left: { kind: 'time_range', fromTime: '09:30', toTime: '15:00' },
+          right: { kind: 'time_range', fromTime: '15:00', toTime: '16:00' },
+        },
+      ];
+      const result = resolveAnalysisInheritance(current, [priorFirstHour], {
+        text: 'compare that with the last hour',
+        hasPriorAction: true,
+      });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.requests[0]).toEqual({
+        kind: 'window_compare',
+        left: { kind: 'time_range', fromTime: '09:30', toTime: '10:30' },
+        right: { kind: 'time_range', fromTime: '15:00', toTime: '16:00' },
+      });
+    });
+
+    it('replaces a session-complement right side with the inherited prior window', () => {
+      // New window on left, complement on right.
+      const current: AnalysisRequest[] = [
+        {
+          kind: 'window_compare',
+          left: { kind: 'time_range', fromTime: '09:30', toTime: '10:30' },
+          right: { kind: 'time_range', fromTime: '10:30', toTime: '16:00' },
+        },
+      ];
+      const result = resolveAnalysisInheritance(current, [lastHour], {
+        text: 'compare that with the first hour',
+        hasPriorAction: true,
+      });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.requests[0]).toEqual({
+        kind: 'window_compare',
+        left: { kind: 'time_range', fromTime: '09:30', toTime: '10:30' },
+        right: { kind: 'time_range', fromTime: '15:00', toTime: '16:00' },
+      });
+    });
+
+    it('replaces a morning/afternoon split when the new side is the morning', () => {
+      const current: AnalysisRequest[] = [
+        {
+          kind: 'window_compare',
+          left: { kind: 'time_range', fromTime: '09:30', toTime: '12:00' },
+          right: { kind: 'time_range', fromTime: '12:00', toTime: '16:00' },
+        },
+      ];
+      const result = resolveAnalysisInheritance(current, [lastHour], {
+        text: 'compare that with the morning',
+        hasPriorAction: true,
+      });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.requests[0]).toEqual({
+        kind: 'window_compare',
+        left: { kind: 'time_range', fromTime: '09:30', toTime: '12:00' },
+        right: { kind: 'time_range', fromTime: '15:00', toTime: '16:00' },
+      });
+    });
+
+    it('replaces a morning/afternoon split when the new side is the afternoon', () => {
+      const current: AnalysisRequest[] = [
+        {
+          kind: 'window_compare',
+          left: { kind: 'time_range', fromTime: '09:30', toTime: '12:00' },
+          right: { kind: 'time_range', fromTime: '12:00', toTime: '16:00' },
+        },
+      ];
+      const result = resolveAnalysisInheritance(current, [firstHour], {
+        text: 'compare that with the afternoon',
+        hasPriorAction: true,
+      });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.requests[0]).toEqual({
+        kind: 'window_compare',
+        left: { kind: 'time_range', fromTime: '09:30', toTime: '10:30' },
+        right: { kind: 'time_range', fromTime: '12:00', toTime: '16:00' },
+      });
+    });
+
+    it('keeps the inherited side when it is already present', () => {
+      const current: AnalysisRequest[] = [
+        {
+          kind: 'window_compare',
+          left: { kind: 'time_range', fromTime: '09:30', toTime: '10:30' },
+          right: { kind: 'time_range', fromTime: '15:00', toTime: '16:00' },
+        },
+      ];
+      const result = resolveAnalysisInheritance(current, [firstHour], {
+        text: 'compare that with the last hour',
+        hasPriorAction: true,
+      });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.requests[0]).toEqual({
+        kind: 'window_compare',
+        left: { kind: 'time_range', fromTime: '09:30', toTime: '10:30' },
+        right: { kind: 'time_range', fromTime: '15:00', toTime: '16:00' },
+      });
+    });
+  });
+
+  describe('candle_shape explicit time resolution', () => {
+    it('overrides current_chart_candle with an explicit HH:MM time', () => {
+      const current: AnalysisRequest[] = [{ kind: 'candle_shape', source: 'current_chart_candle' }];
+      const result = resolveAnalysisInheritance(current, [], {
+        text: 'what kind of candle was the 11:30 candle?',
+        hasPriorAction: true,
+      });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.requests[0]).toEqual({
+        kind: 'candle_shape',
+        source: 'market_time',
+        marketTime: '11:30',
+      });
+    });
+
+    it('overrides a hallucinated marketTime with the explicit time in the text', () => {
+      const current: AnalysisRequest[] = [
+        { kind: 'candle_shape', source: 'market_time', marketTime: '11:49' },
+      ];
+      const result = resolveAnalysisInheritance(current, [], {
+        text: 'what kind of candle was the 11:30 candle?',
+        hasPriorAction: true,
+      });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.requests[0]).toEqual({
+        kind: 'candle_shape',
+        source: 'market_time',
+        marketTime: '11:30',
+      });
+    });
+
+    it('keeps market_time when the text matches the model marketTime', () => {
+      const current: AnalysisRequest[] = [
+        { kind: 'candle_shape', source: 'market_time', marketTime: '11:30' },
+      ];
+      const result = resolveAnalysisInheritance(current, [], {
+        text: 'what kind of candle was the 11:30 candle?',
+        hasPriorAction: true,
+      });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.requests[0]).toEqual({
+        kind: 'candle_shape',
+        source: 'market_time',
+        marketTime: '11:30',
+      });
+    });
+
+    it('keeps current_chart_candle for deictic/now requests with no explicit time', () => {
+      const current: AnalysisRequest[] = [
+        { kind: 'candle_shape', source: 'current_chart_candle' },
+      ];
+      const result = resolveAnalysisInheritance(current, [firstHour], {
+        text: 'what kind of candle am I on right now?',
+        hasPriorAction: true,
+      });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.requests[0]).toEqual({
+        kind: 'candle_shape',
+        source: 'current_chart_candle',
+      });
+    });
+
+    it('resolves a natural-language time for candle_shape', () => {
+      const current: AnalysisRequest[] = [{ kind: 'candle_shape', source: 'current_chart_candle' }];
+      const result = resolveAnalysisInheritance(current, [], {
+        text: 'what was the shape of the candle at two in the afternoon?',
+        hasPriorAction: true,
+      });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.requests[0]).toEqual({
+        kind: 'candle_shape',
+        source: 'market_time',
+        marketTime: '14:00',
+      });
+    });
+
+    it('uses the sibling time range toTime for compound window candle anatomy', () => {
+      const current: AnalysisRequest[] = [
+        { kind: 'window_change', window: { kind: 'time_range', fromTime: '10:00', toTime: '12:00' } },
+        { kind: 'candle_shape', source: 'current_chart_candle' },
+      ];
+      const result = resolveAnalysisInheritance(current, [firstHour], {
+        text: 'Give me the move, total volume and candle anatomy from 10 to noon.',
+        hasPriorAction: true,
+      });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.requests).toEqual([
+        { kind: 'window_change', window: { kind: 'time_range', fromTime: '10:00', toTime: '12:00' } },
+        { kind: 'candle_shape', source: 'market_time', marketTime: '12:00' },
+      ]);
+    });
+
+    it('keeps an explicitly provided ending marketTime in a compound window', () => {
+      const current: AnalysisRequest[] = [
+        { kind: 'window_change', window: { kind: 'time_range', fromTime: '10:00', toTime: '12:00' } },
+        { kind: 'candle_shape', source: 'market_time', marketTime: '12:00' },
+      ];
+      const result = resolveAnalysisInheritance(current, [firstHour], {
+        text: 'Give me the move, total volume and candle structure from 10 to noon.',
+        hasPriorAction: true,
+      });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.requests).toEqual([
+        { kind: 'window_change', window: { kind: 'time_range', fromTime: '10:00', toTime: '12:00' } },
+        { kind: 'candle_shape', source: 'market_time', marketTime: '12:00' },
+      ]);
+    });
+  });
 });
