@@ -1,10 +1,18 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { motion } from 'motion/react';
-import { Send, Sparkles, Zap, Trash2 } from 'lucide-react';
+import { motion, AnimatePresence } from 'motion/react';
+import { Send, Sparkles, Zap, Trash2, RefreshCw, Download, AlertCircle, PlayCircle } from 'lucide-react';
+import { CoreSpinLoader } from './core-spin-loader';
 import { cn } from '../../lib/utils';
 import { classifyOrionIntent, type OrionIntent } from '../../lib/orion/router';
-import { ORION_AGENT_MODEL, ensureModel, orionChat, pullOrionModel } from '../../lib/orion/client';
+import { orionChat } from '../../lib/orion/client';
 import { orionController } from '../../lib/orion/controller';
+import {
+  useOrionStartup,
+  retryOrionStartup,
+  pullSelectedModelWithConsent,
+  installOllamaWithConsent,
+  continueDeterministicOrion,
+} from '../../lib/orion/startupState';
 import { parseChartCommand, executeChartCommand, parseChartCommandWithLLM, type PlannerContext } from '../../lib/orion/planner';
 import { commonSenseReply, suggestCommand } from '../../lib/orion/commonSense';
 import {
@@ -21,8 +29,6 @@ import {
 import { buildWorldState, renderWorldStateForPrompt } from '../../lib/orion/worldState';
 import type { AppAction, AppState, PerformanceLog } from '../../types';
 import type { ChartHandle } from '../Chart';
-
-const ORION_MODEL = 'llama3.2';
 
 interface OrionChatSidepanelProps {
   className?: string;
@@ -134,37 +140,16 @@ export function OrionChatSidepanel({
     void writeOrionThreads(threads);
   }, [threads, threadsLoaded]);
 
-  // Agent-tier bootstrap state. `unknown` at boot; flips to `ready` on
-  // first successful use, `pulling` while `pullOrionModel` streams progress,
-  // or `missing` if the local Ollama install cannot fetch it (offline).
-  const [agentModelStatus, setAgentModelStatus] = useState<'unknown' | 'ready' | 'pulling' | 'missing'>('unknown');
-  const [agentPullPercent, setAgentPullPercent] = useState(0);
+  const startup = useOrionStartup();
   // Latest classifier decision for the pending user turn — surfaced in the
   // header chip so the user can see when Orion is thinking in agent mode.
   const [lastIntent, setLastIntent] = useState<OrionIntent>('chat');
-
-  const [setupStage, setSetupStage] = useState<'checking-ollama' | 'ready' | 'error'>('checking-ollama');
 
   useEffect(() => {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
   }, [messages, isTyping]);
-
-  // Lightweight Ollama readiness check. If Ollama isn't there, the chat
-  // simply stays in offline mode and the local symbol-switch still works.
-  useEffect(() => {
-    let cancelled = false;
-    const checkModel = async () => {
-      const check = await ensureModel(ORION_MODEL);
-      if (cancelled) return;
-      setSetupStage(check.ready ? 'ready' : 'error');
-    };
-    checkModel();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
 
   const handleResetChat = () => {
     setThreads((prev) => setThreadMessages(prev, threadKey, [DEFAULT_GREETING]));
@@ -222,7 +207,7 @@ export function OrionChatSidepanel({
 
     // Let the local LLM make sense of typos / filler when the offline parser
     // is unsure and Orion is online.
-    if (cmd.intent === 'unknown' && setupStage === 'ready') {
+    if (cmd.intent === 'unknown' && startup.stage === 'ready') {
       try {
         const world = buildWorldState(appState, chartRef, performanceLog);
         const smart = await parseChartCommandWithLLM(trimmed, availableTickers, world, controller.signal);
@@ -280,7 +265,7 @@ export function OrionChatSidepanel({
       return;
     }
 
-    if (setupStage !== 'ready') {
+    if (startup.stage !== 'ready') {
       const common = commonSenseReply(trimmed, false);
       if (common) {
         ownedAppend(common);
@@ -295,56 +280,22 @@ export function OrionChatSidepanel({
       return;
     }
 
-    // Route the turn through the two-tier model: a chat message stays on
-    // llama3.2 (snappy); a task-flavored message ("go to AAPL and run…")
-    // gets the agent tool-calling brain.
+    // Route the turn. The agent tool-calling brain is used when the user
+    // asks Orion to perform a task; otherwise chat. The model is the same
+    // certified model in both cases, so there is no separate agent download.
     const decision = classifyOrionIntent(trimmed);
     if (isAuthoritative(runId)) {
       setLastIntent(decision.intent);
     }
 
     const wantsAgent = decision.intent === 'agent';
-    let effectiveTier: 'chat' | 'agent' = decision.intent;
+    const effectiveTier: 'chat' | 'agent' = decision.intent;
     let modeNotice: string | null = null;
 
-    // Agent-tier bootstrap. Lazy pull so the 8B model never downloads on
-    // app boot — only when the user first asks Orion to actually do
-    // something. During the pull we fall back to the chat model for THIS
-    // turn so the conversation stays alive.
-    if (wantsAgent && agentModelStatus !== 'ready') {
-      if (agentModelStatus === 'unknown' || agentModelStatus === 'missing') {
-        if (isAuthoritative(runId)) {
-          setAgentModelStatus('pulling');
-          setAgentPullPercent(0);
-        }
-        // Kick off the pull in the background; do NOT await here so the
-        // current turn responds quickly on the chat model.
-        void (async () => {
-          try {
-            await pullOrionModel(ORION_AGENT_MODEL, (pct) => {
-              if (pct >= 0 && isAuthoritative(runId)) {
-                setAgentPullPercent(pct);
-              }
-            });
-            if (isAuthoritative(runId)) {
-              setAgentModelStatus('ready');
-            }
-          } catch (e) {
-            console.warn('[Orion] Agent model pull failed:', e);
-            if (isAuthoritative(runId)) {
-              setAgentModelStatus('missing');
-            }
-          }
-        })();
-      }
-      effectiveTier = 'chat';
-      modeNotice = 'Warming up agent brain in the background… responding with the chat model for now.';
-    }
-
-    // If the agent brain is ready and the user wants action, hand the turn
-    // to the automation driver. The controller posts its own replies to the
-    // active thread, so we just need to refresh the UI after it finishes.
-    if (wantsAgent && agentModelStatus === 'ready') {
+    // If the user wants action, hand the turn to the automation driver.
+    // The controller posts its own replies to the active thread, so we just
+    // need to refresh the UI after it finishes.
+    if (wantsAgent && startup.stage === 'ready') {
       // Give a cancelled previous task a moment to clean up; then run.
       let result: Awaited<ReturnType<typeof orionController.runAgentTask>> | null = null;
       for (let wait = 0; wait <= 300; wait += 50) {
@@ -432,9 +383,7 @@ export function OrionChatSidepanel({
       });
 
       // First successful agent-tier call confirms the model is present.
-      if (effectiveTier === 'agent' && isAuthoritative(runId)) {
-        setAgentModelStatus('ready');
-      }
+      // The startup state already verified this, so no local state is needed.
 
       const reply = response.content || 'No response content.';
       const finalText = modeNotice ? `${modeNotice}\n\n${reply}` : reply;
@@ -445,7 +394,7 @@ export function OrionChatSidepanel({
         const detail = err instanceof Error ? err.message : String(err);
         let text: string;
         if (code === 'MODEL_MISSING') {
-          text = `Orion needs the ${effectiveTier === 'agent' ? ORION_AGENT_MODEL : 'chat'} model pulled locally. Pull it via Ollama and retry.`;
+          text = `Orion needs the ${startup.activeModelName} model pulled locally. Pull it via Ollama and retry.`;
         } else if (code === 'TIMEOUT') {
           text = 'The local model did not respond in time. Please try again.';
         } else if (code === 'ABORTED') {
@@ -507,45 +456,30 @@ export function OrionChatSidepanel({
           Reset
         </button>
 
-        {/* Agent-mode chip. Visible when the last routed turn was agent-tier
-            OR the 8B brain is warming/ready, so the user can see when Orion
-            is thinking with the heavier tool-calling model. */}
-        {(lastIntent === 'agent' || agentModelStatus === 'pulling' || agentModelStatus === 'ready') && (
-          <span
-            className={cn(
-              'ml-auto flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px] font-medium',
-              agentModelStatus === 'ready'
-                ? 'bg-[#3b6fff]/15 text-[#3b6fff]'
-                : lightMode
-                  ? 'bg-gray-100 text-gray-600'
-                  : 'bg-[#2a2e39] text-[#787b86]'
-            )}
-            title={
-              agentModelStatus === 'ready'
-                ? `Agent brain (${ORION_AGENT_MODEL}) warm — advanced task planning enabled`
-                : agentModelStatus === 'pulling'
-                  ? `Downloading agent brain (${ORION_AGENT_MODEL}) — ${agentPullPercent}%`
-                  : `Agent brain (${ORION_AGENT_MODEL}) not yet loaded`
-            }
-          >
+        {/* Active model / status chip */}
+        {lastIntent === 'agent' && startup.stage === 'ready' && (
+          <span className="ml-auto flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px] font-medium bg-[#3b6fff]/15 text-[#3b6fff]">
             <Zap className="h-3 w-3" />
-            {agentModelStatus === 'pulling'
-              ? `agent ${agentPullPercent}%`
-              : agentModelStatus === 'ready'
-                ? 'agent'
-                : 'agent…'}
+            agent
           </span>
         )}
         <span
           className={cn(
             'text-[10px] font-medium',
-            lastIntent === 'agent' || agentModelStatus === 'pulling' || agentModelStatus === 'ready'
-              ? 'ml-2'
-              : 'ml-auto',
+            lastIntent === 'agent' ? 'ml-2' : 'ml-auto',
             lightMode ? 'text-gray-500' : 'text-[#787b86]'
           )}
         >
-          {setupStage === 'ready' ? (isTyping ? 'thinking…' : 'online') : 'offline'}
+          {startup.stage === 'ready'
+            ? (isTyping ? 'thinking…' : 'online')
+            : startup.stage === 'checking_runtime' ||
+                startup.stage === 'checking_model' ||
+                startup.stage === 'pulling_model' ||
+                startup.stage === 'warming_model'
+              ? startup.status || 'warming…'
+              : startup.stage === 'deterministic_only'
+                ? 'deterministic'
+                : 'offline'} · {startup.activeModelName}
         </span>
       </div>
 
@@ -614,7 +548,7 @@ export function OrionChatSidepanel({
         <button
           type="button"
           onClick={handleSend}
-          disabled={!input.trim() || isTyping || setupStage !== 'ready'}
+          disabled={!input.trim() || isTyping || startup.stage !== 'ready'}
           className={cn(
             'flex h-8 w-8 items-center justify-center rounded transition-colors',
             input.trim() && !isTyping
@@ -627,6 +561,120 @@ export function OrionChatSidepanel({
           <Send className="h-4 w-4" />
         </button>
       </div>
+
+      <AnimatePresence>
+        {startup.stage !== 'ready' && startup.stage !== 'deterministic_only' && (
+          <motion.div
+            key="boot"
+            initial={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.4, ease: 'easeInOut' }}
+            className={cn(
+              'absolute inset-0 z-50 flex flex-col items-center justify-center gap-4 p-6',
+              lightMode ? 'bg-white/95' : 'bg-[#121416]/95'
+            )}
+          >
+            {startup.stage === 'runtime_missing' ||
+            startup.stage === 'model_missing' ||
+            startup.stage === 'warmup_failed' ||
+            startup.stage === 'download_failed' ? (
+              <div className="flex flex-col items-center gap-3 max-w-[90%] text-center">
+                <AlertCircle className="h-6 w-6 text-[#3b6fff]" />
+                <div className={cn('text-xs font-mono uppercase tracking-widest', lightMode ? 'text-gray-900' : 'text-[#d1d4dc]')}>
+                  {startup.stage === 'runtime_missing' ? 'Ollama runtime missing' : `${startup.activeModelName} not ready`}
+                </div>
+                <div className={cn('text-[10px] font-mono leading-relaxed max-w-[260px]', lightMode ? 'text-gray-600' : 'text-[#787b86]')}>
+                  {startup.error || startup.status || 'Orion could not start.'}
+                </div>
+                {startup.stage === 'model_missing' && startup.canPull && (
+                  <div className="text-[10px] font-mono leading-relaxed max-w-[260px] text-[#3b6fff]">
+                    This is a large local download (~5.6 GB for qwen3:8b).
+                  </div>
+                )}
+                {startup.stage === 'runtime_missing' && startup.canInstallOllama && (
+                  <div className="text-[10px] font-mono leading-relaxed max-w-[260px] text-[#3b6fff]">
+                    Ollama is a large local download and install.
+                  </div>
+                )}
+                <div className="flex flex-wrap items-center justify-center gap-2 mt-1">
+                  {startup.canRetry && (
+                    <button
+                      type="button"
+                      onClick={() => retryOrionStartup()}
+                      className={cn(
+                        'flex items-center gap-1.5 px-3 py-1.5 text-[10px] font-mono uppercase tracking-wider rounded border transition-colors',
+                        lightMode
+                          ? 'border-gray-300 text-gray-700 hover:bg-gray-100'
+                          : 'border-[#2a2e39] text-[#d1d4dc] hover:bg-[#1a1a1a]'
+                      )}
+                    >
+                      <RefreshCw className="h-3 w-3" />
+                      Retry
+                    </button>
+                  )}
+                  {startup.canPull && (
+                    <button
+                      type="button"
+                      onClick={() => pullSelectedModelWithConsent()}
+                      className={cn(
+                        'flex items-center gap-1.5 px-3 py-1.5 text-[10px] font-mono uppercase tracking-wider rounded border transition-colors',
+                        lightMode
+                          ? 'border-[#3b6fff] text-[#3b6fff] hover:bg-[#3b6fff]/10'
+                          : 'border-[#3b6fff] text-[#3b6fff] hover:bg-[#3b6fff]/10'
+                      )}
+                    >
+                      <Download className="h-3 w-3" />
+                      Pull {startup.activeModelName}
+                    </button>
+                  )}
+                  {startup.canInstallOllama && (
+                    <button
+                      type="button"
+                      onClick={() => installOllamaWithConsent()}
+                      className={cn(
+                        'flex items-center gap-1.5 px-3 py-1.5 text-[10px] font-mono uppercase tracking-wider rounded border transition-colors',
+                        lightMode
+                          ? 'border-[#3b6fff] text-[#3b6fff] hover:bg-[#3b6fff]/10'
+                          : 'border-[#3b6fff] text-[#3b6fff] hover:bg-[#3b6fff]/10'
+                      )}
+                    >
+                      <Download className="h-3 w-3" />
+                      Install Ollama
+                    </button>
+                  )}
+                  {startup.canContinueDeterministic && (
+                    <button
+                      type="button"
+                      onClick={() => continueDeterministicOrion()}
+                      className={cn(
+                        'flex items-center gap-1.5 px-3 py-1.5 text-[10px] font-mono uppercase tracking-wider rounded border transition-colors',
+                        lightMode
+                          ? 'border-gray-300 text-gray-700 hover:bg-gray-100'
+                          : 'border-[#2a2e39] text-[#d1d4dc] hover:bg-[#1a1a1a]'
+                      )}
+                    >
+                      <PlayCircle className="h-3 w-3" />
+                      Continue without
+                    </button>
+                  )}
+                </div>
+              </div>
+            ) : (
+              <>
+                <CoreSpinLoader />
+                <div className={cn('text-[10px] font-mono text-center max-w-[260px]', lightMode ? 'text-gray-500' : 'text-[#787b86]')}>
+                  {startup.status || 'Starting Orion...'}
+                </div>
+                {startup.progress >= 0 && (
+                  <div className={cn('text-[10px] font-mono', lightMode ? 'text-gray-500' : 'text-[#787b86]')}>
+                    {startup.progress}%
+                  </div>
+                )}
+              </>
+            )}
+          </motion.div>
+        )}
+      </AnimatePresence>
     </motion.aside>
   );
 }

@@ -1,9 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Send, Terminal } from 'lucide-react';
+import { Send, Terminal, RefreshCw, Download, AlertCircle, PlayCircle } from 'lucide-react';
 import { CoreSpinLoader } from './core-spin-loader';
 import { cn } from '../../lib/utils';
-import { ensureModel, pullOrionModel } from '../../lib/orion/client';
+import {
+  useOrionStartup,
+  retryOrionStartup,
+  pullSelectedModelWithConsent,
+  installOllamaWithConsent,
+  continueDeterministicOrion,
+} from '../../lib/orion/startupState';
 import { handleOrionMessage } from '../../lib/orion/agent/orchestrator';
 import type { AgentContext, AgentExecutionResult, ExecutionContextStore } from '../../lib/orion/agent/types';
 import {
@@ -20,9 +26,7 @@ import {
 import type { AppAction, AppState, PerformanceLog } from '../../types';
 import type { ChartHandle } from '../Chart';
 
-const ORION_MODEL = ((import.meta as any).env?.VITE_ORION_AGENT_MODEL as string | undefined) ?? 'llama3.2';
-const MIN_BOOT_MS = 1200; // show the spinner for at least this long on fast boots
-const READY_FADE_DELAY_MS = 400; // extra visible spinner time before fading to the terminal
+
 
 const WELCOME_TEXT = `[SYSTEM INITIALIZED] - Orion Terminal v1.0
 
@@ -80,11 +84,8 @@ export function OrionTerminal({
 
   const [input, setInput] = useState('');
   const [isTyping, setIsTyping] = useState(false);
-  const [bootStatus, setBootStatus] = useState('Initializing...');
-  const [bootProgress, setBootProgress] = useState(0);
-  const [bootKey, setBootKey] = useState(0);
+  const startup = useOrionStartup();
   const historyIndexRef = useRef(-1);
-  const bootAttemptIdRef = useRef(0);
 
   // Authoritative-run ownership. Only the latest runId may append output,
   // clear isTyping, or update the pending abort controller.
@@ -144,83 +145,6 @@ export function OrionTerminal({
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, isTyping]);
-
-  const [setupStage, setSetupStage] = useState<'idle' | 'pulling' | 'ready' | 'error'>('idle');
-
-  useEffect(() => {
-    console.log('[orion-terminal] setupStage:', setupStage);
-  }, [setupStage]);
-
-  useEffect(() => {
-    const startOrionBoot = async () => {
-      bootAttemptIdRef.current += 1;
-      const attemptId = bootAttemptIdRef.current;
-      const bootStart = Date.now();
-      console.log('[orion-terminal] boot attempt', attemptId, 'started');
-      setSetupStage('pulling');
-      setBootStatus(`Checking ${ORION_MODEL}...`);
-      setBootProgress(0);
-
-      const finalize = async (stage: 'ready' | 'error') => {
-        const remaining = MIN_BOOT_MS - (Date.now() - bootStart);
-        if (remaining > 0) {
-          await new Promise((resolve) => setTimeout(resolve, remaining));
-        }
-        if (attemptId !== bootAttemptIdRef.current) {
-          console.log('[orion-terminal] boot attempt', attemptId, 'ignored (stale)');
-          return;
-        }
-        if (stage === 'ready') {
-          await new Promise((resolve) => setTimeout(resolve, READY_FADE_DELAY_MS));
-        }
-        setSetupStage(stage);
-      };
-
-      try {
-        const check = await ensureModel(ORION_MODEL);
-        console.log('[orion-terminal] boot attempt', attemptId, 'ensureModel result:', check);
-
-        if (attemptId !== bootAttemptIdRef.current) {
-          console.log('[orion-terminal] boot attempt', attemptId, 'ignored (stale)');
-          return;
-        }
-
-        console.log('[orion-terminal] boot attempt', attemptId, 'accepted');
-        if (check.ready) {
-          await finalize('ready');
-          return;
-        }
-
-        if (check.error === 'model-missing') {
-          setBootStatus(`Pulling ${ORION_MODEL}...`);
-          try {
-            await pullOrionModel(ORION_MODEL, (pct, status) => {
-              if (pct >= 0) setBootProgress(pct);
-              setBootStatus(status);
-            });
-            if (attemptId !== bootAttemptIdRef.current) {
-              console.log('[orion-terminal] boot attempt', attemptId, 'pull ignored (stale)');
-              return;
-            }
-            await finalize('ready');
-          } catch (e) {
-            if (attemptId !== bootAttemptIdRef.current) return;
-            console.log('[orion-terminal] boot attempt', attemptId, 'pull failed:', e);
-            await finalize('error');
-          }
-          return;
-        }
-
-        await finalize('error');
-      } catch (e) {
-        if (attemptId !== bootAttemptIdRef.current) return;
-        console.log('[orion-terminal] boot attempt', attemptId, 'error:', e);
-        await finalize('error');
-      }
-    };
-
-    startOrionBoot();
-  }, [bootKey]);
 
   const userMessages = useMemo(
     () => messages.filter((m) => m.sender === 'user').map((m) => m.text),
@@ -292,7 +216,7 @@ export function OrionTerminal({
       const outcome = await handleOrionMessage({
         text: trimmed,
         ctx: agentCtx,
-        setupReady: setupStage === 'ready',
+        setupReady: startup.stage === 'ready',
         signal: controller.signal,
       });
       if (isAuthoritative(runId)) {
@@ -425,7 +349,16 @@ export function OrionTerminal({
         </span>
 
         <span className={cn('ml-auto text-[10px] font-medium', lightMode ? 'text-gray-500' : 'text-[#787b86]')}>
-          {setupStage === 'ready' ? 'ready' : setupStage === 'pulling' ? 'loading…' : 'offline'}
+          {startup.stage === 'ready'
+            ? 'ready'
+            : startup.stage === 'deterministic_only'
+              ? 'deterministic'
+              : startup.stage === 'checking_runtime' ||
+                  startup.stage === 'checking_model' ||
+                  startup.stage === 'pulling_model' ||
+                  startup.stage === 'warming_model'
+                ? 'loading…'
+                : 'offline'}
         </span>
       </div>
 
@@ -524,13 +457,20 @@ export function OrionTerminal({
         )}
       >
         <div className="flex justify-between items-center">
+          <span>
+            {startup.activeModelName}
+            {startup.stage !== 'idle' && (
+              <span className={cn('ml-2', startup.stage === 'ready' ? 'text-[#3b6fff]' : '')}>
+                {startup.stage === 'ready' ? '● ready' : `● ${startup.stage.replace(/_/g, ' ')}`}
+              </span>
+            )}
+          </span>
           <span>Type a command or question • ↑/↓ for history</span>
-          <span>'help' for commands • 'clear' to reset</span>
         </div>
       </div>
 
       <AnimatePresence>
-        {setupStage !== 'ready' && (
+        {startup.stage !== 'ready' && startup.stage !== 'deterministic_only' && (
           <motion.div
             key="boot"
             initial={{ opacity: 1 }}
@@ -541,33 +481,101 @@ export function OrionTerminal({
               lightMode ? 'bg-[#f8f9fa]' : 'bg-[#0c0c0c]'
             )}
           >
-            {setupStage === 'error' ? (
-              <div className="flex flex-col items-center gap-3 max-w-[85%] text-center">
-                <div className={cn('text-xs font-mono uppercase tracking-widest text-[#3b6fff]')}>Orion offline</div>
-                <div className={cn('text-[10px] font-mono leading-relaxed', lightMode ? 'text-gray-600' : 'text-[#787b86]')}>
-                  Ollama is not running or the <span className={lightMode ? 'text-gray-900' : 'text-[#d1d4dc]'}>{ORION_MODEL}</span> model is missing.
-                  <br />
-                  Install Ollama and pull the model, then retry.
+            {startup.stage === 'runtime_missing' ||
+            startup.stage === 'model_missing' ||
+            startup.stage === 'warmup_failed' ||
+            startup.stage === 'download_failed' ? (
+              <div className="flex flex-col items-center gap-3 max-w-[90%] text-center">
+                <AlertCircle className="h-6 w-6 text-[#3b6fff]" />
+                <div className={cn('text-xs font-mono uppercase tracking-widest', lightMode ? 'text-gray-900' : 'text-[#d1d4dc]')}>
+                  {startup.stage === 'runtime_missing' ? 'Ollama runtime missing' : `${startup.activeModelName} not ready`}
                 </div>
-                <button
-                  type="button"
-                  onClick={() => setBootKey((k) => k + 1)}
-                  className={cn(
-                    'px-3 py-1.5 text-[10px] font-mono uppercase tracking-wider rounded border transition-colors',
-                    lightMode
-                      ? 'border-gray-300 text-gray-700 hover:bg-gray-100'
-                      : 'border-[#2a2e39] text-[#d1d4dc] hover:bg-[#1a1a1a]'
+                <div className={cn('text-[10px] font-mono leading-relaxed max-w-[260px]', lightMode ? 'text-gray-600' : 'text-[#787b86]')}>
+                  {startup.error || startup.status || 'Orion could not start.'}
+                </div>
+                {startup.stage === 'model_missing' && startup.canPull && (
+                  <div className="text-[10px] font-mono leading-relaxed max-w-[260px] text-[#3b6fff]">
+                    This is a large local download (~5.6 GB for qwen3:8b).
+                  </div>
+                )}
+                {startup.stage === 'runtime_missing' && startup.canInstallOllama && (
+                  <div className="text-[10px] font-mono leading-relaxed max-w-[260px] text-[#3b6fff]">
+                    Ollama is a large local download and install.
+                  </div>
+                )}
+                <div className="flex flex-wrap items-center justify-center gap-2 mt-1">
+                  {startup.canRetry && (
+                    <button
+                      type="button"
+                      onClick={() => retryOrionStartup()}
+                      className={cn(
+                        'flex items-center gap-1.5 px-3 py-1.5 text-[10px] font-mono uppercase tracking-wider rounded border transition-colors',
+                        lightMode
+                          ? 'border-gray-300 text-gray-700 hover:bg-gray-100'
+                          : 'border-[#2a2e39] text-[#d1d4dc] hover:bg-[#1a1a1a]'
+                      )}
+                    >
+                      <RefreshCw className="h-3 w-3" />
+                      Retry
+                    </button>
                   )}
-                >
-                  Retry
-                </button>
+                  {startup.canPull && (
+                    <button
+                      type="button"
+                      onClick={() => pullSelectedModelWithConsent()}
+                      className={cn(
+                        'flex items-center gap-1.5 px-3 py-1.5 text-[10px] font-mono uppercase tracking-wider rounded border transition-colors',
+                        lightMode
+                          ? 'border-[#3b6fff] text-[#3b6fff] hover:bg-[#3b6fff]/10'
+                          : 'border-[#3b6fff] text-[#3b6fff] hover:bg-[#3b6fff]/10'
+                      )}
+                    >
+                      <Download className="h-3 w-3" />
+                      Pull {startup.activeModelName}
+                    </button>
+                  )}
+                  {startup.canInstallOllama && (
+                    <button
+                      type="button"
+                      onClick={() => installOllamaWithConsent()}
+                      className={cn(
+                        'flex items-center gap-1.5 px-3 py-1.5 text-[10px] font-mono uppercase tracking-wider rounded border transition-colors',
+                        lightMode
+                          ? 'border-[#3b6fff] text-[#3b6fff] hover:bg-[#3b6fff]/10'
+                          : 'border-[#3b6fff] text-[#3b6fff] hover:bg-[#3b6fff]/10'
+                      )}
+                    >
+                      <Download className="h-3 w-3" />
+                      Install Ollama
+                    </button>
+                  )}
+                  {startup.canContinueDeterministic && (
+                    <button
+                      type="button"
+                      onClick={() => continueDeterministicOrion()}
+                      className={cn(
+                        'flex items-center gap-1.5 px-3 py-1.5 text-[10px] font-mono uppercase tracking-wider rounded border transition-colors',
+                        lightMode
+                          ? 'border-gray-300 text-gray-700 hover:bg-gray-100'
+                          : 'border-[#2a2e39] text-[#d1d4dc] hover:bg-[#1a1a1a]'
+                      )}
+                    >
+                      <PlayCircle className="h-3 w-3" />
+                      Continue without
+                    </button>
+                  )}
+                </div>
               </div>
             ) : (
               <>
                 <CoreSpinLoader />
-                <div className={cn('text-[10px] font-mono', lightMode ? 'text-gray-500' : 'text-[#787b86]')}>{bootStatus}</div>
-                {bootProgress > 0 && (
-                  <div className={cn('text-[10px] font-mono', lightMode ? 'text-gray-500' : 'text-[#787b86]')}>{bootProgress}%</div>
+                <div className={cn('text-[10px] font-mono text-center max-w-[260px]', lightMode ? 'text-gray-500' : 'text-[#787b86]')}>
+                  {startup.status || 'Starting Orion...'}
+                </div>
+                {startup.progress >= 0 && (
+                  <div className={cn('text-[10px] font-mono', lightMode ? 'text-gray-500' : 'text-[#787b86]')}>
+                    {startup.progress}%
+                  </div>
                 )}
               </>
             )}
