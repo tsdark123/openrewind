@@ -175,16 +175,28 @@ function ollamaFetchWithTimeout(
 }
 
 /**
- * Model resolution.
- *
- * `qwen3:8b` is expensive to load; we don't want the app to trigger a
- * multi-GB download during a snappy chat message. The active model is lazily
- * verified before the first call and the result is cached for the process
- * lifetime. The cache is scoped to the model tag.
+ * Runtime reachability. Lightweight: hits /api/tags with a short timeout.
+ * Used by the startup state to decide whether the Ollama runtime is up before
+ * checking for the selected model.
  */
+const OLLAMA_RUNTIME_TIMEOUT = 3000;
+const OLLAMA_CHECK_TIMEOUT = 5000;
+
 const ensuredModels = new Set<string>();
 
-const OLLAMA_CHECK_TIMEOUT = 5000;
+export async function checkOllamaReachable(): Promise<boolean> {
+  try {
+    const res = await ollamaFetchWithTimeout(
+      '/api/tags',
+      { method: 'GET' },
+      OLLAMA_RUNTIME_TIMEOUT,
+      'Ollama is not responding'
+    );
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
 
 export async function ensureModel(model: string): Promise<{ ready: boolean; error?: string }> {
   if (ensuredModels.has(model)) return { ready: true };

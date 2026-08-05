@@ -14,7 +14,7 @@ import { OrionDrivingOverlay } from './components/ui/OrionDrivingOverlay';
 import { useWebSocket } from './hooks/useWebSocket';
 import { endSession, loadPerformanceLog } from './lib/journal';
 import { orionController } from './lib/orion/controller';
-import { warmOrionAgent } from './lib/orion/client';
+import { startOrionStartup } from './lib/orion/startupState';
 import { createExecutionContext, buildCompactStateSnapshot } from './lib/orion/agent/executionContext';
 import type { ExecutionContextStore, ExecutionContextEntry } from './lib/orion/agent/types';
 import { useDataSource, getEngineDataDir } from './lib/dataSourceContext';
@@ -517,25 +517,14 @@ export default function App() {
   useEffect(() => {
     loadPerformanceLog().then((log) => dispatch({ type: 'SET_PERFORMANCE_LOG', log }));
 
-    const bootOllamaAndWarm = async () => {
-      // Boot the local Ollama service automatically when running as a Tauri app.
-      if (isTauri) {
-        const tauri = (window as any).__TAURI_INTERNALS__;
-        await tauri?.invoke?.('ensure_ollama_running').catch((err: unknown) => {
-          console.warn('[Orion] Could not auto-start Ollama:', err);
-        });
-      }
-
-      // One-shot planner warm-up. Non-blocking for the UI; agent calls may
-      // await it so the first semantic request after launch is snappy. The
-      // client deduplicates React StrictMode double mounts and ignores failure.
-      warmOrionAgent().catch(() => {});
-    };
-
-    bootOllamaAndWarm();
-    return () => {}; // no cleanup needed — warmOrionAgent deduplicates by module state
+    // Start the authoritative Orion startup sequence in the background.
+    // It checks the Ollama runtime, the selected certified model, downloads
+    // missing pieces with consent, and warms the model. It never blocks the
+    // DataSourceMenu or the workspace; deterministic chart commands remain
+    // available while the model is warming.
+    startOrionStartup();
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);  // run once on mount; onDataSynced and the connected effect handle subsequent refreshes
+  }, []);  // run once on mount
 
   // --- Re-fetch tickers whenever we enter the workspace or the data source changes ---
   useEffect(() => {
