@@ -426,6 +426,7 @@ export interface ExecutionContextEntry {
     | 'unrecognized'
     | 'recent-action-summary'
     | 'error'
+    | 'aborted'
     | 'ui-action';
   /** For non-replayable UI/system entries, the kind of action recorded. */
   actionKind?: 'chart_reset';

@@ -86,6 +86,33 @@ export function OrionTerminal({
   const historyIndexRef = useRef(-1);
   const bootAttemptIdRef = useRef(0);
 
+  // Authoritative-run ownership. Only the latest runId may append output,
+  // clear isTyping, or update the pending abort controller.
+  const runIdRef = useRef(0);
+  const latestRunIdRef = useRef(0);
+  const pendingControllerRef = useRef<{ runId: number; controller: AbortController } | null>(null);
+
+  const isAuthoritative = (runId: number) => latestRunIdRef.current === runId;
+
+  const releasePending = (runId: number) => {
+    if (pendingControllerRef.current?.runId === runId) {
+      pendingControllerRef.current = null;
+    }
+  };
+
+  const clearTypingIfAuthoritative = (runId: number) => {
+    if (isAuthoritative(runId)) {
+      setIsTyping(false);
+    }
+  };
+
+  // Cancel the active terminal request on unmount.
+  useEffect(() => {
+    return () => {
+      pendingControllerRef.current?.controller.abort();
+    };
+  }, []);
+
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -208,7 +235,18 @@ export function OrionTerminal({
 
   const handleSend = async () => {
     const trimmed = input.trim();
-    if (!trimmed || isTyping) return;
+    if (!trimmed) return;
+
+    // Start a new authoritative run. A newer prompt can supersede an
+    // in-flight one; the old run will discover it is no longer authoritative
+    // and silently clean up.
+    const runId = ++runIdRef.current;
+    latestRunIdRef.current = runId;
+
+    pendingControllerRef.current?.controller.abort();
+
+    const controller = new AbortController();
+    pendingControllerRef.current = { runId, controller };
 
     const userMessage: ChatMessage = { sender: 'user', text: trimmed };
     const nextMessages = [...messages, userMessage];
@@ -216,6 +254,25 @@ export function OrionTerminal({
     setInput('');
     historyIndexRef.current = -1;
     setIsTyping(true);
+
+    const ownedAppend = (text: string) => {
+      if (isAuthoritative(runId)) {
+        setThreads((prev) => appendMessage(prev, threadKey, { sender: 'ai', text }));
+      }
+    };
+
+    const ownedAppendError = (text: string) => {
+      if (isAuthoritative(runId)) {
+        setThreads((prev) => appendMessage(prev, threadKey, { sender: 'ai', text }));
+      }
+    };
+
+    const cleanup = (clearSpinner = true) => {
+      releasePending(runId);
+      if (clearSpinner) {
+        clearTypingIfAuthoritative(runId);
+      }
+    };
 
     const agentCtx: AgentContext = {
       getState: () => appStateRef.current,
@@ -236,21 +293,33 @@ export function OrionTerminal({
         text: trimmed,
         ctx: agentCtx,
         setupReady: setupStage === 'ready',
+        signal: controller.signal,
       });
-      lastResultRef.current = outcome.result ?? undefined;
-      console.log('[orion-trace] orchestrator result:', outcome);
-      setThreads((prev) => appendMessage(prev, threadKey, { sender: 'ai', text: outcome.message }));
+      if (isAuthoritative(runId)) {
+        lastResultRef.current = outcome.result ?? undefined;
+        console.log('[orion-trace] orchestrator result:', outcome);
+        if (outcome.route !== 'aborted') {
+          if (outcome.message) {
+            ownedAppend(outcome.message);
+          } else if (outcome.route === 'error' && !outcome.ok) {
+            ownedAppendError('Orion could not process that request.');
+          }
+        }
+      }
     } catch (err) {
+      const code = (err as { code?: string }).code;
       const detail = err instanceof Error ? err.message : String(err);
-      setThreads((prev) => appendMessage(prev, threadKey, { sender: 'ai', text: `Orion couldn't run that: ${detail}` }));
+      if (code !== 'ABORTED') {
+        ownedAppendError(`Orion couldn't run that: ${detail}`);
+      }
     } finally {
-      setIsTyping(false);
+      cleanup();
     }
   };
 
   const handleTerminalSubmit = () => {
     const lower = input.trim().toLowerCase();
-    if (!lower || isTyping) return;
+    if (!lower) return;
 
     if (lower === 'clear') {
       handleResetChat();
@@ -423,7 +492,6 @@ export function OrionTerminal({
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
               placeholder="Ask Orion or type help"
-              disabled={isTyping}
               className={cn(
                 'flex-1 bg-transparent outline-none caret-[#3b6fff]',
                 lightMode ? 'text-gray-900 placeholder:text-gray-400' : 'text-white placeholder:text-[#787b86]'
@@ -434,7 +502,7 @@ export function OrionTerminal({
             <button
               type="button"
               onClick={handleTerminalSubmit}
-              disabled={!input.trim() || isTyping}
+              disabled={!input.trim()}
               className={cn(
                 'flex h-7 w-7 items-center justify-center rounded transition-colors',
                 input.trim() && !isTyping ? 'text-[#3b6fff] hover:bg-[#3b6fff]/10' : 'text-[#787b86]'

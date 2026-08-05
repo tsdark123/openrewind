@@ -420,7 +420,11 @@ class OrionControllerImpl {
       this.setStatus('idle');
       return { ok: true };
     } catch (e) {
-      const reason = e instanceof Error ? e.message : String(e);
+      const rawReason = e instanceof Error ? e.message : String(e);
+      const code = (e as { code?: string }).code;
+      const isAborted = code === 'ABORTED' || rawReason === 'cancelled';
+      const isTimeout = code === 'TIMEOUT';
+      const reason = isAborted ? 'cancelled' : rawReason;
       this.log('error', `Task failed: ${reason}`);
       if (this.snapshot) {
         try {
@@ -429,8 +433,11 @@ class OrionControllerImpl {
           /* best effort — user can manually restart */
         }
       }
-      if (reason !== 'cancelled') {
-        await this.bridge?.postChatMessage(`Orion task failed: ${reason}`).catch(() => {});
+      if (!isAborted) {
+        const message = isTimeout
+          ? 'The local model did not respond in time. Please try again.'
+          : `Orion task failed: ${reason}`;
+        await this.bridge?.postChatMessage(message).catch(() => {});
       }
       this.setStatus('idle');
       return { ok: false, reason };

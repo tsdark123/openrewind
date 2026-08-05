@@ -362,7 +362,21 @@ export async function orionChat(opts: OrionChatOptions): Promise<OrionChatRespon
     ? (data.message.tool_calls as OrionToolCall[])
     : [];
   const total = Date.now() - start;
-  agentTrace('orionChat end', { tier: opts.tier, model, total, firstToken: total, contentLength: content.length });
+  agentTrace('orionChat end', {
+    tier: opts.tier,
+    model,
+    total,
+    firstToken: total,
+    contentLength: content.length,
+    ollama: {
+      total_duration: data?.total_duration,
+      load_duration: data?.load_duration,
+      prompt_eval_duration: data?.prompt_eval_duration,
+      eval_duration: data?.eval_duration,
+      prompt_eval_count: data?.prompt_eval_count,
+      eval_count: data?.eval_count,
+    },
+  });
   return { content, toolCalls, raw: data };
 }
 

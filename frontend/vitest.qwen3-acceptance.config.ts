@@ -7,7 +7,7 @@ export default defineConfig({
     env: {
       OLLAMA_BASE_URL: 'http://127.0.0.1:11434',
       ORION_AGENT_MODEL: 'qwen3:8b',
-      ORION_CHAT_TIMEOUT_MS: '120000',
+      ORION_CHAT_TIMEOUT_MS: '90000',
     },
   },
 });

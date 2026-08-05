@@ -258,7 +258,8 @@ describe('Bounded model request policy', () => {
     const second = handleOrionMessage({ text: 'switch to MSFT', ctx, setupReady: true });
 
     const [firstResult] = await Promise.all([first, second]);
-    expect(firstResult.message).toMatch(/cancelled|new one started/i);
+    expect(firstResult.route).toBe('aborted');
+    expect(firstResult.message).toBe('');
 
     // The second call should still be able to proceed (route may be resolve or deterministic).
     const secondResult = await second;
@@ -274,5 +275,40 @@ describe('Bounded model request policy', () => {
     expect(orionChat).toHaveBeenCalled();
     const call = vi.mocked(orionChat).mock.calls[0]?.[0];
     expect(call?.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it('A → B → C rapid supersession leaves only C authoritative', async () => {
+    const ctx = makeCtx();
+    ctx.getState().symbol = 'AAPL';
+    ctx.getState().sessionActive = true;
+
+    vi.mocked(orionChat).mockImplementation(async (opts) => {
+      // Respect the abort signal: once it is aborted, reject with ABORTED.
+      return new Promise((resolve, reject) => {
+        const check = () => {
+          if (opts.signal?.aborted) {
+            reject(Object.assign(new Error('aborted by newer run'), { code: 'ABORTED' }));
+            return;
+          }
+          setTimeout(check, 5);
+        };
+        check();
+      });
+    });
+
+    const a = handleOrionMessage({ text: 'what kind of candle am I on right now', ctx, setupReady: true });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const b = handleOrionMessage({ text: 'compare first and last hour', ctx, setupReady: true });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const c = handleOrionMessage({ text: 'switch to MSFT', ctx, setupReady: true });
+
+    const [aResult, bResult, cResult] = await Promise.all([a, b, c]);
+
+    expect(aResult.route).toBe('aborted');
+    expect(aResult.message).toBe('');
+    expect(bResult.route).toBe('aborted');
+    expect(bResult.message).toBe('');
+    expect(cResult.route).toBe('deterministic');
+    expect(cResult.ok).toBe(true);
   });
 });

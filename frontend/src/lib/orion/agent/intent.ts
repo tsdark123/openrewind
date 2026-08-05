@@ -1314,7 +1314,7 @@ export interface IntentExtractionOptions {
 
 export type IntentExtractionResult =
   | { ok: true; intent: ChartActionIntent; elapsed: number }
-  | { ok: false; kind: 'clarification' | 'unsupported' | 'invalid' | 'offline'; message: string; elapsed: number };
+  | { ok: false; kind: 'clarification' | 'unsupported' | 'invalid' | 'offline' | 'aborted'; message: string; elapsed: number };
 
 const MAX_REPAIR_ATTEMPTS = 1;
 
@@ -1358,11 +1358,11 @@ export async function extractSemanticIntent(
       const err = e instanceof Error ? e.message : String(e);
       const code = (e as { code?: string })?.code;
       agentTrace('llm intent failed', { err, code });
+      if (code === 'ABORTED') {
+        return { ok: false, kind: 'aborted', message: '', elapsed: Date.now() - start };
+      }
       if (code === 'TIMEOUT') {
         return { ok: false, kind: 'offline', message: 'The local model did not respond in time. Please try again.', elapsed: Date.now() - start };
-      }
-      if (code === 'ABORTED') {
-        return { ok: false, kind: 'offline', message: 'Orion cancelled the request because a new one started.', elapsed: Date.now() - start };
       }
       return { ok: false, kind: 'offline', message: `The agent model is not available right now (${err}).`, elapsed: Date.now() - start };
     }

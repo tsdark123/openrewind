@@ -76,9 +76,35 @@ export function OrionChatSidepanel({
   const [isTyping, setIsTyping] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  // AbortController for the in-flight model call. A new user message cancels
-  // the previous one so the UI never stays stuck on a stale request.
-  const pendingControllerRef = useRef<AbortController | null>(null);
+  // Authoritative-run ownership. A monotonically increasing runId and the
+  // AbortController for the in-flight request. Only the latest runId may
+  // append messages, clear isTyping, or update pending-controller ownership.
+  const runIdRef = useRef(0);
+  const latestRunIdRef = useRef(0);
+  const pendingControllerRef = useRef<{ runId: number; controller: AbortController } | null>(null);
+
+  const isAuthoritative = (runId: number) => latestRunIdRef.current === runId;
+
+  const releasePending = (runId: number) => {
+    if (pendingControllerRef.current?.runId === runId) {
+      pendingControllerRef.current = null;
+    }
+  };
+
+  const clearTypingIfAuthoritative = (runId: number) => {
+    if (isAuthoritative(runId)) {
+      setIsTyping(false);
+    }
+  };
+
+  // Abort any in-flight request when the component unmounts so a page close
+  // or sidepanel unmount doesn't leave a hung model call running.
+  useEffect(() => {
+    return () => {
+      pendingControllerRef.current?.controller.abort();
+      orionController.cancel();
+    };
+  }, []);
 
   // Live app-state ref for async helpers (intervals/waiters) that cannot see
   // the latest render-propped state inside closures.
@@ -144,32 +170,49 @@ export function OrionChatSidepanel({
     setThreads((prev) => setThreadMessages(prev, threadKey, [DEFAULT_GREETING]));
   };
 
-  const cleanupPending = (controller: AbortController) => {
-    if (pendingControllerRef.current === controller) {
-      pendingControllerRef.current = null;
-    }
-  };
-
   const handleSend = async () => {
     const trimmed = input.trim();
     if (!trimmed) return;
 
-    // Cancel any in-flight model call (chat or agent) before starting a new
-    // turn. This prevents a slow/hung response from locking the input forever.
-    if (pendingControllerRef.current) {
-      pendingControllerRef.current.abort();
-      pendingControllerRef.current = null;
-    }
+    // Start a new authoritative run. Only this run may mutate the UI.
+    const runId = ++runIdRef.current;
+    latestRunIdRef.current = runId;
+
+    // Cancel the previous in-flight model call and any agent task. The old
+    // run will see it is no longer authoritative and silently clean up.
+    pendingControllerRef.current?.controller.abort();
     orionController.cancel();
 
     const controller = new AbortController();
-    pendingControllerRef.current = controller;
+    pendingControllerRef.current = { runId, controller };
 
     const userMessage: ChatMessage = { sender: 'user', text: trimmed };
     const nextMessages = [...messages, userMessage];
     setThreads((prev) => setThreadMessages(prev, threadKey, nextMessages));
     setInput('');
     setIsTyping(true);
+
+    // Helpers that enforce that only the authoritative run touches UI state.
+    const ownedAppend = (text: string) => {
+      if (isAuthoritative(runId)) {
+        setThreads((prev) => appendMessage(prev, threadKey, { sender: 'ai', text }));
+      }
+    };
+
+    const ownedAppendError = (text: string) => {
+      ownedAppend(text);
+    };
+
+    const cleanup = (clearSpinner = true) => {
+      releasePending(runId);
+      if (clearSpinner) {
+        clearTypingIfAuthoritative(runId);
+      }
+    };
+
+    // If the run is no longer authoritative (a newer message superseded it)
+    // or the request was already aborted, stop before doing any work.
+    const guardContinue = () => isAuthoritative(runId) && !controller.signal.aborted;
 
     // Chart-control planner: extracts entities (symbol/date/times/speed/
     // direction) from the message, looks at the live chart state, and runs the
@@ -187,20 +230,24 @@ export function OrionChatSidepanel({
           cmd = smart;
         }
       } catch (err) {
+        const code = (err as { code?: string }).code;
+        if (code === 'ABORTED') {
+          cleanup();
+          return;
+        }
         console.warn('[Orion] LLM chart parse failed:', err);
       }
     }
 
+    if (!guardContinue()) {
+      cleanup();
+      return;
+    }
+
     if (cmd.intent !== 'unknown') {
       if (availableTickers.length === 0) {
-        setThreads((prev) =>
-          appendMessage(prev, threadKey, {
-            sender: 'ai',
-            text: "The OpenRewind chart engine is not connected, so I can't control the chart right now.",
-          })
-        );
-        setIsTyping(false);
-        cleanupPending(controller);
+        ownedAppendError("The OpenRewind chart engine is not connected, so I can't control the chart right now.");
+        cleanup();
         return;
       }
 
@@ -215,18 +262,20 @@ export function OrionChatSidepanel({
         send,
         dispatch,
         onSwitchSymbol,
-        onMessage: (text) => setThreads((prev) => appendMessage(prev, threadKey, { sender: 'ai', text })),
+        onMessage: ownedAppend,
       };
       try {
         const result = await executeChartCommand(cmd, plannerCtx);
         console.log('[orion-trace] executeChartCommand result:', result);
-        setThreads((prev) => appendMessage(prev, threadKey, { sender: 'ai', text: result.message }));
+        ownedAppend(result.message);
       } catch (err) {
         const detail = err instanceof Error ? err.message : String(err);
-        setThreads((prev) => appendMessage(prev, threadKey, { sender: 'ai', text: `Orion couldn't run that: ${detail}` }));
+        const code = (err as { code?: string }).code;
+        if (code !== 'ABORTED') {
+          ownedAppendError(`Orion couldn't run that: ${detail}`);
+        }
       } finally {
-        setIsTyping(false);
-        cleanupPending(controller);
+        cleanup();
       }
       return;
     }
@@ -234,27 +283,25 @@ export function OrionChatSidepanel({
     if (setupStage !== 'ready') {
       const common = commonSenseReply(trimmed, false);
       if (common) {
-        setThreads((prev) => appendMessage(prev, threadKey, { sender: 'ai', text: common }));
-        setIsTyping(false);
-        cleanupPending(controller);
-        return;
+        ownedAppend(common);
+      } else {
+        const suggestion = suggestCommand(trimmed);
+        const text = suggestion
+          ? `"${trimmed}" is not recognized as a request. Did you mean "${suggestion}"?`
+          : `"${trimmed}" is not recognized as a request. Try 'help' to see available commands.`;
+        ownedAppendError(text);
       }
-      const suggestion = suggestCommand(trimmed);
-      const text = suggestion
-        ? `"${trimmed}" is not recognized as a request. Did you mean "${suggestion}"?`
-        : `"${trimmed}" is not recognized as a request. Try 'help' to see available commands.`;
-      setThreads((prev) => appendMessage(prev, threadKey, { sender: 'ai', text }));
-      setIsTyping(false);
-      cleanupPending(controller);
+      cleanup();
       return;
     }
 
     // Route the turn through the two-tier model: a chat message stays on
     // llama3.2 (snappy); a task-flavored message ("go to AAPL and run…")
-    // gets the llama3.1:8b tool-calling brain. See `router.ts` for the
-    // rulebook.
+    // gets the agent tool-calling brain.
     const decision = classifyOrionIntent(trimmed);
-    setLastIntent(decision.intent);
+    if (isAuthoritative(runId)) {
+      setLastIntent(decision.intent);
+    }
 
     const wantsAgent = decision.intent === 'agent';
     let effectiveTier: 'chat' | 'agent' = decision.intent;
@@ -266,19 +313,27 @@ export function OrionChatSidepanel({
     // turn so the conversation stays alive.
     if (wantsAgent && agentModelStatus !== 'ready') {
       if (agentModelStatus === 'unknown' || agentModelStatus === 'missing') {
-        setAgentModelStatus('pulling');
-        setAgentPullPercent(0);
+        if (isAuthoritative(runId)) {
+          setAgentModelStatus('pulling');
+          setAgentPullPercent(0);
+        }
         // Kick off the pull in the background; do NOT await here so the
         // current turn responds quickly on the chat model.
         void (async () => {
           try {
             await pullOrionModel(ORION_AGENT_MODEL, (pct) => {
-              if (pct >= 0) setAgentPullPercent(pct);
+              if (pct >= 0 && isAuthoritative(runId)) {
+                setAgentPullPercent(pct);
+              }
             });
-            setAgentModelStatus('ready');
+            if (isAuthoritative(runId)) {
+              setAgentModelStatus('ready');
+            }
           } catch (e) {
             console.warn('[Orion] Agent model pull failed:', e);
-            setAgentModelStatus('missing');
+            if (isAuthoritative(runId)) {
+              setAgentModelStatus('missing');
+            }
           }
         })();
       }
@@ -293,6 +348,10 @@ export function OrionChatSidepanel({
       // Give a cancelled previous task a moment to clean up; then run.
       let result: Awaited<ReturnType<typeof orionController.runAgentTask>> | null = null;
       for (let wait = 0; wait <= 300; wait += 50) {
+        if (!guardContinue()) {
+          cleanup();
+          return;
+        }
         if (orionController.status === 'idle') {
           result = await orionController.runAgentTask(trimmed);
           break;
@@ -300,31 +359,32 @@ export function OrionChatSidepanel({
         await new Promise((resolve) => setTimeout(resolve, 50));
       }
       if (!result) {
-        setThreads((prev) =>
-          appendMessage(prev, threadKey, { sender: 'ai', text: 'Orion is still finishing the previous task. Press Esc to cancel it first.' })
-        );
-        cleanupPending(controller);
-        setIsTyping(false);
+        if (isAuthoritative(runId)) {
+          ownedAppendError('Orion is still finishing the previous task. Press Esc to cancel it first.');
+        }
+        cleanup();
         return;
       }
       try {
-        if (!result.ok) {
-          setThreads((prev) =>
-            appendMessage(prev, threadKey, {
-              sender: 'ai',
-              text: `Orion task could not start: ${result.reason ?? 'unknown'}.`,
-            })
-          );
-        } else {
-          const latest = await loadOrionThreads();
-          setThreads(latest);
+        if (isAuthoritative(runId)) {
+          if (!result.ok) {
+            if (result.reason !== 'cancelled') {
+              ownedAppendError(`Orion task could not start: ${result.reason ?? 'unknown'}.`);
+            }
+          } else {
+            const latest = await loadOrionThreads();
+            if (isAuthoritative(runId)) {
+              setThreads(latest);
+            }
+          }
         }
       } catch (err) {
-        const detail = err instanceof Error ? err.message : String(err);
-        setThreads((prev) => appendMessage(prev, threadKey, { sender: 'ai', text: `Orion task failed: ${detail}` }));
+        if (isAuthoritative(runId)) {
+          const detail = err instanceof Error ? err.message : String(err);
+          ownedAppendError(`Orion task failed: ${detail}`);
+        }
       } finally {
-        setIsTyping(false);
-        cleanupPending(controller);
+        cleanup();
       }
       return;
     }
@@ -372,30 +432,33 @@ export function OrionChatSidepanel({
       });
 
       // First successful agent-tier call confirms the model is present.
-      if (effectiveTier === 'agent' && agentModelStatus !== 'ready') {
+      if (effectiveTier === 'agent' && isAuthoritative(runId)) {
         setAgentModelStatus('ready');
       }
 
       const reply = response.content || 'No response content.';
       const finalText = modeNotice ? `${modeNotice}\n\n${reply}` : reply;
-      setThreads((prev) => appendMessage(prev, threadKey, { sender: 'ai', text: finalText }));
+      ownedAppend(finalText);
     } catch (err) {
-      const code = (err as { code?: string })?.code;
-      const detail = err instanceof Error ? err.message : String(err);
-      let message: string;
-      if (code === 'MODEL_MISSING') {
-        message = `Orion needs the ${effectiveTier === 'agent' ? ORION_AGENT_MODEL : 'chat'} model pulled locally. Pull it via Ollama and retry.`;
-      } else if (code === 'TIMEOUT') {
-        message = 'The local model did not respond in time. Please try again.';
-      } else if (code === 'ABORTED') {
-        message = 'Orion cancelled the previous request.';
-      } else {
-        message = `Orion is offline — start Ollama locally and ensure the model is pulled. (${detail})`;
+      if (isAuthoritative(runId)) {
+        const code = (err as { code?: string })?.code;
+        const detail = err instanceof Error ? err.message : String(err);
+        let text: string;
+        if (code === 'MODEL_MISSING') {
+          text = `Orion needs the ${effectiveTier === 'agent' ? ORION_AGENT_MODEL : 'chat'} model pulled locally. Pull it via Ollama and retry.`;
+        } else if (code === 'TIMEOUT') {
+          text = 'The local model did not respond in time. Please try again.';
+        } else if (code === 'ABORTED') {
+          text = ''; // Superseded runs are silent.
+        } else {
+          text = `Orion is offline — start Ollama locally and ensure the model is pulled. (${detail})`;
+        }
+        if (text) {
+          setThreads((prev) => appendMessage(prev, threadKey, { sender: 'ai', text }));
+        }
       }
-      setThreads((prev) => appendMessage(prev, threadKey, { sender: 'ai', text: message }));
     } finally {
-      setIsTyping(false);
-      cleanupPending(controller);
+      cleanup();
     }
   };
 

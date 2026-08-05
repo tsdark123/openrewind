@@ -71,6 +71,8 @@ export interface OrchestratorOptions {
   text: string;
   /** Current agent context (state, send, dispatch, chartRef, etc.). */
   ctx: AgentContext;
+  /** Optional caller AbortSignal so the component can cancel this request. */
+  signal?: AbortSignal;
 }
 
 export interface OrchestratorResult {
@@ -83,7 +85,7 @@ export interface OrchestratorResult {
   /** Execution result, if an action plan ran. */
   result?: AgentExecutionResult;
   /** Route chosen for diagnostics. */
-  route: 'chat' | 'deterministic' | 'resolve' | 'llm-plan' | 'clarification' | 'unsupported' | 'unrecognized' | 'recent-action-summary' | 'error';
+  route: 'chat' | 'deterministic' | 'resolve' | 'llm-plan' | 'clarification' | 'unsupported' | 'unrecognized' | 'recent-action-summary' | 'error' | 'aborted';
 }
 
 interface RouteOutput {
@@ -404,11 +406,11 @@ async function runChat(text: string, ctx: AgentContext, setupReady: boolean, sta
     const code = (e as { code?: string }).code;
     console.warn('[orchestrator] chat failed:', err);
     agentTrace('llm chat failed', { text, total, error: err, code });
+    if (code === 'ABORTED') {
+      throw Object.assign(new Error('superseded'), { code: 'ABORTED' });
+    }
     if (code === 'TIMEOUT') {
       return 'The local model did not respond in time. Please try again.';
-    }
-    if (code === 'ABORTED') {
-      return 'Orion cancelled the request because a new one started.';
     }
     return `I'm here, but my chat model is not responding right now (${err}). What would you like to do?`;
   }
@@ -1232,6 +1234,11 @@ async function routeMessage(
     }
 
     const { kind, message } = extraction;
+    if (kind === 'aborted') {
+      agentTrace('route', 'aborted');
+      return { ok: false, message: '', wasChat: false, route: 'aborted' };
+    }
+
     if (kind === 'clarification') {
       agentTrace('route', 'clarification');
       return { ok: true, message, wasChat: true, route: 'clarification' };
@@ -1259,11 +1266,20 @@ async function routeMessage(
 }
 
 export async function handleOrionMessage(opts: OrchestratorOptions): Promise<OrchestratorResult> {
-  const { text, ctx, setupReady } = opts;
+  const { text, ctx, setupReady, signal } = opts;
 
   cancelPreviousPlan();
   const token = newCancellation();
   const thisController = activeAbortController;
+
+  // Wire the optional caller signal into this request's cancellation so a
+  // component unmount or a newer prompt can abort the in-flight model call.
+  if (signal) {
+    signal.addEventListener('abort', () => {
+      token.cancel('aborted-by-caller');
+      thisController?.abort();
+    }, { once: true });
+  }
 
   agentTrace('handleOrionMessage start', text, { tickers: ctx.availableTickers.length });
 
@@ -1275,9 +1291,14 @@ export async function handleOrionMessage(opts: OrchestratorOptions): Promise<Orc
   } catch (e) {
     const err = e instanceof Error ? e.message : String(e);
     const code = (e as { code?: string }).code;
-    console.error('[orchestrator] route failed:', e);
-    agentTrace('route', 'error', { error: err, code });
-    routeOutput = { ok: false, message: `Internal error: ${err}`, wasChat: false, route: 'error' };
+    if (code === 'ABORTED') {
+      agentTrace('route', 'aborted');
+      routeOutput = { ok: false, message: '', wasChat: false, route: 'aborted' };
+    } else {
+      console.error('[orchestrator] route failed:', e);
+      agentTrace('route', 'error', { error: err, code });
+      routeOutput = { ok: false, message: `Internal error: ${err}`, wasChat: false, route: 'error' };
+    }
   } finally {
     if (activeAbortController === thisController) {
       activeAbortController = null;

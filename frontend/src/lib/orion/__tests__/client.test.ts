@@ -219,4 +219,115 @@ describe('orion client warm-up', () => {
 
     vi.useRealTimers();
   });
+
+  it('rejects immediately when the signal is already aborted', async () => {
+    const fetchMock = makeFetchMock((url) => {
+      if (url.includes('/api/show')) {
+        return { ok: true, status: 200, json: () => ({}) };
+      }
+      return new Promise<Response>(() => { /* never resolves */ });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const client = await import('../client');
+    const controller = new AbortController();
+    controller.abort();
+
+    const start = Date.now();
+    await expect(client.orionChat({
+      tier: 'chat',
+      messages: [{ role: 'user', content: 'already cancelled' }],
+      signal: controller.signal,
+      timeout: 120000,
+    })).rejects.toMatchObject({
+      code: 'ABORTED',
+    });
+    expect(Date.now() - start).toBeLessThan(100);
+  });
+
+  it('aborts the underlying fetch signal when the request times out', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let capturedInit: RequestInit | undefined;
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (String(url).includes('/api/show')) {
+        return { ok: true, status: 200, json: () => ({}) } as unknown as Response;
+      }
+      capturedInit = init;
+      return new Promise<Response>(() => {});
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const client = await import('../client');
+    const call = client.orionChat({
+      tier: 'chat',
+      messages: [{ role: 'user', content: 'timeout fetch' }],
+      timeout: 800,
+    });
+
+    vi.advanceTimersByTime(800);
+    await expect(call).rejects.toMatchObject({ code: 'TIMEOUT' });
+
+    expect(capturedInit).toBeDefined();
+    expect(capturedInit!.signal).toBeInstanceOf(AbortSignal);
+    expect(capturedInit!.signal!.aborted).toBe(true);
+
+    vi.useRealTimers();
+  });
+
+  it('cleans up the timeout and listeners after a successful response', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const fetchMock = makeFetchMock((url) => {
+      if (url.includes('/api/show')) {
+        return { ok: true, status: 200, json: () => ({}) };
+      }
+      return { ok: true, status: 200, json: () => ({ message: { content: 'ok' } }) };
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const client = await import('../client');
+    const result = await client.orionChat({
+      tier: 'chat',
+      messages: [{ role: 'user', content: 'quick' }],
+      timeout: 1000,
+    });
+
+    expect(result.content).toBe('ok');
+    // If the timer was not cleaned, advancing time would trigger an unhandled
+    // rejection or stale abort. There is no active timeout left.
+    vi.advanceTimersByTime(2000);
+    expect(result.content).toBe('ok');
+
+    vi.useRealTimers();
+  });
+
+  it('cleans up the timeout and listeners after an external abort', async () => {
+    const fetchMock = makeFetchMock((url) => {
+      if (url.includes('/api/show')) {
+        return { ok: true, status: 200, json: () => ({}) };
+      }
+      return new Promise<Response>(() => {});
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const client = await import('../client');
+    const controller = new AbortController();
+    const call = client.orionChat({
+      tier: 'chat',
+      messages: [{ role: 'user', content: 'cancelled' }],
+      signal: controller.signal,
+      timeout: 120000,
+    });
+
+    controller.abort();
+    await expect(call).rejects.toMatchObject({ code: 'ABORTED' });
+
+    // No leftover references to the abort controller means the original
+    // object can be garbage-collected; the runtime will not fire its handlers.
+    const afterRejection = client.orionChat({
+      tier: 'chat',
+      messages: [{ role: 'user', content: 'next' }],
+      timeout: 100,
+    });
+    await expect(afterRejection).rejects.toMatchObject({ code: 'TIMEOUT' });
+  });
 });

@@ -285,12 +285,6 @@ type ReportEntry = {
 
 const runtimeReport: ReportEntry[] = [];
 
-let sharedCtx: AgentContext | undefined;
-let a2: OrchestratorResult | undefined;
-let b5: OrchestratorResult | undefined;
-let a4: OrchestratorResult | undefined;
-let c11: OrchestratorResult | undefined;
-
 function record(label: string, prompt: string, result: OrchestratorResult, extra?: Record<string, unknown>) {
   const entry: ReportEntry = {
     label,
@@ -422,87 +416,139 @@ function writeRuntimeReport(failures: string[], ground: Record<string, unknown>)
 }
 
 describe('Phase 6A.3 real runtime acceptance', () => {
+  let sharedCtx: AgentContext | null = null;
+  let a2: OrchestratorResult | undefined;
+  let b5: OrchestratorResult | undefined;
+  let a4: OrchestratorResult | undefined;
+  let c11: OrchestratorResult | undefined;
+  const phaseFailures: string[] = [];
+
   beforeAll(() => {
     clearSessionHistory();
+    runtimeReport.length = 0;
+    phaseFailures.length = 0;
+    sharedCtx = null;
+    a2 = undefined;
+    b5 = undefined;
+    a4 = undefined;
+    c11 = undefined;
   });
 
   it(
-    'A-B: single-shot analysis prompts against the real engine and qwen3:8b',
+    'A.1: setup Switch to AAPL 2026-07-10 1m.',
     async () => {
       const ctx = makeCtx();
       const failures: string[] = [];
-
-      // Establish real AAPL session
       const setup = await handleOrionMessage({
         text: 'Switch to AAPL 2026-07-10 1m.',
         ctx,
         setupReady: true,
       });
-      record('setup', 'Switch to AAPL 2026-07-10 1m.', setup);
-      if (!setup.ok) failures.push('setup failed');
+      record('A.1', 'Switch to AAPL 2026-07-10 1m.', setup);
+      if (!setup.ok) failures.push('A.1 setup failed');
 
       // Pre-fetch AAPL candles for independent verification
       await fetchCandles({ symbol: 'AAPL', date: '2026-07-10', timeframe: 1, limit: 5000 }, API_BASE);
+      sharedCtx = ctx;
+      phaseFailures.push(...failures);
+      expect(failures).toEqual([]);
+    },
+    TEST_TIMEOUT
+  );
 
-      // A.1
+  it(
+    'A.2: How did AAPL do today?',
+    async () => {
+      const ctx = sharedCtx ?? makeCtx();
+      const failures: string[] = [];
       const a1 = await handleOrionMessage({ text: 'How did AAPL do today?', ctx, setupReady: true });
-      record('A.1', 'How did AAPL do today?', a1);
+      record('A.2', 'How did AAPL do today?', a1);
       if (!a1.ok || a1.route !== 'llm-plan') {
-        failures.push('A.1 route/ok');
-      } else {
-        const analysisSteps = a1.plan!.steps.filter((s) => s.capability.startsWith('analysis.'));
-        if (analysisSteps.length !== 1) failures.push(`A.1 expected 1 analysis step, got ${analysisSteps.length}`);
-        const step = analysisSteps[0];
-        if (step && step.capability !== 'analysis.window_summary') {
-          failures.push(`A.1 expected window_summary, got ${step.capability}`);
-        }
-        if (step && (step.args.window as any)?.kind !== 'whole_session') {
-          failures.push('A.1 expected whole_session window');
-        }
-      }
-
-      // A.2
-      a2 = await handleOrionMessage({ text: 'range first hour', ctx, setupReady: true });
-      record('A.2', 'range first hour', a2);
-      if (!a2.ok || a2.route !== 'llm-plan') {
         failures.push('A.2 route/ok');
       } else {
-        const analysisSteps = a2.plan!.steps.filter((s) => s.capability.startsWith('analysis.'));
+        const analysisSteps = a1.plan!.steps.filter((s) => s.capability.startsWith('analysis.'));
         if (analysisSteps.length !== 1) failures.push(`A.2 expected 1 analysis step, got ${analysisSteps.length}`);
         const step = analysisSteps[0];
-        if (step?.capability !== 'analysis.window_ohlc') failures.push('A.2 expected window_ohlc');
-        if (step && !isFirstHourWindow(step.args.window)) failures.push('A.2 expected first-hour window');
+        if (step && step.capability !== 'analysis.window_summary') {
+          failures.push(`A.2 expected window_summary, got ${step.capability}`);
+        }
+        if (step && (step.args.window as any)?.kind !== 'whole_session') {
+          failures.push('A.2 expected whole_session window');
+        }
       }
+      sharedCtx = ctx;
+      phaseFailures.push(...failures);
+      expect(failures).toEqual([]);
+    },
+    TEST_TIMEOUT
+  );
 
-      // A.3
-      const a3 = await handleOrionMessage({ text: 'how much did it move up to where im at', ctx, setupReady: true });
-      record('A.3', 'how much did it move up to where im at', a3);
-      if (!a3.ok || a3.route !== 'llm-plan') {
+  it(
+    'A.3: range first hour',
+    async () => {
+      const ctx = sharedCtx ?? makeCtx();
+      const failures: string[] = [];
+      a2 = await handleOrionMessage({ text: 'range first hour', ctx, setupReady: true });
+      record('A.3', 'range first hour', a2);
+      if (!a2.ok || a2.route !== 'llm-plan') {
         failures.push('A.3 route/ok');
       } else {
-        const analysisSteps = a3.plan!.steps.filter((s) => s.capability.startsWith('analysis.'));
+        const analysisSteps = a2.plan!.steps.filter((s) => s.capability.startsWith('analysis.'));
         if (analysisSteps.length !== 1) failures.push(`A.3 expected 1 analysis step, got ${analysisSteps.length}`);
         const step = analysisSteps[0];
+        if (step?.capability !== 'analysis.window_ohlc') failures.push('A.3 expected window_ohlc');
+        if (step && !isFirstHourWindow(step.args.window)) failures.push('A.3 expected first-hour window');
+      }
+      sharedCtx = ctx;
+      phaseFailures.push(...failures);
+      expect(failures).toEqual([]);
+    },
+    TEST_TIMEOUT
+  );
+
+  it(
+    'A.4: how much did it move up to where im at',
+    async () => {
+      const ctx = sharedCtx ?? makeCtx();
+      const failures: string[] = [];
+      const a3 = await handleOrionMessage({ text: 'how much did it move up to where im at', ctx, setupReady: true });
+      record('A.4', 'how much did it move up to where im at', a3);
+      if (!a3.ok || a3.route !== 'llm-plan') {
+        failures.push('A.4 route/ok');
+      } else {
+        const analysisSteps = a3.plan!.steps.filter((s) => s.capability.startsWith('analysis.'));
+        if (analysisSteps.length !== 1) failures.push(`A.4 expected 1 analysis step, got ${analysisSteps.length}`);
+        const step = analysisSteps[0];
         if (!['analysis.window_change', 'analysis.window_summary'].includes(step?.capability ?? '')) {
-          failures.push('A.3 expected window_change or window_summary');
+          failures.push('A.4 expected window_change or window_summary');
         }
-        if (step && (step.args.window as any)?.kind !== 'up_to_cursor') failures.push('A.3 expected up_to_cursor window');
+        if (step && (step.args.window as any)?.kind !== 'up_to_cursor') failures.push('A.4 expected up_to_cursor window');
         if (a3.result) {
           const receipt = a3.result.receipts.find((r) => r.success && r.capability.startsWith('analysis.'));
           if (!receipt) {
-            failures.push('A.3 missing successful analysis receipt');
+            failures.push('A.4 missing successful analysis receipt');
           } else {
             const msg = receipt.message.toLowerCase();
             if (!/\b(change|move|open|close|up|down|%|percent)\b/.test(msg)) {
-              failures.push('A.3 receipt does not describe a move/change');
+              failures.push('A.4 receipt does not describe a move/change');
             }
           }
         }
       }
+      sharedCtx = ctx;
+      phaseFailures.push(...failures);
+      expect(failures).toEqual([]);
+    },
+    TEST_TIMEOUT
+  );
 
-      // A.4
+  it(
+    'A.5: what kind of candle am i on rn',
+    async () => {
+      const ctx = sharedCtx ?? makeCtx();
+      const failures: string[] = [];
       a4 = await handleOrionMessage({ text: 'what kind of candle am i on rn', ctx, setupReady: true });
-      record('A.4', 'what kind of candle am i on rn', a4);
+      record('A.5', 'what kind of candle am i on rn', a4);
       if (!a4.ok || a4.route !== 'llm-plan') {
         failures.push('A.4 route/ok');
       } else {
@@ -514,8 +560,18 @@ describe('Phase 6A.3 real runtime acceptance', () => {
         if (args?.source !== 'current_chart_candle') failures.push('A.4 expected source current_chart_candle');
         if (args?.marketTime !== undefined) failures.push('A.4 should not set marketTime for current chart candle');
       }
+      sharedCtx = ctx;
+      phaseFailures.push(...failures);
+      expect(failures).toEqual([]);
+    },
+    TEST_TIMEOUT
+  );
 
-      // B.5
+  it(
+    'B.5: was mornig volum higher than near close',
+    async () => {
+      const ctx = sharedCtx ?? makeCtx();
+      const failures: string[] = [];
       b5 = await handleOrionMessage({ text: 'was mornig volum higher than near close', ctx, setupReady: true });
       record('B.5', 'was mornig volum higher than near close', b5);
       if (!b5.ok || b5.route !== 'llm-plan') {
@@ -550,8 +606,18 @@ describe('Phase 6A.3 real runtime acceptance', () => {
           }
         }
       }
+      sharedCtx = ctx;
+      phaseFailures.push(...failures);
+      expect(failures).toEqual([]);
+    },
+    TEST_TIMEOUT
+  );
 
-      // B.6
+  it(
+    'B.6: compare open and close from 9:30 to 10 and 3 to 4',
+    async () => {
+      const ctx = sharedCtx ?? makeCtx();
+      const failures: string[] = [];
       const b6 = await handleOrionMessage({ text: 'yo compare the first 30 mins to the last 30', ctx, setupReady: true });
       record('B.6', 'yo compare the first 30 mins to the last 30', b6);
       if (!b6.ok || b6.route !== 'llm-plan') {
@@ -580,8 +646,18 @@ describe('Phase 6A.3 real runtime acceptance', () => {
           }
         }
       }
+      sharedCtx = ctx;
+      phaseFailures.push(...failures);
+      expect(failures).toEqual([]);
+    },
+    TEST_TIMEOUT
+  );
 
-      // B.7
+  it(
+    'B.7: describe the move and candle anatomy from 9:30 to 10',
+    async () => {
+      const ctx = sharedCtx ?? makeCtx();
+      const failures: string[] = [];
       const b7 = await handleOrionMessage({ text: 'give me the move, total volum and candle anatomy from 10 to noon', ctx, setupReady: true });
       record('B.7', 'give me the move, total volum and candle anatomy from 10 to noon', b7);
       if (!b7.ok || b7.route !== 'llm-plan') {
@@ -611,21 +687,18 @@ describe('Phase 6A.3 real runtime acceptance', () => {
           if (!/\b(body|wick|anatomy|shape|upper|lower)\b/.test(msg)) failures.push('B.7 response missing candle anatomy');
         }
       }
-
       sharedCtx = ctx;
-      console.log('[runtime-trace] A-B failures:', failures);
+      phaseFailures.push(...failures);
       expect(failures).toEqual([]);
     },
     TEST_TIMEOUT
   );
 
   it(
-    'C: context inheritance and switch prompts against the real engine and qwen3:8b',
+    'C.8: same thing but first hour',
     async () => {
-      const failures: string[] = [];
       const ctx = sharedCtx ?? makeCtx();
-
-      // C.8 (context inherit)
+      const failures: string[] = [];
       const beforeC8 = ctx.executionLog.latestSuccessfulAction();
       const c8 = await handleOrionMessage({ text: 'same thing but first hour', ctx, setupReady: true });
       const afterC8 = ctx.executionLog.latest();
@@ -649,8 +722,18 @@ describe('Phase 6A.3 real runtime acceptance', () => {
           }
         }
       }
+      sharedCtx = ctx;
+      phaseFailures.push(...failures);
+      expect(failures).toEqual([]);
+    },
+    TEST_TIMEOUT
+  );
 
-      // C.9
+  it(
+    'C.9: what about volume?',
+    async () => {
+      const ctx = sharedCtx ?? makeCtx();
+      const failures: string[] = [];
       const c9 = await handleOrionMessage({ text: 'what about volume?', ctx, setupReady: true });
       record('C.9', 'what about volume?', c9);
       if (!c9.ok || c9.route !== 'llm-plan') {
@@ -664,8 +747,18 @@ describe('Phase 6A.3 real runtime acceptance', () => {
           failures.push(`C.9 volume should inherit first-hour window, got ${JSON.stringify(step.args.window)}`);
         }
       }
+      sharedCtx = ctx;
+      phaseFailures.push(...failures);
+      expect(failures).toEqual([]);
+    },
+    TEST_TIMEOUT
+  );
 
-      // C.10
+  it(
+    'C.10: compare that with the last hour',
+    async () => {
+      const ctx = sharedCtx ?? makeCtx();
+      const failures: string[] = [];
       const c10 = await handleOrionMessage({ text: 'compare that with the last hour', ctx, setupReady: true });
       record('C.10', 'compare that with the last hour', c10);
       if (!c10.ok || c10.route !== 'llm-plan') {
@@ -694,8 +787,18 @@ describe('Phase 6A.3 real runtime acceptance', () => {
           }
         }
       }
+      sharedCtx = ctx;
+      phaseFailures.push(...failures);
+      expect(failures).toEqual([]);
+    },
+    TEST_TIMEOUT
+  );
 
-      // C.11
+  it(
+    'C.11: do that analysis on NVDA',
+    async () => {
+      const ctx = sharedCtx ?? makeCtx();
+      const failures: string[] = [];
       c11 = await handleOrionMessage({ text: 'do that analysis on NVDA', ctx, setupReady: true });
       record('C.11', 'do that analysis on NVDA', c11);
       if (!c11.ok || c11.route !== 'llm-plan') {
@@ -727,20 +830,18 @@ describe('Phase 6A.3 real runtime acceptance', () => {
           failures.push('C.11 volume window should span the inherited compare range');
         }
       }
-
-      console.log('[runtime-trace] C failures:', failures);
+      sharedCtx = ctx;
+      phaseFailures.push(...failures);
       expect(failures).toEqual([]);
     },
     TEST_TIMEOUT
   );
 
   it(
-    'D: clarification and edge-case prompts against the real engine and qwen3:8b',
+    'D.12: give me the open high low close volume and change from 9:30 to 10, 10 to 11, 11 to 12, 12 to 1 and 1 to 2',
     async () => {
-      const failures: string[] = [];
       const ctx = sharedCtx ?? makeCtx();
-
-      // D.12 five distinct analysis ops should clarify or be rejected
+      const failures: string[] = [];
       const d12 = await handleOrionMessage({
         text: 'give me the open high low close volume and change from 9:30 to 10, 10 to 11, 11 to 12, 12 to 1 and 1 to 2',
         ctx,
@@ -755,8 +856,18 @@ describe('Phase 6A.3 real runtime acceptance', () => {
       if (d12.plan?.steps.some((s) => s.capability.startsWith('analysis.'))) {
         failures.push('D.12 should not execute any analysis capability');
       }
+      sharedCtx = ctx;
+      phaseFailures.push(...failures);
+      expect(failures).toEqual([]);
+    },
+    TEST_TIMEOUT
+  );
 
-      // D.13 RSI/MACD unsupported
+  it(
+    'D.13: what are the RSI and MACD',
+    async () => {
+      const ctx = sharedCtx ?? makeCtx();
+      const failures: string[] = [];
       const d13 = await handleOrionMessage({ text: 'what are the RSI and MACD', ctx, setupReady: true });
       record('D.13', 'what are the RSI and MACD', d13);
       if (d13.ok && d13.route !== 'unsupported' && d13.route !== 'clarification') {
@@ -765,15 +876,35 @@ describe('Phase 6A.3 real runtime acceptance', () => {
       if (d13.result?.receipts && d13.result.receipts.some((r) => r.capability.startsWith('analysis.'))) {
         failures.push('D.13 should not execute analysis');
       }
+      sharedCtx = ctx;
+      phaseFailures.push(...failures);
+      expect(failures).toEqual([]);
+    },
+    TEST_TIMEOUT
+  );
 
-      // D.14 missing prior analysis
+  it(
+    'D.14: what about volume? (fresh context)',
+    async () => {
+      const ctx = sharedCtx ?? makeCtx();
+      const failures: string[] = [];
       const freshCtx = makeCtx();
       await handleOrionMessage({ text: 'Switch to AAPL 2026-07-10 1m.', ctx: freshCtx, setupReady: true });
       const d14 = await handleOrionMessage({ text: 'what about volume?', ctx: freshCtx, setupReady: true });
       record('D.14', 'what about volume? (fresh context)', d14);
       if (!d14.ok || d14.route !== 'clarification') failures.push('D.14 should have clarified');
+      sharedCtx = ctx;
+      phaseFailures.push(...failures);
+      expect(failures).toEqual([]);
+    },
+    TEST_TIMEOUT
+  );
 
-      // D.15 no active session
+  it(
+    'D.15: how did it do? (no active session)',
+    async () => {
+      const ctx = sharedCtx ?? makeCtx();
+      const failures: string[] = [];
       const noSessionCtx = makeCtx();
       const d15 = await handleOrionMessage({ text: 'how did it do?', ctx: noSessionCtx, setupReady: true });
       record('D.15', 'how did it do? (no active session)', d15);
@@ -826,12 +957,12 @@ describe('Phase 6A.3 real runtime acceptance', () => {
       if (c11?.ok && ctx.getState().symbol !== 'NVDA') failures.push('C.11 did not switch to NVDA');
 
       // Write the runtime acceptance report
-      writeRuntimeReport(failures, groundings);
-
-      // Print pass/fail matrix
-      console.log('[runtime-trace] D failures:', failures);
+      phaseFailures.push(...failures);
+      writeRuntimeReport(phaseFailures, groundings);
+      sharedCtx = ctx;
       expect(failures).toEqual([]);
     },
     TEST_TIMEOUT
   );
+
 });
