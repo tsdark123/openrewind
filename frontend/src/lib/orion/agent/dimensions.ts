@@ -601,12 +601,16 @@ export function textRequestsContextReference(t: string, hasPriorAction = false):
 // explicit summary nouns ("summary"/"breakdown"/"summarize").
 const SUMMARY_TOKENS: ReadonlySet<string> = new Set([
   'summary', 'overview', 'recap', 'did', 'do', 'does', 'done', 'doing', 'summarize', 'summarized', 'breakdown',
+  'describe', 'describes', 'described', 'describing',
+  'happened', 'happens', 'happening', 'happen',
 ]);
 const EXPLICIT_SUMMARY_TOKENS: ReadonlySet<string> = new Set([
   'summary', 'overview', 'recap', 'summarize', 'summarized', 'breakdown',
+  'describe', 'describes', 'described', 'describing',
 ]);
 const HELPER_SUMMARY_TOKENS: ReadonlySet<string> = new Set([
   'did', 'do', 'does', 'done', 'doing',
+  'happened', 'happens', 'happening', 'happen',
 ]);
 
 export function textRequestsSummary(t: string): boolean {

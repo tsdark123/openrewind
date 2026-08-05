@@ -709,7 +709,10 @@ function detectIntent(text: string, e: {
 
     if (/(?:rewind|reverse|go back|back up|skip back)\b/i.test(t)) return 'rewind';
     if (/\b(?:play|run)\b/i.test(t)) return e.times.length > 0 || e.relative !== undefined ? 'fast_forward' : 'play';
-    if (e.symbol || e.date || /\b(switch|change to|load|open)\b/i.test(t) || (e.times.length === 0 && /\b(show|go to)\b/i.test(t))) {
+    // A switch action requires a grounded symbol or an explicit switch/change
+    // verb.  A bare date ("yesterday", "today") or non-switch verb like "show"
+    // is not enough to create a symbol-resolution plan.
+    if (e.symbol || /\b(switch|change to|load|open)\b/i.test(t)) {
       // "switch to AAPL and fast forward to 1:47" still carries times, so it
       // lands here only if no playback verb was found. Treat as switch and let
       // the executor notice the times and continue with a fast-forward.
@@ -723,7 +726,9 @@ function detectIntent(text: string, e: {
   if (/\b(fast[- ]?forward|fastforward|ff)\b/i.test(t)) return 'fast_forward';
   if (/\b(rewind|reverse|go back|back up)\b/i.test(t)) return 'rewind';
   if (/\bplay\b/i.test(t)) return 'play';
-  if (e.symbol || e.date || /\b(switch|change to|load|open)\b/i.test(t)) return 'switch';
+  // Switch only when a symbol is grounded or the user explicitly asks to
+  // switch/change/load/open.  A bare date must not become a switch.
+  if (e.symbol || /\b(switch|change to|load|open)\b/i.test(t)) return 'switch';
 
   return 'unknown';
 }

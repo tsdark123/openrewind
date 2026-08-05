@@ -14,11 +14,23 @@
 import { SYMBOL_ALIASES } from '../symbolAliases';
 
 /** Company-name suffix noise words to strip before lookup. */
+// This is a category-based filter (articles, prepositions, question words,
+// analysis/summary verbs, state-of-being helpers, pronouns and generic
+// session/time nouns).  It is not a one-word blacklist.
 const NAME_STOP_WORDS = new Set([
   'the', 'a', 'an', 'stock', 'shares', 'ticker', 'symbol', 'company',
   'corporation', 'corp', 'incorporated', 'inc', 'ltd', 'limited', 'plc',
   'holdings', 'group', 'co', 'nv', 'sa', 'ag', 'and', 'to', 'switch',
   'change', 'go', 'load', 'open', 'show', 'please',
+  'what', 'how', 'why', 'when', 'where', 'which', 'who', 'whom', 'whose',
+  'describe', 'describes', 'described', 'describing',
+  'summarize', 'summarizes', 'summarized', 'summarizing',
+  'explain', 'explains', 'explained', 'explaining',
+  'tell', 'told', 'telling',
+  'happen', 'happens', 'happened', 'happening',
+  'is', 'are', 'was', 'were', 'be', 'been', 'being', 'did', 'does', 'do', 'done', 'doing', 'has', 'have', 'had',
+  'it', 'this', 'that', 'these', 'those', 'they', 'them', 'their', 'there', 'here', 'me',
+  'market', 'today', 'yesterday', 'tomorrow', 'session', 'day',
 ]);
 
 /** Return the canonical alias table plus any caller-supplied extras. */

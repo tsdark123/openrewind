@@ -44,6 +44,7 @@ import {
   textRequestsAnalysis,
   textRequestsCandleShape,
   textRequestsContextReference,
+  textRequestsSummary,
   textRequestsUnsupportedIndicator,
 } from './dimensions';
 import { SYMBOL_ALIASES } from '../symbolAliases';
@@ -420,15 +421,36 @@ async function runChat(text: string, ctx: AgentContext, setupReady: boolean, sta
 // Resolve path
 // ---------------------------------------------------------------------------
 
-const SWITCH_STOP_WORDS = new Set([
-  'the', 'a', 'an', 'to', 'and', 'or', 'for', 'of', 'in', 'on', 'at', 'from', 'with',
+// Tokens that should never be treated as the target of a symbol resolution.
+// This is a category-based filter (question words, analysis/summary verbs,
+// state-of-being verbs, pronouns, prepositions and generic time/session nouns),
+// not a one-word blacklist.  It prevents "Describe what happened today" from
+// producing session.resolve_symbol("Describe") just because the sentence is
+// capitalized.
+const UNGROUNDED_SYMBOL_STOP_WORDS = new Set([
+  // Articles, prepositions, conjunctions
+  'the', 'a', 'an', 'to', 'and', 'or', 'for', 'of', 'in', 'on', 'at', 'from', 'with', 'by', 'as', 'over', 'during',
+  // Explicit switch verbs
   'switch', 'go', 'load', 'open', 'show', 'pull', 'up', 'change', 'pick', 'select',
-  'me', 'please', 'stock', 'stocks', 'ticker', 'symbol', 'company', 'shares',
+  // Question words
+  'what', 'how', 'why', 'when', 'where', 'which', 'who', 'whom', 'whose',
+  // Analysis / summary verbs and inflections
+  'describe', 'describes', 'described', 'describing',
+  'summarize', 'summarizes', 'summarized', 'summarizing',
+  'explain', 'explains', 'explained', 'explaining',
+  'tell', 'told', 'telling',
+  'happen', 'happens', 'happened', 'happening',
+  // State-of-being / helper verbs
+  'is', 'are', 'was', 'were', 'be', 'been', 'being', 'did', 'does', 'do', 'done', 'doing', 'has', 'have', 'had',
+  // Pronouns and generic subjects
+  'me', 'it', 'this', 'that', 'these', 'those', 'they', 'them', 'their', 'there', 'here',
+  // Generic market / time / session nouns that lack a ticker ground
+  'stock', 'stocks', 'ticker', 'symbol', 'company', 'shares', 'market', 'today', 'yesterday', 'tomorrow', 'session', 'day', 'please',
 ]);
 
 function extractSymbolCandidate(text: string): string {
   const tokens = text.split(/[^a-zA-Z0-9-]+/).filter(Boolean);
-  const first = tokens.find((t) => !SWITCH_STOP_WORDS.has(t.toLowerCase()));
+  const first = tokens.find((t) => !UNGROUNDED_SYMBOL_STOP_WORDS.has(t.toLowerCase()));
   return first ?? text.trim();
 }
 
@@ -459,6 +481,22 @@ function makeSwitchPlan(symbol: string): AgentPlan {
         capability: 'session.switch_symbol',
         args: { symbol },
         required: true,
+      },
+    ],
+  };
+}
+
+function makeSessionSummaryPlan(text: string, sessionActive: boolean): AgentPlan {
+  return {
+    id: makePlanId(),
+    kind: 'query',
+    summary: `Session summary: ${text}`,
+    steps: [
+      {
+        id: 'step-summary',
+        capability: 'analysis.window_summary',
+        args: { window: { kind: 'whole_session' } },
+        required: sessionActive,
       },
     ],
   };
@@ -1088,6 +1126,53 @@ async function routeMessage(
     if (plan) {
       agentTrace('route', 'deterministic-incomplete', { text });
     }
+  }
+
+  // 4b. Broad active-session summary: "Describe what happened today",
+  // "Summarize today", "What happened during this session?".  These have no
+  // grounded symbol and no explicit window, so they are best served by a whole
+  // session window_summary.  With no active session we execute the same step
+  // as optional so it fails truthfully and returns a precondition clarification.
+  if (
+    !cmd.symbol &&
+    textRequestsSummary(text) &&
+    !textRequestsCandleShape(text) &&
+    !looksLikeSwitch(text) &&
+    !cmd.startTime &&
+    !cmd.endTime &&
+    !cmd.relativeMinutes &&
+    cmd.timeframe === undefined &&
+    cmd.speed === undefined &&
+    cmd.intent !== 'candle_query'
+  ) {
+    const state = ctx.getState();
+    const plan = makeSessionSummaryPlan(text, state.sessionActive);
+    const result = await executeAgentPlan(plan, ctx, token);
+    if (!state.sessionActive) {
+      agentTrace('route', 'clarification', { reason: 'No active session to summarize' });
+      return {
+        ok: false,
+        message: 'No active session to summarize.',
+        wasChat: true,
+        plan,
+        result,
+        route: 'clarification',
+      };
+    }
+    agentTrace('route', 'deterministic', { ok: result.ok, kind: 'session-summary' });
+    const template: ChartActionIntent = {
+      kind: 'chart_action',
+      analysisRequests: [{ kind: 'window_summary' }],
+    };
+    return {
+      ok: result.ok,
+      message: composeResponse(result, ctx),
+      wasChat: false,
+      plan,
+      result,
+      route: 'deterministic',
+      template,
+    };
   }
 
   // 5. Incomplete or unresolved switch: let resolve_symbol handle it.
