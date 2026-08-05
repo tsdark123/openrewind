@@ -72,12 +72,15 @@ export function textRequestsWholeSession(t: string): boolean {
 }
 
 export function textRequestsAbsoluteTime(t: string): boolean {
+  const hourWords = 'one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve';
+  const minuteWords = "oclock|o'clock|oh|o|zero|fifteen|twenty|twenty[- ]?five|thirty|forty|forty[- ]?five|fifty";
   return (
     /\b\d{1,2}:\d{2}\b/.test(t) ||
     /\b\d{1,2}\s*(?:am|pm)\b/i.test(t) ||
     /\b(?:noon|midnight|market\s+open|market\s+close)\b/i.test(t) ||
-    /\b(?:quarter|half)\s+(?:past|to)\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\b/i.test(t) ||
-    /\bo\'clock\b/i.test(t)
+    /\b(?:quarter|half)\s+(?:past|to)\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|noon|midnight)\b/i.test(t) ||
+    /\bo\'clock\b/i.test(t) ||
+    new RegExp(`\\b(?:${hourWords})\\s+(?:\\d{1,2}|${minuteWords})(?:\\s*(?:am|pm|in\\s+the\\s+(?:morning|afternoon|evening|night)))?\\b`, 'i').test(t)
   );
 }
 
@@ -125,7 +128,7 @@ const ANALYSIS_CONCEPTS: Record<string, ConceptDef> = {
   wick: { kind: 'shape', terms: ['wick', 'wicks'] },
   shadow: { kind: 'shape', terms: ['shadow', 'shadows'] },
   anatomy: { kind: 'shape', terms: ['anatomy'] },
-  shape: { kind: 'shape', terms: ['shape', 'shapes', 'shaped', 'kind', 'kinds', 'type', 'types', 'sort', 'sorts', 'structure', 'structures'] },
+  shape: { kind: 'shape', terms: ['shape', 'shapes', 'shaped', 'kind', 'kinds', 'type', 'types', 'sort', 'sorts', 'structure', 'structures', 'describe', 'describes', 'described', 'describing'] },
   compare: { kind: 'compare', terms: ['compare', 'compared', 'comparing', 'comparison', 'vs', 'versus', 'against', 'contrast', 'contrasted', 'contrasting'] },
   summary: { kind: 'summary', terms: ['summary', 'overview', 'recap', 'did', 'do', 'does', 'done', 'doing', 'breakdown', 'summarize', 'summarized'] },
   session: { kind: 'time', terms: ['session', 'sessions', 'today', 'day', 'days'] },

@@ -22,7 +22,7 @@ import type { AgentContext } from './types';
 import { getCapability } from './capabilities';
 import { normalizeAnalysisWindow } from './intent';
 import { textRequestsContextReference, textRequestsWholeSession, textRequestsSummary } from './dimensions';
-import { extractTimes, formatTime, US_EQUITY_MARKET_OPEN, US_EQUITY_MARKET_CLOSE, MORNING_END, AFTERNOON_START } from '../planner';
+import { extractTimes, formatTime, looksLikeTimeAttempt, US_EQUITY_MARKET_OPEN, US_EQUITY_MARKET_CLOSE, MORNING_END, AFTERNOON_START } from '../planner';
 
 export interface CompileOptions {
   /** Anchor for relative_trading dates (YYYY-MM-DD). Defaults to today. */
@@ -144,12 +144,14 @@ function siblingTimeRange(
   return undefined;
 }
 
+type CandleShapeResolution = { source: 'current_chart_candle' | 'market_time'; marketTime?: string };
+
 function resolveCandleShape(
   cur: { source: 'current_chart_candle' | 'market_time'; marketTime?: string },
   resolvedSoFar: AnalysisRequest[],
   pending: AnalysisRequest[],
   text: string
-): { source: 'current_chart_candle' | 'market_time'; marketTime?: string } {
+): CandleShapeResolution | { error: string } {
   const sibling = siblingTimeRange(resolvedSoFar, pending);
   const explicit = explicitCandidateMarketTime(text);
 
@@ -168,6 +170,10 @@ function resolveCandleShape(
     } else if (explicit) {
       candidate = explicit;
     }
+  }
+
+  if (!candidate && !sibling && looksLikeTimeAttempt(text) && extractTimes(text).length === 0) {
+    return { error: "I couldn't parse that clock time. Please use a valid HH:MM or spoken time like 'quarter past eleven'." };
   }
 
   if (candidate) {
@@ -324,9 +330,11 @@ function mergeAnalysisRequests(
 
     if (cur.kind === 'candle_shape') {
       const other = resolved.concat(current.slice(i + 1));
+      const shape = resolveCandleShape(cur, resolved, other, text);
+      if ('error' in shape) return { ok: false, error: shape.error };
       resolved.push({
         kind: 'candle_shape',
-        ...resolveCandleShape(cur, resolved, other, text),
+        ...shape,
       } as AnalysisRequest);
       continue;
     }
@@ -453,9 +461,11 @@ export function resolveAnalysisInheritance(
 
     if (cur.kind === 'candle_shape') {
       const other = resolved.concat(current.slice(i + 1));
+      const shape = resolveCandleShape(cur, resolved, other, opts.text);
+      if ('error' in shape) return { ok: false, error: shape.error };
       resolved.push({
         kind: 'candle_shape',
-        ...resolveCandleShape(cur, resolved, other, opts.text),
+        ...shape,
       } as AnalysisRequest);
       continue;
     }

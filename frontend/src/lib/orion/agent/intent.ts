@@ -771,7 +771,7 @@ function buildRules(selectedFields?: Set<string>): string[] {
   if (!selectedFields || selectedFields.has('analysisRequests')) {
     rules.push('Use analysisRequests with kind one of window_ohlc, window_change, window_volume, window_compare, candle_shape, window_summary.');
     rules.push('For window_* and window_summary include window. For candle_shape include source and optional marketTime. For window_compare include left and right.');
-    rules.push('Questions about candle body, wick, anatomy, shape, kind, type, or structure use kind:"candle_shape", NOT finalQuery.');
+    rules.push('Questions about candle body, wick, anatomy, shape, kind, type, structure, or describing a candle use kind:"candle_shape", NOT finalQuery.');
     rules.push('If the chart has an active session, "what kind of candle am I on" / "what candle is this" -> kind:"candle_shape", source:"current_chart_candle". Do not ask for a previously reported candle.');
     rules.push('If the user names a specific clock time for a candle shape request (e.g. "the 11:30 candle" or "candle anatomy at 2:45"), use kind:"candle_shape", source:"market_time", marketTime:"HH:MM". Never use current_chart_candle.');
     rules.push('A bare summary request ("how did X do", "how was X", "how did X perform") should emit only window_summary unless the user explicitly asks for OHLC, volume, or change.');

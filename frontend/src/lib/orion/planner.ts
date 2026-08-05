@@ -212,6 +212,35 @@ function numberWord(n: string): number | undefined {
   return map[n.toLowerCase()];
 }
 
+function parseMinuteToken(token: string): number | undefined {
+  const t = token.toLowerCase().replace(/[^a-z0-9-]/g, '');
+  const digit = parseInt(t, 10);
+  if (!Number.isNaN(digit)) return digit;
+
+  const ones: Record<string, number> = {
+    oh: 0, o: 0, zero: 0, oclock: 0, "o'clock": 0,
+    one: 1, two: 2, three: 3, four: 4, five: 5,
+    six: 6, seven: 7, eight: 8, nine: 9, ten: 10,
+    eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15,
+    sixteen: 16, seventeen: 17, eighteen: 18, nineteen: 19,
+  };
+  const tens: Record<string, number> = {
+    twenty: 20, thirty: 30, forty: 40, fourty: 40, fifty: 50,
+  };
+
+  if (ones[t] !== undefined) return ones[t];
+  if (tens[t] !== undefined) return tens[t];
+
+  const parts = t.split(/[-]/);
+  if (parts.length === 2) {
+    const ten = tens[parts[0]];
+    const one = ones[parts[1]];
+    if (ten !== undefined && one !== undefined) return ten + one;
+  }
+
+  return undefined;
+}
+
 export function extractDateInput(text: string, baseDate?: string): DateInputSpec | undefined {
   const t = text.toLowerCase();
   const anchor = baseDate || new Date().toISOString().slice(0, 10);
@@ -368,6 +397,23 @@ export function extractTimes(text: string): ParsedTime[] {
     }
   }
 
+  // Spelled-out hour + minute: "eleven thirty", "eleven thirty-one", "eleven oh five",
+  // "eleven fifteen in the afternoon". Must come after the whole-hour and colloquial
+  // matchers so it does not steal the hour from "quarter past eleven".
+  const minuteWords = "oclock|o'clock|oh|o|zero|fifteen|twenty|twenty[- ]?five|thirty|forty|forty[- ]?five|fifty";
+  const spokenMinuteRe = new RegExp(
+    `\\b(${hourWords})\\s+(\\d{1,2}|${minuteWords})(?:\\s+(a\\.?m\\.?|p\\.?m\\.?|in\\s+the\\s+(morning|afternoon|evening|night)))?\\b`,
+    'gi'
+  );
+  for (const m of text.matchAll(spokenMinuteRe)) {
+    const hour = parseHourToken(m[1]);
+    const minute = parseMinuteToken(m[2]);
+    if (hour !== undefined && minute !== undefined) {
+      const meridian = normalizeMeridian(m[3]) || defaultMeridianForHour(hour, m[1]);
+      add(hour, minute, m.index ?? 0, meridian);
+    }
+  }
+
   const marketOpen = /\bmarket\s+open\b/i.exec(text);
   if (marketOpen && marketOpen.index !== undefined) {
     add(US_EQUITY_MARKET_OPEN.hour, US_EQUITY_MARKET_OPEN.minute, marketOpen.index, undefined);
@@ -415,6 +461,26 @@ export function extractTimes(text: string): ParsedTime[] {
   // "from X to Y" yields X as startTime and Y as endTime.
   matches.sort((a, b) => a.index - b.index);
   return matches.map((m) => m.time);
+}
+
+/**
+ * Returns true when the user appears to be attempting to name a clock time
+ * even if the expression is not parseable (e.g. "eleven seventy" or "25:00").
+ * This is a safety guard so malformed times clarify instead of silently using
+ * the current candle.
+ */
+export function looksLikeTimeAttempt(text: string): boolean {
+  const t = text.toLowerCase();
+  if (/\b\d{1,2}:\d{2}\b/.test(t)) return true;
+  if (/\b(?:quarter|half)\s+(?:past|to)\b/i.test(t)) return true;
+  if (/\b(?:noon|midnight|market\s+open|market\s+close)\b/i.test(t)) return true;
+
+  const hourWords = 'one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve';
+  const spokenRe = new RegExp(
+    `\\b(?:${hourWords})\\s+(?!am\\b|pm\\b|a\\.?m\\.?|p\\.?m\\.?|in\\s+the\\s+(?:morning|afternoon|evening|night|noon|midday))\\S+`,
+    'i'
+  );
+  return spokenRe.test(t);
 }
 
 // Skip number+unit matches that are part of a named market window such as

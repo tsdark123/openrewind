@@ -32,7 +32,7 @@ import type {
   ExecutionContextEntry,
 } from './types';
 import { createCancellationSource, type CancellationSource } from './types';
-import { parseChartCommand, extractTimes, clampTimeframe, formatTime, SUPPORTED_TIMEFRAMES, type ChartCommand, type ParsedTime } from '../planner';
+import { parseChartCommand, extractTimes, looksLikeTimeAttempt, clampTimeframe, formatTime, SUPPORTED_TIMEFRAMES, type ChartCommand, type ParsedTime } from '../planner';
 import {
   type ActionDimension,
   ALL_ACTION_DIMENSIONS,
@@ -785,21 +785,25 @@ export function sanitizeIntentGrounding(
   }
 
   // Fallback: a model that emits a candle query for a clearly candle-shape
-  // request should be corrected to analysisRequests before we discard it.
+  // request should be corrected to analysisRequests before we discard it. If the
+  // model already supplied analysisRequests, the finalQuery is redundant.
   if (
     sanitized.finalQuery &&
     !sanitized.finalQuery.startsWith('compare') &&
-    !sanitized.analysisRequests?.length &&
     textRequestsCandleShape(text)
   ) {
     const marketTime = sanitized.queryTime;
-    sanitized.analysisRequests = [
-      marketTime
-        ? { kind: 'candle_shape', source: 'market_time', marketTime }
-        : { kind: 'candle_shape', source: 'current_chart_candle' },
-    ];
-    trace.stripped = trace.stripped.filter((s) => !s.startsWith('finalQuery:'));
-    trace.kept.push('analysisRequests:1 (candle_shape fallback)');
+    if (!sanitized.analysisRequests?.length) {
+      sanitized.analysisRequests = [
+        marketTime
+          ? { kind: 'candle_shape', source: 'market_time', marketTime }
+          : { kind: 'candle_shape', source: 'current_chart_candle' },
+      ];
+      trace.kept.push('analysisRequests:1 (candle_shape fallback)');
+    } else {
+      trace.kept.push(`analysisRequests:${sanitized.analysisRequests.length} (finalQuery suppressed for candle shape)`);
+    }
+    trace.stripped = trace.stripped.filter((s) => !s.startsWith('finalQuery:') && !s.startsWith('queryTime:'));
     delete sanitized.finalQuery;
     delete sanitized.queryTime;
   }
@@ -1311,6 +1315,16 @@ async function routeMessage(
         textRequestsCandleShape(text) || candleRequested.has('candleQuery');
       if (state.sessionActive && isCandleShapeContext) {
         if (!hasExplicitTime) {
+          if (looksLikeTimeAttempt(text) && extractTimes(text).length === 0) {
+            agentTrace('route', 'clarification', { reason: 'unparseable clock time' });
+            return {
+              ok: true,
+              message: "I couldn't parse that clock time. Please use a valid HH:MM or spoken time like 'quarter past eleven'.",
+              wasChat: true,
+              route: 'clarification',
+            };
+          }
+
           const plan: AgentPlan = {
             id: makePlanId(),
             summary: 'Current candle shape',
