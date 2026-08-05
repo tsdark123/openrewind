@@ -43,7 +43,16 @@ describe('orion client warm-up', () => {
     const chatCalls = fetchMock.mock.calls.filter(([url]) => String(url).includes('/api/chat'));
     expect(chatCalls).toHaveLength(1);
     expect(chatCalls[0][0]).toContain('/api/chat');
-    expect((chatCalls[0][1] as { body: string }).body).toContain('"num_predict":1');
+    const body = JSON.parse((chatCalls[0][1] as { body: string }).body);
+    expect(body).toMatchObject({
+      model: 'qwen3:8b',
+      think: false,
+      keep_alive: '10m',
+      options: {
+        num_ctx: 4096,
+        num_predict: 1,
+      },
+    });
   });
 
   it('ignores a failed warm-up and still allows the next agent orionChat to proceed', async () => {
@@ -104,6 +113,7 @@ describe('orion client warm-up', () => {
     expect(JSON.parse(body)).toMatchObject({
       model: 'qwen3:8b',
       think: false,
+      keep_alive: '10m',
       options: {
         num_ctx: 4096,
         temperature: 0,
@@ -144,6 +154,7 @@ describe('orion client warm-up', () => {
     expect(body).toMatchObject({
       model: 'qwen3:8b',
       think: false,
+      keep_alive: '10m',
       options: {
         num_ctx: 4096,
         temperature: 0,

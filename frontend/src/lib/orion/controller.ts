@@ -34,7 +34,7 @@
 import type { AppAction, AppState, Position, Order } from '../../types';
 import type { ChartHandle } from '../../components/Chart';
 import { clearAutomatedIds, setAutomationActive } from './automatedIds';
-import { orionChat, type OrionChatMessage, AGENT_KEEP_ALIVE, releaseAgentModel } from './client';
+import { orionChat, type OrionChatMessage, AGENT_KEEP_ALIVE } from './client';
 import { invokeOrionTool, listOrionTools, ollamaToolSchemas, type OrionRuntimeContext } from './tools';
 import { buildWorldState, renderWorldStateForPrompt } from './worldState';
 import { loadOrionThreads } from '../orionThreads';
@@ -414,9 +414,9 @@ class OrionControllerImpl {
 
       this.log('info', 'Automation complete. Workspace reflects the agent-driven session.');
 
-      // Free the 8B model from RAM after a task completes.
-      void releaseAgentModel();
-
+      // The certified model stays resident per the shared runtime configuration
+      // (qwen3:8b, num_ctx: 4096, think: false, keep_alive: 10m). Do not force
+      // an unload here; Ollama will evict it naturally after inactivity.
       this.setStatus('idle');
       return { ok: true };
     } catch (e) {
