@@ -6,7 +6,6 @@ import { createExecutionContext } from '../executionContext';
 
 vi.mock('../../client', () => ({
   ORION_AGENT_MODEL: 'qwen3:8b',
-  ORION_CHAT_MODEL: 'llama3.2',
   AGENT_KEEP_ALIVE: '5m',
   orionChat: vi.fn(),
 }));

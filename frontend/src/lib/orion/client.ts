@@ -1,33 +1,36 @@
 // =============================================================================
-// client — Unified Ollama /api/chat wrapper with two-tier model support.
+// client — Unified Ollama /api/chat wrapper with certified-model resolution.
 //
-// Chat mode: uses `llama3.2:3b`, no tool schema, no keep-alive override.
-//            Snappy responses for "what did I just do?" style questions.
+// The active model is resolved by certifiedModels.ts: qwen3:8b by default,
+// with optional ORION_AGENT_MODEL (Node/Vitest) or VITE_ORION_AGENT_MODEL
+// (browser/Tauri dev) overrides. Overrides must never be silently marked as
+// certified unless they are present in the bundled certified-model registry.
 //
-// Agent mode: uses `llama3.1:8b` with the Orion tool schema attached and
-//             a 10-minute `keep_alive` so subsequent agent calls in the same
-//             session don't pay the reload cost. When the model is idle we
-//             let Ollama unload it (default 5m TTL) — we don't pin it in RAM
-//             indefinitely because that murders low-VRAM laptops.
+// Every semantic call uses one shared runtime configuration:
+//   - the resolved model tag
+//   - num_ctx = the resolved controlledContextSize (4096 for qwen3:8b)
+//   - think = the resolved thinking value (false for qwen3:8b)
+//   - keep_alive = '10m'
+//   - temperature = 0, seed = 42
 //
-// The client is deliberately transport-agnostic: in Tauri it calls the Ollama
-// HTTP endpoint directly at 127.0.0.1:11434 through `@tauri-apps/plugin-http`
-// (bypasses CORS + webview networking quirks). In browser dev mode the same
-// requests are routed through the Vite proxy at `/ollama` so CORS and
-// OLLAMA_ORIGINS are not an issue. `orionChat` picks the right one automatically.
+// The client is transport-agnostic: in Tauri it calls the Ollama HTTP endpoint
+// directly at 127.0.0.1:11434 through @tauri-apps/plugin-http. In browser dev
+// mode the same requests are routed through the Vite proxy at /ollama.
 // =============================================================================
 
 import { fetch as tauriFetch } from '@tauri-apps/plugin-http';
 import { agentTrace } from './agent/config';
+import {
+  resolveActiveModel,
+  getActiveOrionModelTag,
+  getOrionRuntimeOptions,
+} from './certifiedModels';
+
+// Backward-compatible re-export of the active model tag.
+// All consumers should prefer resolveActiveModel() or getActiveOrionModelTag().
+export const ORION_AGENT_MODEL = getActiveOrionModelTag();
 
 export type OrionModelTier = 'chat' | 'agent';
-
-export const ORION_CHAT_MODEL = 'llama3.2';
-
-function getEnvOrionAgentModel(): string | undefined {
-  const envProcess = (globalThis as typeof globalThis & { process?: { env?: Record<string, string> } }).process;
-  return envProcess?.env?.ORION_AGENT_MODEL;
-}
 
 function getEnvOrionChatTimeoutMs(): number {
   const envProcess = (globalThis as typeof globalThis & { process?: { env?: Record<string, string> } }).process;
@@ -36,10 +39,6 @@ function getEnvOrionChatTimeoutMs(): number {
   const n = Number(raw);
   return Number.isFinite(n) && n > 0 ? n : 60_000;
 }
-
-// Production default is llama3.2:latest. The optional ORION_AGENT_MODEL env var
-// is provided for local model validation without hard-coding a dev override.
-export const ORION_AGENT_MODEL = getEnvOrionAgentModel() ?? 'llama3.2:latest';
 
 // 10 minutes as a duration string — Ollama's keep_alive accepts either a
 // duration ("10m", "1h") or a seconds integer. We use the string form so
@@ -52,10 +51,10 @@ export const AGENT_KEEP_ALIVE_IDLE = '0s';
 // ---------------------------------------------------------------------------
 // Planner warm-up state
 // ---------------------------------------------------------------------------
-// One warm-up call per application session. It is launched non-blocking from
-// App boot, but agent orionChat calls may await it so the model is already in
-// memory for the first real request. React StrictMode double-mounts are
-// deduplicated by the module-level promise.
+// One warm-up call per application session is launched by the central startup
+// state. The promise is reset after it settles so a failure does not block
+// retry. React StrictMode double-mounts are deduplicated by returning an
+// in-flight module promise.
 
 interface WarmupResult {
   ok: boolean;
@@ -64,10 +63,6 @@ interface WarmupResult {
 
 let agentWarmupPromise: Promise<WarmupResult> | null = null;
 let agentWarmupGeneration = 0;
-
-function maybeGetWarmupPromise(): Promise<WarmupResult> | null {
-  return agentWarmupPromise;
-}
 
 export interface OrionChatMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
@@ -89,6 +84,7 @@ export interface OrionToolCall {
 }
 
 export interface OrionChatOptions {
+  /** @deprecated tier no longer selects the model; resolved model is always used. */
   tier: OrionModelTier;
   messages: OrionChatMessage[];
   tools?: Array<Record<string, unknown>>;
@@ -98,12 +94,7 @@ export interface OrionChatOptions {
     temperature?: number;
     seed?: number;
     num_predict?: number;
-    num_ctx?: number;
   };
-  /** Ollama's qwen3-style reasoning switch. false disables the hidden thinking block. */
-  think?: boolean;
-  /** Internal: bypass the warm-up wait for the agent model. */
-  skipWarmup?: boolean;
   /** Optional external abort signal (e.g. a newer user message superseded this one). */
   signal?: AbortSignal;
   /** Optional override for the default model-call timeout in milliseconds. */
@@ -186,10 +177,10 @@ function ollamaFetchWithTimeout(
 /**
  * Model resolution.
  *
- * `llama3.1:8b` in particular is expensive to load; we don't want the app
- * to trigger a multi-GB download during a snappy chat message. So the
- * agent tier lazily ensures the model exists before the first call and
- * caches that determination for the process lifetime.
+ * `qwen3:8b` is expensive to load; we don't want the app to trigger a
+ * multi-GB download during a snappy chat message. The active model is lazily
+ * verified before the first call and the result is cached for the process
+ * lifetime. The cache is scoped to the model tag.
  */
 const ensuredModels = new Set<string>();
 
@@ -233,7 +224,7 @@ export async function ensureModel(model: string): Promise<{ ready: boolean; erro
 /**
  * Pull the given model from Ollama. Blocks until completion. Progress is
  * reported through the optional callback so the UI can render a status
- * chip (the agent-mode boot indicator).
+ * chip.
  */
 const OLLAMA_PULL_CONNECT_TIMEOUT = 10000;
 
@@ -285,46 +276,36 @@ export async function pullOrionModel(
 }
 
 /**
- * Public entry point. Handles model resolution, tool-schema attachment,
- * and keep-alive selection. Returns the assistant content + any requested
+ * Public entry point. Handles model resolution, certified runtime options,
+ * keep-alive and timeout. Returns the assistant content + any requested
  * tool calls. Never throws for expected offline states — surfaces them via
  * the `content` field so the sidepanel can show a normal chat bubble.
  */
 export async function orionChat(opts: OrionChatOptions): Promise<OrionChatResponse> {
   const start = Date.now();
   const defaultTimeout = getEnvOrionChatTimeoutMs();
-  const model = opts.tier === 'agent' ? ORION_AGENT_MODEL : ORION_CHAT_MODEL;
-  agentTrace('orionChat start', { tier: opts.tier, model, timeout: opts.timeout ?? defaultTimeout });
+  const model = resolveActiveModel();
+  agentTrace('orionChat start', { tier: opts.tier, model: model.ollamaTag, timeout: opts.timeout ?? defaultTimeout });
 
   if (opts.signal?.aborted) {
     throw Object.assign(new Error('Orion cancelled the request because a new one started.'), { code: 'ABORTED' });
   }
 
-  // Agent calls coordinate with the one-shot background warm-up so the model
-  // is loaded before we begin. A failed or stale warm-up is ignored so the
-  // real request can still attempt inference. Deterministic and chat tiers
-  // never await the warm-up.
-  if (opts.tier === 'agent' && !opts.skipWarmup) {
-    const warmup = maybeGetWarmupPromise();
-    if (warmup) {
-      agentTrace('orionChat awaiting planner warm-up');
-      await warmup.catch(() => {});
-    }
-  }
-
-  const ensured = await ensureModel(model);
+  const ensured = await ensureModel(model.ollamaTag);
   if (!ensured.ready) {
     throw Object.assign(new Error(ensured.error ?? 'model-missing'), {
       code: 'MODEL_MISSING',
-      model,
+      model: model.ollamaTag,
     });
   }
 
+  const runtime = getOrionRuntimeOptions();
+
   const body: Record<string, unknown> = {
-    model,
+    model: model.ollamaTag,
     messages: opts.messages,
     stream: false,
-    keep_alive: opts.keepAlive ?? (opts.tier === 'agent' ? AGENT_KEEP_ALIVE : undefined),
+    keep_alive: opts.keepAlive ?? model.keepAlive,
   };
   if (opts.tools && opts.tools.length > 0) {
     body.tools = opts.tools;
@@ -332,12 +313,19 @@ export async function orionChat(opts: OrionChatOptions): Promise<OrionChatRespon
   if (opts.format) {
     body.format = opts.format;
   }
-  if (opts.options) {
-    body.options = opts.options;
+
+  const options: Record<string, unknown> = {
+    num_ctx: runtime.num_ctx,
+    temperature: opts.options?.temperature ?? runtime.temperature,
+    seed: opts.options?.seed ?? runtime.seed,
+  };
+  if (opts.options?.num_predict !== undefined) {
+    options.num_predict = opts.options.num_predict;
   }
-  const think = opts.think ?? (opts.tier === 'agent' ? false : undefined);
-  if (think !== undefined) {
-    body.think = think;
+  body.options = options;
+
+  if (typeof model.thinking === 'boolean') {
+    body.think = model.thinking;
   }
 
   const timeout = opts.timeout ?? defaultTimeout;
@@ -363,7 +351,7 @@ export async function orionChat(opts: OrionChatOptions): Promise<OrionChatRespon
   const total = Date.now() - start;
   agentTrace('orionChat end', {
     tier: opts.tier,
-    model,
+    model: model.ollamaTag,
     total,
     firstToken: total,
     contentLength: content.length,
@@ -380,10 +368,11 @@ export async function orionChat(opts: OrionChatOptions): Promise<OrionChatRespon
 }
 
 /**
- * One-shot planner warm-up. Runs a minimal agent /api/chat call in the
- * background so llama3.2:latest is loaded into memory. StrictMode duplicate
- * mount calls are deduplicated by returning the in-flight module promise.
- * The response is never shown to the user.
+ * One-shot planner warm-up. Runs a minimal /api/chat call with the resolved
+ * active model so it is loaded into memory. StrictMode duplicate mounts are
+ * deduplicated by returning the in-flight module promise. The promise is
+ * reset after it settles so a failed warm-up does not permanently prevent
+ * retry. The response is never shown to the user.
  */
 export function warmOrionAgent(): Promise<WarmupResult> {
   if (agentWarmupPromise) {
@@ -397,15 +386,15 @@ export function warmOrionAgent(): Promise<WarmupResult> {
   agentTrace('planner warm-up start', { generation: thisGen });
   console.log('[planner-warmup] start', { generation: thisGen });
 
-  agentWarmupPromise = (async (): Promise<WarmupResult> => {
+  const promise = (async (): Promise<WarmupResult> => {
     try {
       const callStart = Date.now();
+      const runtime = getOrionRuntimeOptions();
       await orionChat({
         tier: 'agent',
         messages: [{ role: 'user', content: 'ok' }],
-        keepAlive: AGENT_KEEP_ALIVE,
-        options: { temperature: 0, seed: 42, num_predict: 1 },
-        skipWarmup: true,
+        keepAlive: runtime.keep_alive,
+        options: { num_predict: 1, temperature: 0, seed: 42 },
       });
       const elapsed = Date.now() - callStart;
       if (thisGen !== agentWarmupGeneration) {
@@ -430,10 +419,17 @@ export function warmOrionAgent(): Promise<WarmupResult> {
     }
   })();
 
+  agentWarmupPromise = promise;
+  // Reset after settling so the central startup state can retry on failure.
+  promise.finally(() => {
+    agentWarmupPromise = null;
+  });
+
   return agentWarmupPromise;
 }
 
 export async function releaseAgentModel(): Promise<void> {
+  const model = resolveActiveModel();
   try {
     await ollamaFetchWithTimeout(
       '/api/generate',
@@ -441,7 +437,7 @@ export async function releaseAgentModel(): Promise<void> {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          model: ORION_AGENT_MODEL,
+          model: model.ollamaTag,
           keep_alive: AGENT_KEEP_ALIVE_IDLE,
           prompt: '',
         }),

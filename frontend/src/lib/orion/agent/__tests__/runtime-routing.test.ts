@@ -7,8 +7,7 @@ import { createExecutionContext } from '../executionContext';
 import type { OrionChatMessage } from '../../client';
 
 vi.mock('../../client', () => ({
-  ORION_AGENT_MODEL: 'llama3.2:latest',
-  ORION_CHAT_MODEL: 'llama3.2',
+  ORION_AGENT_MODEL: 'qwen3:8b',
   AGENT_KEEP_ALIVE: '5m',
   orionChat: vi.fn().mockResolvedValue({ content: 'Got it.', toolCalls: [], raw: {} }),
 }));

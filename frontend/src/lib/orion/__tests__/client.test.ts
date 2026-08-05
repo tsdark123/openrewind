@@ -101,10 +101,18 @@ describe('orion client warm-up', () => {
     const chatCalls = fetchMock.mock.calls.filter(([url]) => String(url).includes('/api/chat'));
     expect(chatCalls).toHaveLength(1);
     const body = (chatCalls[0][1] as { body: string }).body;
-    expect(JSON.parse(body)).toMatchObject({ think: false });
+    expect(JSON.parse(body)).toMatchObject({
+      model: 'qwen3:8b',
+      think: false,
+      options: {
+        num_ctx: 4096,
+        temperature: 0,
+        seed: 42,
+      },
+    });
   });
 
-  it('chat-tier orionChat does not set think', async () => {
+  it('chat-tier orionChat uses the resolved certified model and runtime options', async () => {
     let chatCall = 0;
     const fetchMock = makeFetchMock((url) => {
       if (url.includes('/api/show')) {
@@ -122,8 +130,8 @@ describe('orion client warm-up', () => {
     // Start an agent warm-up.
     const warmup = client.warmOrionAgent();
 
-    // A chat call does not await the agent warm-up (different model tier)
-    // and therefore succeeds with its own response.
+    // A chat call uses the same resolved model and runtime options as the
+    // agent warm-up because chat and agent now share one certified model.
     const result = await client.orionChat({
       tier: 'chat',
       messages: [{ role: 'user', content: 'hello' }],
@@ -132,7 +140,16 @@ describe('orion client warm-up', () => {
     expect(result.content).toBe('call-2');
 
     const chatCalls = fetchMock.mock.calls.filter(([url]) => String(url).includes('/api/chat'));
-    expect(JSON.parse((chatCalls[1][1] as { body: string }).body)).not.toHaveProperty('think');
+    const body = JSON.parse((chatCalls[1][1] as { body: string }).body);
+    expect(body).toMatchObject({
+      model: 'qwen3:8b',
+      think: false,
+      options: {
+        num_ctx: 4096,
+        temperature: 0,
+        seed: 42,
+      },
+    });
 
     // Finish the warm-up so the test can clean up without dangling promises.
     await warmup;
