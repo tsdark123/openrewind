@@ -3,7 +3,7 @@ import {
   validateSemanticIntent,
   extractSemanticIntent,
   buildIntentExtractionPrompt,
-  SEMANTIC_INTENT_SCHEMA,
+  preValidateSanitize,
   type SemanticIntent,
 } from '../intent';
 
@@ -185,10 +185,10 @@ describe('SemanticIntent validation', () => {
     if (!r.ok) expect(r.error).toMatch(/non-empty message/);
   });
 
-  it('prompt contains the schema and rules', () => {
+  it('prompt contains the compact chart_action kind and rules', () => {
     const prompt = buildIntentExtractionPrompt();
-    expect(prompt).toContain(JSON.stringify(SEMANTIC_INTENT_SCHEMA).slice(0, 40));
     expect(prompt).toContain('Do not write prose');
+    expect(prompt).toContain('"const":"chart_action"');
   });
 });
 
@@ -217,7 +217,7 @@ describe('extractSemanticIntent', () => {
     expect(call.format).toBe('json');
     expect(call.options).toEqual({ temperature: 0, seed: 42, num_predict: 160 });
     const system = call.messages.find((m: { role: string; content: string }) => m.role === 'system')?.content ?? '';
-    expect(system).toContain(JSON.stringify(SEMANTIC_INTENT_SCHEMA).slice(0, 60));
+    expect(system).toContain('"const":"chart_action"');
     expect(r.ok).toBe(true);
     if (r.ok) {
       expect(r.intent.symbol).toBe('NVDA');
@@ -283,5 +283,109 @@ describe('extractSemanticIntent', () => {
     expect(mockedOrionChat).toHaveBeenCalledTimes(1);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.kind).toBe('unsupported');
+  });
+});
+
+describe('buildIntentExtractionPrompt adaptive prompt', () => {
+  it('an analysis-only prompt omits playback/seek/symbol schema sections', () => {
+    const prompt = buildIntentExtractionPrompt({
+      text: 'what kind of candle am I on',
+      requestContext: {
+        dimensions: ['analysisRequest'],
+        missing: ['analysisRequest'],
+      },
+    });
+    expect(prompt).toContain('"analysisRequests"');
+    expect(prompt).not.toContain('"playback"');
+    expect(prompt).not.toContain('"seekTime"');
+    expect(prompt).not.toContain('"symbol"');
+  });
+
+  it('an analysis prompt includes the analysisRequests section', () => {
+    const prompt = buildIntentExtractionPrompt({
+      text: 'what was the range in the first hour',
+      requestContext: {
+        dimensions: ['analysisRequest'],
+        missing: ['analysisRequest'],
+      },
+    });
+    expect(prompt).toContain('"analysisRequests"');
+    expect(prompt).toContain('window_ohlc');
+    expect(prompt).toContain('candle_shape');
+  });
+
+  it('an ambiguous/no-context prompt receives the full compact fallback', () => {
+    const fallback = buildIntentExtractionPrompt();
+    expect(fallback).toContain('"playback"');
+    expect(fallback).toContain('"seekTime"');
+    expect(fallback).toContain('"symbol"');
+    expect(fallback).toContain('"analysisRequests"');
+    expect(fallback).toContain('"const":"chart_action"');
+  });
+
+  it('a context follow-up includes contextReference', () => {
+    const prompt = buildIntentExtractionPrompt({
+      text: 'do that again',
+      requestContext: {
+        dimensions: [],
+        missing: ['contextReference'],
+      },
+    });
+    expect(prompt).toContain('"contextReference"');
+  });
+
+  it('a candle-only prompt is significantly smaller than the full fallback', () => {
+    const fallback = buildIntentExtractionPrompt();
+    const candle = buildIntentExtractionPrompt({
+      text: 'what kind of candle am I on',
+      requestContext: {
+        dimensions: ['analysisRequest'],
+        missing: ['analysisRequest'],
+      },
+    });
+    expect(candle.length).toBeLessThan(fallback.length / 2);
+  });
+});
+
+describe('preValidateSanitize nested window_compare normalization', () => {
+  it('normalizes both left and right sides before validation', () => {
+    const raw: Record<string, unknown> = {
+      kind: 'chart_action',
+      analysisRequests: [
+        { kind: 'window_compare', left: { kind: 'first_hour' }, right: { kind: 'last_hour' } },
+      ],
+    };
+    preValidateSanitize(raw, 'compare the first hour with the last hour');
+    const requests = raw.analysisRequests as Record<string, unknown>[];
+    expect(requests[0].left).toEqual({ kind: 'time_range', fromTime: '09:30', toTime: '10:30' });
+    expect(requests[0].right).toEqual({ kind: 'time_range', fromTime: '15:00', toTime: '16:00' });
+  });
+
+  it('preserves explicit fromTime/toTime over named aliases on both sides', () => {
+    const raw: Record<string, unknown> = {
+      kind: 'chart_action',
+      analysisRequests: [
+        {
+          kind: 'window_compare',
+          left: { kind: 'first_hour', fromTime: '10:00', toTime: '10:30' },
+          right: { kind: 'last_hour', fromTime: '14:30', toTime: '15:30' },
+        },
+      ],
+    };
+    preValidateSanitize(raw, 'compare 10:00-10:30 with 14:30-15:30');
+    const requests = raw.analysisRequests as Record<string, unknown>[];
+    expect(requests[0].left).toEqual({ kind: 'time_range', fromTime: '10:00', toTime: '10:30' });
+    expect(requests[0].right).toEqual({ kind: 'time_range', fromTime: '14:30', toTime: '15:30' });
+  });
+
+  it('leaves unknown comparison-side kinds intact for strict validation to reject', () => {
+    const raw: Record<string, unknown> = {
+      kind: 'chart_action',
+      analysisRequests: [{ kind: 'window_compare', left: { kind: 'lunch_break' }, right: { kind: 'last_hour' } }],
+    };
+    preValidateSanitize(raw, 'compare lunch break with the last hour');
+    const requests = raw.analysisRequests as Record<string, unknown>[];
+    expect(requests[0].left).toEqual({ kind: 'lunch_break' });
+    expect(requests[0].right).toEqual({ kind: 'time_range', fromTime: '15:00', toTime: '16:00' });
   });
 });

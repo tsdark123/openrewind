@@ -253,7 +253,11 @@ export function createExecutionContext(): ExecutionContextStore {
       }
       const analysisReceipt = e.receipts.find((r) => r.success && r.capability.startsWith('analysis.'));
       if (analysisReceipt) {
-        parts.push(`result:${analysisReceipt.message}`);
+        const MAX_RESULT_LEN = 120;
+        const msg = analysisReceipt.message.length > MAX_RESULT_LEN
+          ? `${analysisReceipt.message.slice(0, MAX_RESULT_LEN)}...`
+          : analysisReceipt.message;
+        parts.push(`result:${msg}`);
       }
       lines.push(parts.join(' '));
     }

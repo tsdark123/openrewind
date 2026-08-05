@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import type { AppState } from '../../../../types';
 import type { AgentContext } from '../types';
-import { handleOrionMessage } from '../orchestrator';
+import { handleOrionMessage, sanitizeIntentGrounding } from '../orchestrator';
 import { createExecutionContext } from '../executionContext';
 
 function baseAppState(): AppState {
@@ -390,5 +390,59 @@ describe('handleOrionMessage canonical repeat', () => {
     await handleOrionMessage({ text: 'Do that again.', ctx, setupReady: true });
     const after = ctx.executionLog.getEntries().length;
     expect(after).toBe(before + 1);
+  });
+});
+
+describe('sanitizeIntentGrounding stale date/timeframe stripping', () => {
+  it('strips a date/timeframe that matches the active session on a symbol switch', () => {
+    const ctx = makeCtx();
+    const state = ctx.getState();
+    state.symbol = 'AAPL';
+    state.replayDate = '2026-07-10';
+    state.timeframe = 1;
+
+    const resolved: any = {
+      kind: 'chart_action',
+      symbol: 'NVDA',
+      date: { kind: 'absolute', value: '2026-07-10' },
+      timeframeMinutes: 1,
+    };
+    const r = sanitizeIntentGrounding(
+      resolved,
+      'switch to NVDA',
+      { source: 'latest_successful_action', mode: 'inherit', inherit: ['date', 'timeframe'] },
+      ctx
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.intent!.symbol).toBe('NVDA');
+    expect(r.intent!.date).toBeUndefined();
+    expect(r.intent!.timeframeMinutes).toBeUndefined();
+  });
+
+  it('keeps a date that differs from the active session date', () => {
+    const ctx = makeCtx();
+    const state = ctx.getState();
+    state.symbol = 'AAPL';
+    state.replayDate = '2026-07-10';
+    state.timeframe = 1;
+
+    const resolved: any = {
+      kind: 'chart_action',
+      symbol: 'NVDA',
+      date: { kind: 'absolute', value: '2026-07-09' },
+      timeframeMinutes: 1,
+    };
+    const r = sanitizeIntentGrounding(
+      resolved,
+      'switch to NVDA',
+      { source: 'latest_successful_action', mode: 'inherit', inherit: ['date', 'timeframe'] },
+      ctx
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.intent!.symbol).toBe('NVDA');
+    expect(r.intent!.date).toEqual({ kind: 'absolute', value: '2026-07-09' });
+    expect(r.intent!.timeframeMinutes).toBeUndefined();
   });
 });

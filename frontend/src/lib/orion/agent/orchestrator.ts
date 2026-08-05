@@ -55,7 +55,7 @@ import type { SymbolResolution } from './resolveSymbol';
 import { chartCommandToPlan, chartCommandToActionTemplate } from './planner-adapter';
 import { executeAgentPlan } from './executor';
 import { extractSemanticIntent, validateSemanticIntent } from './intent';
-import { compileChartActionIntent, resolveContextReference } from './intentCompiler';
+import { compileChartActionIntent, resolveContextReference, resolveAnalysisInheritance } from './intentCompiler';
 import { validateAgentPlan } from './validatePlan';
 import { agentTrace } from './config';
 import {
@@ -586,6 +586,7 @@ export function sanitizeIntentGrounding(
   const requested = getRequestedDimensions(text, cmd, baseDate);
   const anaphoric = originalContextReference !== undefined;
   const state = ctx.getState();
+  const willChangeSymbol = resolved.symbol !== undefined && resolved.symbol !== state.symbol;
 
   const allowed = new Set<ActionDimension>(requested);
   if (anaphoric && originalContextReference) {
@@ -660,11 +661,13 @@ export function sanitizeIntentGrounding(
   // Date
   if (sanitized.date) {
     const dateTrace = formatDateForTrace(sanitized.date);
-    if (allowed.has('date')) {
-      trace.kept.push(`date:${dateTrace}`);
-    } else if (sanitized.date.kind === 'absolute' && sanitized.date.value === state.replayDate) {
+    if (sanitized.date.kind === 'absolute' && sanitized.date.value === state.replayDate && willChangeSymbol) {
+      // Same date as the active session while switching symbols: the new symbol
+      // can use the current replay date; do not emit a stale resolve step.
       delete sanitized.date;
       trace.defaults.push(`date:${state.replayDate}`);
+    } else if (allowed.has('date')) {
+      trace.kept.push(`date:${dateTrace}`);
     } else {
       delete sanitized.date;
       trace.stripped.push(`date:${dateTrace}`);
@@ -674,11 +677,13 @@ export function sanitizeIntentGrounding(
   // Timeframe
   if (sanitized.timeframeMinutes !== undefined) {
     const tf = sanitized.timeframeMinutes;
-    if (allowed.has('timeframe')) {
-      trace.kept.push(`timeframe:${tf}m`);
-    } else if (tf === state.timeframe) {
+    if (tf === state.timeframe && willChangeSymbol) {
+      // Same timeframe as the active session while switching symbols: the new
+      // symbol's chart can use the current timeframe; do not emit a stale step.
       delete sanitized.timeframeMinutes;
       trace.defaults.push(`timeframe:${tf}m`);
+    } else if (allowed.has('timeframe')) {
+      trace.kept.push(`timeframe:${tf}m`);
     } else {
       delete sanitized.timeframeMinutes;
       trace.stripped.push(`timeframe:${tf}m`);
@@ -1188,6 +1193,31 @@ async function routeMessage(
         };
       }
 
+      // Resolve inherited analysis windows for short metric/comparison follow-ups,
+      // even when the compact model forgets to emit a contextReference.
+      if (resolution.intent.kind === 'chart_action' && resolution.intent.analysisRequests) {
+        const prior = ctx.executionLog.latestSuccessfulAction();
+        const inherited = resolveAnalysisInheritance(
+          resolution.intent.analysisRequests,
+          prior?.template?.analysisRequests,
+          { text, hasPriorAction: prior !== undefined }
+        );
+        if (!inherited.ok) {
+          agentTrace('route', 'clarification', { reason: inherited.error });
+          return {
+            ok: true,
+            message: inherited.error,
+            wasChat: true,
+            route: 'clarification',
+          };
+        }
+        if (inherited.requests.length > 0) {
+          resolution.intent.analysisRequests = inherited.requests;
+        } else {
+          delete resolution.intent.analysisRequests;
+        }
+      }
+
       const sanitization = sanitizeIntentGrounding(resolution.intent, text, extraction.intent.contextReference, ctx);
       if (!sanitization.ok) {
         agentTrace('grounding', 'rejected ungrounded chart action', { reason: sanitization.reason });
@@ -1240,6 +1270,70 @@ async function routeMessage(
     }
 
     if (kind === 'clarification') {
+      const state = ctx.getState();
+
+      // Truthful no-session semantics: an anaphoric analysis request with no
+      // active session should execute and fail with PRECONDITION_FAILED rather
+      // than return a chatty clarification.
+      if (!state.sessionActive && textRequestsAnalysis(text) && looksLikeContextReference(text, ctx)) {
+        const plan: AgentPlan = {
+          id: makePlanId(),
+          summary: 'No active session',
+          kind: 'query',
+          steps: [
+            {
+              id: 'step-summary',
+              capability: 'analysis.window_summary',
+              args: { window: { kind: 'whole_session' } },
+              required: false,
+            },
+          ],
+        };
+        const result = await executeAgentPlan(plan, ctx, token);
+        return {
+          ok: false,
+          message: 'No active session to analyze.',
+          wasChat: false,
+          route: 'clarification',
+          plan,
+          result,
+        };
+      }
+
+      // If the LLM asks for a previous candle but the chart has an active
+      // session, the current chart candle is a valid source.  Only apply this
+      // fallback when the request is genuinely current/deictic and the user has
+      // not supplied an absolute market time or historical candle reference.
+      const candleRequested = getRequestedDimensions(text, cmd, state.replayDate);
+      const hasExplicitTime =
+        candleRequested.has('absoluteTime') || cmd.startTime !== undefined || cmd.endTime !== undefined;
+      const isCandleShapeContext =
+        textRequestsCandleShape(text) || candleRequested.has('candleQuery');
+      if (state.sessionActive && isCandleShapeContext && !hasExplicitTime) {
+        const plan: AgentPlan = {
+          id: makePlanId(),
+          summary: 'Current candle shape',
+          kind: 'query',
+          steps: [
+            {
+              id: 'step-candle',
+              capability: 'analysis.candle_shape',
+              args: { source: 'current_chart_candle' },
+              required: false,
+            },
+          ],
+        };
+        const result = await executeAgentPlan(plan, ctx, token);
+        return {
+          ok: result.ok,
+          message: composeResponse(result, ctx),
+          wasChat: false,
+          route: 'llm-plan',
+          plan,
+          result,
+        };
+      }
+
       agentTrace('route', 'clarification');
       return { ok: true, message, wasChat: true, route: 'clarification' };
     }

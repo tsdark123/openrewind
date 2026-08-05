@@ -35,6 +35,13 @@ export interface ParsedTime { hour: number; minute: number; }
 
 export const SUPPORTED_TIMEFRAMES = [1, 5, 15, 60, 240, 1440] as const;
 
+export interface MarketTime { hour: number; minute: number; }
+
+export const US_EQUITY_MARKET_OPEN: MarketTime = { hour: 9, minute: 30 };
+export const US_EQUITY_MARKET_CLOSE: MarketTime = { hour: 16, minute: 0 };
+export const MORNING_END: MarketTime = { hour: 12, minute: 0 };
+export const AFTERNOON_START: MarketTime = { hour: 12, minute: 0 };
+
 export interface DateInputSpec {
   kind: 'explicit' | 'relative_calendar' | 'relative_trading' | 'today';
   /** Number of sessions/days to walk. */
@@ -362,10 +369,14 @@ export function extractTimes(text: string): ParsedTime[] {
   }
 
   const marketOpen = /\bmarket\s+open\b/i.exec(text);
-  if (marketOpen && marketOpen.index !== undefined) add(9, 30, marketOpen.index, undefined);
+  if (marketOpen && marketOpen.index !== undefined) {
+    add(US_EQUITY_MARKET_OPEN.hour, US_EQUITY_MARKET_OPEN.minute, marketOpen.index, undefined);
+  }
 
   const marketClose = /\bmarket\s+close\b/i.exec(text);
-  if (marketClose && marketClose.index !== undefined) add(16, 0, marketClose.index, undefined);
+  if (marketClose && marketClose.index !== undefined) {
+    add(US_EQUITY_MARKET_CLOSE.hour, US_EQUITY_MARKET_CLOSE.minute, marketClose.index, undefined);
+  }
 
   const noon = /(?<!\b(?:quarter|half)\s+(?:past|to)\s+)\b(noon|midday)\b/i.exec(text);
   if (noon && noon.index !== undefined) add(12, 0, noon.index, undefined);
@@ -406,6 +417,13 @@ export function extractTimes(text: string): ParsedTime[] {
   return matches.map((m) => m.time);
 }
 
+// Skip number+unit matches that are part of a named market window such as
+// "first 30 minutes", "last hour", "final 45 minutes" or "opening 60 minutes".
+function isNamedWindowMinuteMatch(t: string, start: number): boolean {
+  const before = t.slice(0, start);
+  return /(?:^|\b)(?:the\s+)?(first|last|final|closing|opening)(?:\s+(?:the|a|an))?\s+$/i.test(before);
+}
+
 function extractSpeed(text: string): number | undefined {
   const m = text.match(/(\d{1,3})\s*(?:x|times?)\b/i);
   if (m) {
@@ -430,13 +448,18 @@ function extractSpeed(text: string): number | undefined {
 }
 
 function extractRelativeMinutes(text: string): number | undefined {
-  const m = text.match(/(?:another\s+)?(\d+(?:\.\d+)?)\s*(?:more\s+|extra\s+)?(?:min|minute|hour|hr)s?\b/i);
-  if (!m) return undefined;
-  const n = parseFloat(m[1]);
-  const unit = m[2]?.toLowerCase() || '';
-  if (Number.isNaN(n) || n <= 0) return undefined;
-  if (unit.startsWith('hour') || unit.startsWith('hr')) return Math.round(n * 60);
-  return Math.round(n);
+  const re = /(?:another\s+)?(\d+(?:\.\d+)?)\s*(?:more\s+|extra\s+)?(?:min|minute|hour|hr)s?\b/gi;
+  const t = text.toLowerCase();
+  for (const m of t.matchAll(re)) {
+    const start = m.index ?? 0;
+    if (isNamedWindowMinuteMatch(t, start)) continue;
+    const n = parseFloat(m[1]);
+    const unit = m[2]?.toLowerCase() || '';
+    if (Number.isNaN(n) || n <= 0) continue;
+    if (unit.startsWith('hour') || unit.startsWith('hr')) return Math.round(n * 60);
+    return Math.round(n);
+  }
+  return undefined;
 }
 
 const TIME_LABELS: Record<number, string> = {
@@ -524,6 +547,12 @@ export function extractTimeframe(text: string): number | undefined {
     const end = start + full.length;
     const after = t.slice(end);
     if (/^\s*(ago|back|before|later|forward|ahead|from\s+now)\b/.test(after)) continue;
+    if (isNamedWindowMinuteMatch(t, start)) continue;
+
+    // Skip when the number is the minute part of an HH:MM clock expression
+    // (e.g. "11:30 candle" should not be read as a 30-minute timeframe).
+    const beforeNumber = t.slice(Math.max(0, start - 5), start);
+    if (/\d{1,2}:\s*$/.test(beforeNumber)) continue;
 
     const n = parseTimeframeNumber(rawN);
     if (n === undefined) continue;

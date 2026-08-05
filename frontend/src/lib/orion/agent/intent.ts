@@ -13,13 +13,34 @@
 
 import { agentTrace } from './config';
 import { orionChat, ORION_AGENT_MODEL, type OrionChatMessage } from '../client';
-import { parseChartCommand, extractTimes } from '../planner';
+import {
+  parseChartCommand,
+  extractTimes,
+  formatTime,
+  US_EQUITY_MARKET_OPEN,
+  US_EQUITY_MARKET_CLOSE,
+  MORNING_END,
+  AFTERNOON_START,
+} from '../planner';
 import {
   type ActionDimension,
   ALL_ACTION_DIMENSIONS,
   INHERIT_FIELD_TO_DIMENSION,
   getRequestedDimensions,
   textRequestsAnalysis,
+  textRequestsCandleQuery,
+  textRequestsCandleShape,
+  textRequestsDate,
+  textRequestsSummary,
+  textRequestsTimeframe,
+  textRequestsAbsoluteTime,
+  textRequestsRelativeSeek,
+  textRequestsPlaybackControl,
+  textRequestsPreviousSymbol,
+  textRequestsContextReference,
+  detectAnalysisConcepts,
+  hasCompareLanguage,
+  hasNonPhrasalDirection,
 } from './dimensions';
 import type {
   ChartActionIntent,
@@ -247,102 +268,705 @@ export const SEMANTIC_INTENT_SCHEMA: Record<string, unknown> = {
   ],
 };
 
-// Stringified, compact version for the LLM system prompt.
-export function semanticIntentSchemaJson(): string {
-  return JSON.stringify(SEMANTIC_INTENT_SCHEMA).replace(/"/g, '"');
+// ---------------------------------------------------------------------------
+// Compact, LLM-facing schemas derived from the runtime schemas.
+// These strip `description` fields and avoid a large oneOf for analysis
+// requests, while remaining compatible with validateSemanticIntent.
+// ---------------------------------------------------------------------------
+
+const COMPACT_ANALYSIS_WINDOW_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['kind'],
+  properties: {
+    kind: { enum: ['whole_session', 'up_to_cursor', 'time_range'] },
+    fromTime: { type: 'string' },
+    toTime: { type: 'string' },
+  },
+};
+
+const ANALYSIS_REQUEST_KINDS = [
+  'window_ohlc',
+  'window_change',
+  'window_volume',
+  'window_compare',
+  'candle_shape',
+  'window_summary',
+];
+
+function compactWindowItemProps(kinds: string[]): Record<string, unknown> {
+  const props: Record<string, unknown> = { kind: { enum: kinds } };
+  const needsWindow = kinds.some((k) => ['window_ohlc', 'window_change', 'window_volume', 'window_summary'].includes(k));
+  const needsCandle = kinds.includes('candle_shape');
+  const needsCompare = kinds.includes('window_compare');
+  if (needsWindow) props.window = COMPACT_ANALYSIS_WINDOW_SCHEMA;
+  if (needsCandle) {
+    props.source = { enum: ['current_chart_candle', 'market_time'] };
+    props.marketTime = { type: 'string' };
+  }
+  if (needsCompare) {
+    props.left = COMPACT_ANALYSIS_WINDOW_SCHEMA;
+    props.right = COMPACT_ANALYSIS_WINDOW_SCHEMA;
+  }
+  return props;
+}
+
+function buildCompactAnalysisRequestSchema(kinds?: string[]): Record<string, unknown> {
+  const effectiveKinds = kinds && kinds.length > 0 ? kinds : ANALYSIS_REQUEST_KINDS;
+  return {
+    type: 'object',
+    additionalProperties: false,
+    required: ['kind'],
+    properties: compactWindowItemProps(effectiveKinds),
+  };
+}
+
+const COMPACT_ANALYSIS_REQUEST_SCHEMA = buildCompactAnalysisRequestSchema();
+
+const COMPACT_COMPARE_SIDE_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['source'],
+  properties: {
+    source: { type: 'string' },
+    marketTime: { type: 'string' },
+  },
+};
+
+const COMPARE_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['left', 'right'],
+  properties: {
+    left: COMPACT_COMPARE_SIDE_SCHEMA,
+    right: COMPACT_COMPARE_SIDE_SCHEMA,
+  },
+};
+
+const ALL_CHART_ACTION_PROPERTIES: Record<string, unknown> = {
+  symbol: { type: 'string' },
+  date: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['kind'],
+    properties: {
+      kind: { enum: ['absolute', 'relative_trading'] },
+      value: { type: 'string' },
+      count: { type: 'integer', minimum: 1 },
+      direction: { enum: ['backward', 'forward'] },
+    },
+  },
+  timeframeMinutes: { type: 'integer', minimum: 1 },
+  seekTime: { type: 'string' },
+  relativeSeekMinutes: { type: 'integer' },
+  playback: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['action'],
+    properties: {
+      action: { enum: ['play', 'pause', 'play_until'] },
+      speed: { type: 'integer', minimum: 1 },
+      untilTime: { type: 'string' },
+      direction: { enum: ['forward', 'backward'] },
+    },
+  },
+  finalQuery: { enum: ['current_candle', 'candle_at_time', 'compare_candles'] },
+  queryTime: { type: 'string' },
+  previousSymbol: { type: 'boolean' },
+  analysisRequests: { type: 'array', minItems: 1, maxItems: 4, items: COMPACT_ANALYSIS_REQUEST_SCHEMA },
+  compare: COMPARE_SCHEMA,
+  contextReference: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['source'],
+    properties: {
+      source: { type: 'string' },
+      mode: { type: 'string' },
+      inherit: { type: 'array', items: { type: 'string' } },
+    },
+  },
+};
+
+export const EXAMPLE_LIBRARY = [
+  { fields: ['symbol', 'date', 'timeframe', 'seekTime', 'finalQuery'], text: 'Set me up on NVDA prior session 15m 11:15 and tell me what candle I\'m on', json: '{"kind":"chart_action","symbol":"NVDA","date":{"kind":"relative_trading","count":1,"direction":"backward"},"timeframeMinutes":15,"seekTime":"11:15","finalQuery":"current_candle"}' },
+  { fields: ['seekTime'], text: 'Park the replay at 2:45 p.m.', json: '{"kind":"chart_action","seekTime":"14:45"}' },
+  { fields: ['analysisRequests'], text: 'How much did it move up to here?', json: '{"kind":"chart_action","analysisRequests":[{"kind":"window_change","window":{"kind":"up_to_cursor"}}]}' },
+  { fields: ['analysisRequests'], text: 'Compare the opening 30 minutes with the final 30 minutes', json: '{"kind":"chart_action","analysisRequests":[{"kind":"window_compare","left":{"kind":"time_range","fromTime":"09:30","toTime":"10:00"},"right":{"kind":"time_range","fromTime":"15:30","toTime":"16:00"}}]}' },
+  { fields: ['relativeSeekMinutes', 'finalQuery'], text: 'Move 30 minutes earlier and give me the bar', json: '{"kind":"chart_action","relativeSeekMinutes":-30,"finalQuery":"current_candle"}' },
+  { fields: ['previousSymbol'], text: 'Take me back to the previous stock', json: '{"kind":"chart_action","previousSymbol":true}' },
+  { fields: ['finalQuery', 'queryTime'], text: 'Give me the bar at 11:30', json: '{"kind":"chart_action","finalQuery":"candle_at_time","queryTime":"11:30"}' },
+  { fields: ['finalQuery'], text: 'Tell me what candle I\'m on', json: '{"kind":"chart_action","finalQuery":"current_candle"}' },
+  { fields: ['compare', 'finalQuery'], text: 'Compare this candle with the previous one you reported', json: '{"kind":"chart_action","finalQuery":"compare_candles","compare":{"left":{"source":"latest_returned_candle"},"right":{"source":"previous_returned_candle"}}}' },
+  { fields: ['analysisRequests'], text: 'What was the range in the first hour', json: '{"kind":"chart_action","analysisRequests":[{"kind":"window_ohlc","window":{"kind":"time_range","fromTime":"09:30","toTime":"10:30"}}]}' },
+  { fields: ['analysisRequests'], text: 'Describe the shape of the candle currently on the chart', json: '{"kind":"chart_action","analysisRequests":[{"kind":"candle_shape","source":"current_chart_candle"}]}' },
+  { fields: ['analysisRequests'], text: 'What was the overall session summary for this symbol', json: '{"kind":"chart_action","analysisRequests":[{"kind":"window_summary","window":{"kind":"whole_session"}}]}' },
+  { fields: ['contextReference'], text: 'Do that again', json: '{"kind":"chart_action","contextReference":{"source":"latest_successful_action","mode":"repeat"}}' },
+  { fields: ['contextReference', 'analysisRequests'], text: 'Do the same analysis but only for the opening hour', json: '{"kind":"chart_action","contextReference":{"source":"latest_successful_action","mode":"inherit","inherit":["analysisRequests"]},"analysisRequests":[{"kind":"window_ohlc","window":{"kind":"time_range","fromTime":"09:30","toTime":"10:30"}}]}' },
+  { fields: ['analysisRequests'], text: 'What was the move and total volume from 10 to noon?', json: '{"kind":"chart_action","analysisRequests":[{"kind":"window_change","window":{"kind":"time_range","fromTime":"10:00","toTime":"12:00"}},{"kind":"window_volume","window":{"kind":"time_range","fromTime":"10:00","toTime":"12:00"}}]}' },
+  { fields: ['analysisRequests'], text: 'Which had more volume, the morning or the afternoon?', json: '{"kind":"chart_action","analysisRequests":[{"kind":"window_compare","left":{"kind":"time_range","fromTime":"09:30","toTime":"12:00"},"right":{"kind":"time_range","fromTime":"12:00","toTime":"16:00"}},{"kind":"window_volume","window":{"kind":"time_range","fromTime":"09:30","toTime":"16:00"}}]}' },
+  { fields: ['analysisRequests'], text: 'Was the morning turnover higher than near the close?', json: '{"kind":"chart_action","analysisRequests":[{"kind":"window_compare","left":{"kind":"time_range","fromTime":"09:30","toTime":"12:00"},"right":{"kind":"time_range","fromTime":"15:30","toTime":"16:00"}},{"kind":"window_volume","window":{"kind":"time_range","fromTime":"09:30","toTime":"16:00"}}]}' },
+  { fields: ['analysisRequests'], text: 'What was the move, total volume and candle structure from 10 to noon?', json: '{"kind":"chart_action","analysisRequests":[{"kind":"window_change","window":{"kind":"time_range","fromTime":"10:00","toTime":"12:00"}},{"kind":"window_volume","window":{"kind":"time_range","fromTime":"10:00","toTime":"12:00"}},{"kind":"candle_shape","source":"market_time","marketTime":"12:00"}]}' },
+  { fields: ['contextReference', 'analysisRequests'], text: 'What was the volume like for the same window', json: '{"kind":"chart_action","contextReference":{"source":"latest_successful_action","mode":"inherit","inherit":["analysisRequests"]},"analysisRequests":[{"kind":"window_volume"}]}' },
+  { fields: ['symbol', 'contextReference'], text: 'Do that same analysis on NVDA', json: '{"kind":"chart_action","symbol":"NVDA","contextReference":{"source":"latest_successful_action","mode":"repeat"}}' },
+  { fields: ['contextReference', 'analysisRequests'], text: 'How does that compare with the closing hour?', json: '{"kind":"chart_action","contextReference":{"source":"latest_successful_action","mode":"inherit","inherit":["analysisRequests"]},"analysisRequests":[{"kind":"window_compare","left":{"kind":"time_range","fromTime":"09:30","toTime":"15:00"},"right":{"kind":"time_range","fromTime":"15:00","toTime":"16:00"}},{"kind":"window_volume","window":{"kind":"time_range","fromTime":"09:30","toTime":"16:00"}}]}' },
+  { fields: ['playback'], text: 'Play until 16:00', json: '{"kind":"chart_action","playback":{"action":"play_until","untilTime":"16:00"}}' },
+];
+
+function buildCompactChartActionProperties(selectedFields?: Set<string>, analysisKinds?: string[]): Record<string, unknown> {
+  const props: Record<string, unknown> = { kind: { const: 'chart_action' } };
+  if (!selectedFields) {
+    for (const [key, value] of Object.entries(ALL_CHART_ACTION_PROPERTIES)) {
+      props[key] = value;
+    }
+    return props;
+  }
+  for (const [key, value] of Object.entries(ALL_CHART_ACTION_PROPERTIES)) {
+    if (selectedFields.has(key)) {
+      if (key === 'analysisRequests') {
+        props[key] = {
+          type: 'array',
+          minItems: 1,
+          maxItems: 4,
+          items: buildCompactAnalysisRequestSchema(analysisKinds),
+        };
+      } else {
+        props[key] = value;
+      }
+    }
+  }
+  return props;
+}
+
+function buildCompactSchema(selectedFields?: Set<string>, analysisKinds?: string[]): Record<string, unknown> {
+  return {
+    oneOf: [
+      {
+        type: 'object',
+        additionalProperties: false,
+        required: ['kind'],
+        properties: buildCompactChartActionProperties(selectedFields, analysisKinds),
+      },
+      { type: 'object', additionalProperties: false, required: ['kind', 'message'], properties: { kind: { const: 'clarification' }, message: { type: 'string' } } },
+      { type: 'object', additionalProperties: false, required: ['kind', 'message'], properties: { kind: { const: 'unsupported' }, message: { type: 'string' } } },
+    ],
+  };
+}
+
+function textAsksForCandleAtTime(text: string): boolean {
+  return /(?:what|which)\s+(?:candle|bar)|tell\s+me(?:\s+what)?\s+(?:candle|bar)|give\s+me\s+(?:the\s+)?(?:bar|candle)|what\s+bar\s+is\s+that/i.test(text);
+}
+
+function textContainsSymbol(text: string, requestContext?: RequestContext): boolean {
+  const available = requestContext?.availableTickers;
+  if (available && available.length > 0) {
+    const t = text.toLowerCase();
+    for (const ticker of available) {
+      if (t.includes(ticker.toLowerCase())) return true;
+    }
+    for (const [alias] of Object.entries(requestContext?.symbolAliases ?? {})) {
+      if (t.includes(alias.toLowerCase())) return true;
+    }
+  }
+  try {
+    const cmd = parseChartCommand(text, requestContext?.availableTickers ?? [], requestContext?.symbolAliases, requestContext?.baseDate);
+    return !!cmd.symbol;
+  } catch {
+    return false;
+  }
+}
+
+function selectedTopLevelFields(text: string, requestContext?: RequestContext, hasPriorAction = false): Set<string> {
+  const selected = new Set<string>();
+  const dims = new Set<string>([...(requestContext?.dimensions ?? []), ...(requestContext?.missing ?? [])]);
+  const hasDim = (d: string) => dims.has(d);
+
+  if (hasDim('symbol') || textContainsSymbol(text, requestContext)) selected.add('symbol');
+  if (hasDim('date') || textRequestsDate(text)) selected.add('date');
+  if (hasDim('timeframe') || textRequestsTimeframe(text)) selected.add('timeframeMinutes');
+  if (hasDim('absoluteTime') || textRequestsAbsoluteTime(text)) {
+    selected.add('seekTime');
+    selected.add('queryTime');
+  }
+  if (hasDim('relativeSeek') || textRequestsRelativeSeek(text)) selected.add('relativeSeekMinutes');
+  if (hasDim('playbackControl') || textRequestsPlaybackControl(text)) selected.add('playback');
+  if (hasDim('candleQuery') || textAsksForCandleAtTime(text) || textRequestsCandleQuery(text)) {
+    selected.add('finalQuery');
+    selected.add('queryTime');
+  }
+  if (hasDim('previousSymbol') || textRequestsPreviousSymbol(text)) selected.add('previousSymbol');
+  if (hasDim('analysisRequest') || textRequestsAnalysis(text)) selected.add('analysisRequests');
+  if (/\bcompare\s+(?:this|that|the|current)\s+(?:candle|bar)\s+(?:with|to|against)\s+(?:the\s+)?(?:previous|last|reported|one|other|candle|bar)\b/i.test(text)) {
+    selected.add('compare');
+    selected.add('finalQuery');
+    selected.add('queryTime');
+  }
+  if (textRequestsContextReference(text, hasPriorAction)) {
+    selected.add('contextReference');
+    // Contextual follow-ups can also change the metric (e.g. "and the range?"),
+    // so expose analysisRequests in the schema.
+    selected.add('analysisRequests');
+  }
+
+  return selected;
+}
+
+function isFullFallback(requestContext: RequestContext | undefined, text: string, hasPriorAction = false): boolean {
+  if (!requestContext || !requestContext.missing) return true;
+  if (requestContext.missing.length === 0 || requestContext.missing.length > 2) return true;
+  if (text.trim().length < 4) return true;
+  const selected = selectedTopLevelFields(text, requestContext, hasPriorAction);
+  if (selected.size === 0) return true;
+  return false;
+}
+
+function addMarketMinutes(t: { hour: number; minute: number }, minutes: number): { hour: number; minute: number } {
+  const total = t.hour * 60 + t.minute + minutes;
+  const h = Math.floor(total / 60) % 24;
+  const m = total % 60;
+  return { hour: h, minute: m };
+}
+
+const MARKET_OPEN_MINUTES = US_EQUITY_MARKET_OPEN.hour * 60 + US_EQUITY_MARKET_OPEN.minute;
+const MARKET_CLOSE_MINUTES = US_EQUITY_MARKET_CLOSE.hour * 60 + US_EQUITY_MARKET_CLOSE.minute;
+const SESSION_MINUTES = MARKET_CLOSE_MINUTES - MARKET_OPEN_MINUTES;
+
+function minutesFromTime(t: string): number | undefined {
+  const m = String(t).trim().match(/^(\d{1,2}):(\d{2})$/);
+  if (!m) return undefined;
+  const hour = Number(m[1]);
+  const minute = Number(m[2]);
+  if (Number.isNaN(hour) || Number.isNaN(minute)) return undefined;
+  if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return undefined;
+  return hour * 60 + minute;
+}
+
+function timeFromMinutes(minutes: number): string {
+  const h = Math.floor(minutes / 60) % 24;
+  const m = minutes % 60;
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+}
+
+function isTimeInSession(minutes: number): boolean {
+  return minutes >= MARKET_OPEN_MINUTES && minutes <= MARKET_CLOSE_MINUTES;
+}
+
+type DurationResult = { ok: true; value: number } | { ok: false } | undefined;
+
+function parseDurationFromObject(w: Record<string, unknown>, canonical: string): DurationResult {
+  if (typeof w.minutes === 'number') {
+    if (w.minutes > 0) return { ok: true, value: w.minutes };
+    if (w.minutes <= 0) return { ok: false };
+  }
+  if (typeof w.minutes === 'string') {
+    const n = Number(w.minutes);
+    if (!Number.isNaN(n) && n > 0) return { ok: true, value: n };
+    if (!Number.isNaN(n) && n <= 0) return { ok: false };
+  }
+  if (typeof w.n === 'number') {
+    if (w.n <= 0) return { ok: false };
+    if (/hour|hr/.test(canonical)) return { ok: true, value: w.n * 60 };
+    return { ok: true, value: w.n };
+  }
+  if (typeof w.n === 'string') {
+    const n = Number(w.n);
+    if (!Number.isNaN(n) && n <= 0) return { ok: false };
+    if (!Number.isNaN(n) && n > 0) {
+      if (/hour|hr/.test(canonical)) return { ok: true, value: n * 60 };
+      return { ok: true, value: n };
+    }
+  }
+  return undefined;
+}
+
+function parseDurationFromKind(canonical: string): DurationResult {
+  // Match a bounded number + optional unit anywhere in the canonical kind.
+  // "last_hour", "last_60_minutes", "lasthour" and "first_30" are all valid.
+  const unitMatch = canonical.match(/(\d+)?_?(min|mins|minute|minutes|hour|hours|hr|hrs)(?:_|$)/);
+  if (unitMatch) {
+    const nStr = unitMatch[1];
+    const unit = unitMatch[2] ?? '';
+    if (nStr === undefined) {
+      if (unit.startsWith('hour') || unit.startsWith('hr')) return { ok: true, value: 60 };
+      if (unit.startsWith('min')) return { ok: true, value: 1 };
+      return undefined;
+    }
+    const n = Number(nStr);
+    if (Number.isNaN(n) || n <= 0) return { ok: false };
+    if (unit.startsWith('hour') || unit.startsWith('hr')) return { ok: true, value: n * 60 };
+    return { ok: true, value: n };
+  }
+  // Bare number suffix (e.g. first_30) means minutes.
+  const nMatch = canonical.match(/(\d+)(?:_|$)/);
+  if (nMatch) {
+    const n = Number(nMatch[1]);
+    if (Number.isNaN(n) || n <= 0) return { ok: false };
+    return { ok: true, value: n };
+  }
+  return undefined;
+}
+
+function makeFirstMinutesWindow(n: number): { kind: 'time_range'; fromTime: string; toTime: string } | undefined {
+  if (!Number.isFinite(n) || n <= 0 || n > SESSION_MINUTES) return undefined;
+  const fromMinutes = MARKET_OPEN_MINUTES;
+  const toMinutes = fromMinutes + n;
+  if (toMinutes > MARKET_CLOSE_MINUTES) return undefined;
+  return { kind: 'time_range', fromTime: timeFromMinutes(fromMinutes), toTime: timeFromMinutes(toMinutes) };
+}
+
+function makeLastMinutesWindow(n: number): { kind: 'time_range'; fromTime: string; toTime: string } | undefined {
+  if (!Number.isFinite(n) || n <= 0 || n > SESSION_MINUTES) return undefined;
+  const toMinutes = MARKET_CLOSE_MINUTES;
+  const fromMinutes = toMinutes - n;
+  if (fromMinutes < MARKET_OPEN_MINUTES) return undefined;
+  return { kind: 'time_range', fromTime: timeFromMinutes(fromMinutes), toTime: timeFromMinutes(toMinutes) };
+}
+
+function makeFixedWindow(
+  fromTime: { hour: number; minute: number },
+  toTime: { hour: number; minute: number }
+): { kind: 'time_range'; fromTime: string; toTime: string } {
+  return { kind: 'time_range', fromTime: formatTime(fromTime), toTime: formatTime(toTime) };
+}
+
+export function normalizeAnalysisWindow(win: unknown): unknown {
+  if (!win || typeof win !== 'object' || Array.isArray(win)) return win;
+  const w = win as Record<string, unknown>;
+
+  // Accept common aliases for fromTime/toTime.
+  if (w.from !== undefined && w.fromTime === undefined) {
+    w.fromTime = w.from;
+    delete w.from;
+  }
+  if (w.to !== undefined && w.toTime === undefined) {
+    w.toTime = w.to;
+    delete w.to;
+  }
+
+  // Explicit valid fromTime/toTime always take precedence.
+  if (w.fromTime !== undefined || w.toTime !== undefined) {
+    const fromMinutes = w.fromTime !== undefined ? minutesFromTime(String(w.fromTime)) : undefined;
+    const toMinutes = w.toTime !== undefined ? minutesFromTime(String(w.toTime)) : undefined;
+    if (
+      fromMinutes !== undefined &&
+      toMinutes !== undefined &&
+      isTimeInSession(fromMinutes) &&
+      isTimeInSession(toMinutes) &&
+      fromMinutes < toMinutes
+    ) {
+      return {
+        kind: 'time_range',
+        fromTime: timeFromMinutes(fromMinutes),
+        toTime: timeFromMinutes(toMinutes),
+      };
+    }
+    // Invalid or incomplete explicit range: leave the original object invalid
+    // so strict validation and repair can reject it.
+    return win;
+  }
+
+  const rawKind = typeof w.kind === 'string' ? w.kind : '';
+  const canonical = rawKind.toLowerCase().replace(/[\s-]+/g, '_');
+
+  if (canonical === 'whole_session' || canonical === 'up_to_cursor') return w;
+
+  const objectDuration = parseDurationFromObject(w, canonical);
+  const kindDuration = parseDurationFromKind(canonical);
+
+  // Any explicit invalid duration (0, negative, NaN) should fail validation
+  // instead of falling back to a default window.
+  if (objectDuration?.ok === false || kindDuration?.ok === false) {
+    return win;
+  }
+
+  let n = objectDuration?.value ?? kindDuration?.value;
+
+  // Bare first/last/opening/closing aliases default to one full hour.
+  if (n === undefined && ['first', 'last', 'opening', 'final', 'closing'].includes(canonical)) {
+    n = 60;
+  }
+
+  if (n === undefined) {
+    // No bounded duration was found and the kind is not a recognized bare alias.
+    return win;
+  }
+
+  if (canonical === 'morning') return makeFixedWindow(US_EQUITY_MARKET_OPEN, MORNING_END);
+  if (canonical === 'afternoon') return makeFixedWindow(AFTERNOON_START, US_EQUITY_MARKET_CLOSE);
+
+  // Recognize both underscore-separated and concatenated aliases
+  // (e.g. "last_hour", "lasthour", "first_30_minutes", "first_30").
+  const isFirstWindow =
+    /^(first|opening)(?:_|$|\d|hour|minute|min|hrs?)/.test(canonical);
+  const isLastWindow =
+    /^(last|final|closing)(?:_|$|\d|hour|minute|min|hrs?)/.test(canonical);
+
+  if (isFirstWindow) {
+    const window = makeFirstMinutesWindow(n);
+    if (window) return window;
+  } else if (isLastWindow) {
+    const window = makeLastMinutesWindow(n);
+    if (window) return window;
+  }
+
+  // Unknown named window kinds are deliberately left invalid so validation
+  // can fail and the repair loop can ask for clarification.
+  return win;
+}
+
+function buildMarketWindowRules(): string[] {
+  const open = formatTime(US_EQUITY_MARKET_OPEN);
+  const close = formatTime(US_EQUITY_MARKET_CLOSE);
+  const oneHourAfterOpen = formatTime(addMarketMinutes(US_EQUITY_MARKET_OPEN, 60));
+  const morningEnd = formatTime(MORNING_END);
+  const afternoonStart = formatTime(AFTERNOON_START);
+  const lastHourStart = formatTime(addMarketMinutes(US_EQUITY_MARKET_CLOSE, -60));
+  const first30End = formatTime(addMarketMinutes(US_EQUITY_MARKET_OPEN, 30));
+  const final45Start = formatTime(addMarketMinutes(US_EQUITY_MARKET_CLOSE, -45));
+  const closing20Start = formatTime(addMarketMinutes(US_EQUITY_MARKET_CLOSE, -20));
+
+  return [
+    `Market hours are ${open}–${close} America/New_York. Use ${open} for market open (the opening bell) and ${close} for market close (the closing bell).`,
+    `first hour / opening hour -> time_range from "${open}" to "${oneHourAfterOpen}". first N minutes -> from "${open}" to ("${open}"+N). Example: first 30 minutes -> "${open}"–"${first30End}".`,
+    `last hour / closing hour -> time_range from "${lastHourStart}" to "${close}". last/final/closing N minutes -> ("${close}"-N) to "${close}". Examples: final 45 minutes -> "${final45Start}"–"${close}"; closing 20 minutes -> "${closing20Start}"–"${close}".`,
+    `morning -> "${open}"–"${morningEnd}"; afternoon -> "${afternoonStart}"–"${close}".`,
+    `near open = start around "${open}"; near close = end around "${close}".`,
+    'half an hour = 30 minutes; a quarter of an hour = 15 minutes; three quarters of an hour = 45 minutes; from the bell = market open.',
+    'Explicit user clock times (e.g. "from 10:00 to 12:00") override named-window defaults.',
+  ];
+}
+
+function buildRules(selectedFields?: Set<string>): string[] {
+  const rules: string[] = [];
+  rules.push('Do NOT include computed numbers in analysisRequests (no open, high, low, close, volume, percent change, etc.). Only request the operation and the window.');
+  rules.push('Clock times must be HH:MM (00:00-23:59). If the user gives an invalid or out-of-range time, return clarification. Do not guess a time.');
+  rules.push('Do not set play, pause, or play_until fields unless the user explicitly asks for them.');
+  rules.push('Up to 4 analysisRequests are allowed in one turn, but never more than 4 and never none.');
+
+  if (!selectedFields || selectedFields.has('symbol')) {
+    rules.push('Map company names to tickers: AAPL, MSFT, NVDA.');
+  }
+  if (!selectedFields || selectedFields.has('date') || selectedFields.has('timeframeMinutes')) {
+    rules.push('prior trading session -> date:{"kind":"relative_trading","count":1,"direction":"backward"}; next session -> forward.');
+    rules.push('N-minute bars -> timeframeMinutes:N (e.g. 15m -> 15).');
+  }
+  if (!selectedFields || selectedFields.has('seekTime') || selectedFields.has('relativeSeekMinutes')) {
+    rules.push('quarter past X -> seekTime:"X:15"; quarter to X -> seekTime:"(X-1):45"; half past X -> seekTime:"X:30"; noon -> 12:00; midnight -> 00:00.');
+    rules.push('a.m./p.m. (with or without dots) convert to 24-hour HH:MM.');
+    rules.push('park the replay at X -> seekTime:X (do not pause).');
+    rules.push('move X minutes earlier/ago -> relativeSeekMinutes:-X; later/forward -> relativeSeekMinutes:+X.');
+  }
+  if (!selectedFields || selectedFields.has('playback')) {
+    rules.push('playback play_until with an end time -> {"action":"play_until","untilTime":"HH:MM"}.');
+  }
+  if (!selectedFields || selectedFields.has('finalQuery') || selectedFields.has('queryTime')) {
+    rules.push('"what candle" / "what bar" / "tell me what candle I\'m on" -> finalQuery:"current_candle".');
+    rules.push('"give me the bar at X" -> finalQuery:"candle_at_time", queryTime:X.');
+    rules.push('"the bar I land on" or "what bar is that" -> finalQuery:"current_candle" with no queryTime.');
+  }
+  if (!selectedFields || selectedFields.has('compare')) {
+    rules.push('"compare this candle with the previous one" -> finalQuery:"compare_candles", compare:{"left":{"source":"latest_returned_candle"},"right":{"source":"previous_returned_candle"}}.');
+    rules.push('"compare current chart with the last reported" -> left:"current_chart_candle", right:"latest_returned_candle".');
+    rules.push('"compare 11:30 with 11:00" -> left:"market_time" marketTime:"11:30", right:"market_time" marketTime:"11:00".');
+  }
+  if (!selectedFields || selectedFields.has('analysisRequests')) {
+    rules.push('Use analysisRequests with kind one of window_ohlc, window_change, window_volume, window_compare, candle_shape, window_summary.');
+    rules.push('For window_* and window_summary include window. For candle_shape include source and optional marketTime. For window_compare include left and right.');
+    rules.push('Questions about candle body, wick, anatomy, shape, kind, type, or structure use kind:"candle_shape", NOT finalQuery.');
+    rules.push('If the chart has an active session, "what kind of candle am I on" / "what candle is this" -> kind:"candle_shape", source:"current_chart_candle". Do not ask for a previously reported candle.');
+    rules.push('A bare summary request ("how did X do", "how was X", "how did X perform") should emit only window_summary unless the user explicitly asks for OHLC, volume, or change.');
+    rules.push('Compound requests (move + volume, OHLC + volume, candle shape + window, comparisons, summary + metric) can emit multiple analysisRequests.');
+    rules.push(...buildMarketWindowRules());
+  }
+  if (!selectedFields || selectedFields.has('contextReference')) {
+    rules.push('"do that again" / "again" -> contextReference:{"source":"latest_successful_action","mode":"repeat"}.');
+    rules.push('"same X" / "use the same X" -> contextReference:{"source":"latest_successful_action","mode":"inherit","inherit":["X"]} where X is date/timeframe/seekTime/relativeSeekMinutes/playback/finalQuery/analysisRequests.');
+    rules.push('"one session before that" -> contextReference:{"source":"latest_successful_action","mode":"anchor_relative_date"} with date backward 1.');
+    rules.push('"go back to the candle we were discussing" / "the previous candle" -> contextReference:{"source":"latest_returned_candle","mode":"use_as_target"}.');
+    rules.push('Explicit user values always win over inherited values. If the reference cannot be resolved, return clarification.');
+  }
+
+  return rules;
+}
+
+function buildExamples(selectedFields?: Set<string>, analysisKinds?: string[]): string[] {
+  const always = [
+    '- "Jump to 25:00." -> {"kind":"clarification","message":"25:00 is not a valid clock time. Use HH:MM (00:00-23:59)."}',
+    '- "Add VWAP and backtest." -> {"kind":"unsupported","message":"VWAP and backtest are not supported."}',
+  ];
+  if (!selectedFields) {
+    return EXAMPLE_LIBRARY.map((ex) => `- "${ex.text}" -> ${ex.json}`).concat(always);
+  }
+  const kindSet = analysisKinds ? new Set<string>(analysisKinds) : undefined;
+  const scored = EXAMPLE_LIBRARY
+    .filter((ex) => {
+      const fieldMatch = ex.fields.some((f) => selectedFields.has(f));
+      if (!fieldMatch) return false;
+      if (selectedFields.has('analysisRequests') && kindSet) {
+        try {
+          const parsed = JSON.parse(ex.json) as Record<string, unknown>;
+          const requests = (parsed?.analysisRequests ?? []) as Array<{ kind?: string }>;
+          const requestKinds = new Set(requests.map((r) => r.kind).filter(Boolean) as string[]);
+          for (const k of requestKinds) {
+            if (!kindSet.has(k)) return false;
+          }
+        } catch {
+          // keep the example if we cannot parse it
+        }
+      }
+      return true;
+    })
+    .map((ex) => {
+      let score = ex.fields.filter((f) => selectedFields.has(f)).length;
+      if (selectedFields.has('analysisRequests')) {
+        try {
+          const parsed = JSON.parse(ex.json) as Record<string, unknown>;
+          const requests = (parsed?.analysisRequests ?? []) as Array<{ kind?: string }>;
+          const requestKinds = new Set(requests.map((r) => r.kind).filter(Boolean) as string[]);
+          if (kindSet && requestKinds.size > 0) {
+            for (const k of requestKinds) {
+              if (kindSet.has(k)) score += 2;
+            }
+          } else if (!kindSet) {
+            // Compound/ambiguous context: prefer examples with multiple request
+            // kinds or, when context is selected, a contextReference to inherit from.
+            if (requestKinds.size >= 2) score += 3;
+            if (selectedFields.has('contextReference') && parsed?.contextReference) score += 4;
+          }
+        } catch {
+          // ignore malformed example JSON
+        }
+      }
+      return { ex, score };
+    })
+    .sort((a, b) => b.score - a.score);
+  return scored.slice(0, 4).map(({ ex }) => `- "${ex.text}" -> ${ex.json}`).concat(always);
+}
+
+function needsCandleContext(text: string, selectedFields?: Set<string>): boolean {
+  if (selectedFields && (selectedFields.has('finalQuery') || selectedFields.has('compare'))) return true;
+  if (textRequestsCandleShape(text) || textRequestsCandleQuery(text)) return true;
+  if (selectedFields?.has('analysisRequests') && textRequestsCandleShape(text)) return true;
+  return false;
+}
+
+export interface IntentExtractionPromptInput {
+  executionLog?: ExecutionContextStore;
+  requestContext?: RequestContext;
+  text?: string;
 }
 
 // ---------------------------------------------------------------------------
 // Prompt generation
 // ---------------------------------------------------------------------------
 
-export function buildIntentExtractionPrompt(executionLog?: ExecutionContextStore): string {
-  const recentActions = executionLog ? executionLog.renderForPrompt({ maxActions: 3, includeCandles: true }) : null;
+export function selectedAnalysisKinds(text: string, hasContextReference = false): string[] | undefined {
+  // Context inheritance and genuinely compound/ambiguous requests receive the
+  // full safe set of analysis kinds so the model can repeat/inherit/combine.
+  if (hasContextReference) return undefined;
 
-  const sections = [
+  const d = detectAnalysisConcepts(text);
+  const isCandleShape = textRequestsCandleShape(text);
+  const isSummary = textRequestsSummary(text);
+  const hasCompare = hasCompareLanguage(text, d);
+  const hasVolume = d.concepts.has('volume');
+  const hasChange =
+    d.concepts.has('change') ||
+    d.concepts.has('move') ||
+    hasNonPhrasalDirection(d) ||
+    d.concepts.has('gain') ||
+    d.concepts.has('loss') ||
+    /\b(?:percent|pct|%)\b/i.test(text);
+  const hasOhlc =
+    d.concepts.has('range') ||
+    d.concepts.has('high') ||
+    d.concepts.has('low') ||
+    d.concepts.has('open') ||
+    d.concepts.has('close') ||
+    d.concepts.has('ohlc') ||
+    d.concepts.has('total') ||
+    d.concepts.has('average') ||
+    d.concepts.has('price');
+
+  // More than one metric cluster, an implicit compare, summary+candle/window,
+  // or compare combined with a metric means the request is compound.
+  const metricClusters = [hasVolume, hasChange, hasOhlc, isCandleShape].filter(Boolean).length;
+  const summaryPlusMetric = isSummary && (hasVolume || hasChange || hasOhlc || isCandleShape);
+  const multipleMetrics = metricClusters >= 2 || summaryPlusMetric;
+  const comparePlusMetric = hasCompare && (hasVolume || hasChange || hasOhlc || isCandleShape || isSummary);
+  if (comparePlusMetric || multipleMetrics) return undefined;
+
+  // A bare comparison (no other metric) is still compound but only needs
+  // window_compare; the compare capability can derive OHLC and volume.
+  if (hasCompare) return ['window_compare'];
+
+  const kinds: string[] = [];
+  if (isCandleShape) kinds.push('candle_shape');
+  if (isSummary) kinds.push('window_summary');
+  if (hasVolume) kinds.push('window_volume');
+  if (hasChange) kinds.push('window_change');
+  if (hasOhlc) kinds.push('window_ohlc');
+
+  // A bare named window or a lone OHLC metric defaults to window_ohlc.
+  if (kinds.length === 0 && (
+    d.concepts.has('first') || d.concepts.has('last') || d.concepts.has('final') ||
+    d.concepts.has('opening') || d.concepts.has('closing') ||
+    d.concepts.has('morning') || d.concepts.has('afternoon') ||
+    d.concepts.has('period') || d.concepts.has('open') || d.concepts.has('close')
+  )) {
+    kinds.push('window_ohlc');
+  }
+
+  if (kinds.length === 0) return undefined;
+  return kinds;
+}
+
+export function buildIntentExtractionPrompt(
+  executionLogOrContext?: ExecutionContextStore | IntentExtractionPromptInput
+): string {
+  let executionLog: ExecutionContextStore | undefined;
+  let requestContext: RequestContext | undefined;
+  let text = '';
+
+  if (executionLogOrContext && typeof (executionLogOrContext as ExecutionContextStore).renderForPrompt === 'function') {
+    executionLog = executionLogOrContext as ExecutionContextStore;
+  } else if (executionLogOrContext) {
+    const ctx = executionLogOrContext as IntentExtractionPromptInput;
+    executionLog = ctx.executionLog;
+    requestContext = ctx.requestContext;
+    text = ctx.text ?? '';
+  }
+
+  const hasPriorAction = executionLog ? executionLog.latestSuccessfulAction() != null : false;
+  const fallback = isFullFallback(requestContext, text, hasPriorAction);
+  const selectedFields = fallback ? undefined : selectedTopLevelFields(text, requestContext, hasPriorAction);
+  const hasContextReference = selectedFields?.has('contextReference') ?? false;
+  const analysisKinds = fallback ? undefined : selectedAnalysisKinds(text, hasContextReference);
+  const maxActions = hasContextReference ? 1 : 3;
+  const recentActions = executionLog
+    ? executionLog.renderForPrompt({ maxActions, includeCandles: needsCandleContext(text, selectedFields) })
+    : null;
+
+  const sections: string[] = [
     'You are a compact intent parser for OpenRewind. Respond with one minified JSON object.',
     'Do not write prose, markdown, or the literal string "<today>".',
     '',
     'Schema:',
-    semanticIntentSchemaJson(),
+    JSON.stringify(buildCompactSchema(selectedFields, analysisKinds)),
     '',
     'Rules:',
-    '- Map company names to tickers: AAPL, MSFT, NVDA.',
-    '- "prior trading session" -> date:{"kind":"relative_trading","count":1,"direction":"backward"}. No date value.',
-    '- "next trading session" -> date:{"kind":"relative_trading","count":1,"direction":"forward"}.',
-    '- "N-minute bars" -> timeframeMinutes:N (e.g. 15m -> 15).',
-    '- "quarter past X" -> seekTime:"X:15".',
-    '- "quarter to X" -> seekTime:"(X-1):45" with a.m./p.m. or 24-hour conversion (e.g. "quarter to three p.m." -> 14:45).',
-    '- "half past X" -> seekTime:"X:30".',
-    '- "noon" -> 12:00, "midnight" -> 00:00.',
-    '- "a.m." / "p.m." (with or without dots) convert to 24-hour HH:MM (e.g. "2:45 p.m." -> 14:45).',
-    '- "park the replay at X" means seekTime:X (do not pause).',
-    '- "move the replay X minutes earlier/ago" -> relativeSeekMinutes:-X. "X minutes later/forward" -> relativeSeekMinutes:+X.',
-    '- "take me back to the previous stock" -> previousSymbol:true.',
-    '- "tell me what candle I\'m on" -> finalQuery:"current_candle".',
-    '- "give me the bar at X" -> finalQuery:"candle_at_time", queryTime:X.',
-    '- "give me the bar I land on" or "what bar is that" -> finalQuery:"current_candle". No queryTime.',
-    '- Questions about candle body, wick, anatomy, shape, kind, or type use analysisRequests with kind:"candle_shape", NOT finalQuery.',
-    '- "compare this candle with the previous candle you reported" -> finalQuery:"compare_candles", compare:{"left":{"source":"latest_returned_candle"},"right":{"source":"previous_returned_candle"}}.',
-    '- "compare the current chart candle with the last candle you reported" -> finalQuery:"compare_candles", compare:{"left":{"source":"current_chart_candle"},"right":{"source":"latest_returned_candle"}}.',
-    '- "compare the 11:30 candle with the 11:00 candle" -> finalQuery:"compare_candles", compare:{"left":{"source":"market_time","marketTime":"11:30"},"right":{"source":"market_time","marketTime":"11:00"}}.',
-    '- "what was the range in the first hour" -> analysisRequests:[{"kind":"window_ohlc","window":{"kind":"time_range","fromTime":"09:30","toTime":"10:30"}}].',
-    '- "how much did it move from 11 to noon" -> analysisRequests:[{"kind":"window_change","window":{"kind":"time_range","fromTime":"11:00","toTime":"12:00"}}].',
-    '- "what was total volume this morning" -> analysisRequests:[{"kind":"window_volume","window":{"kind":"time_range","fromTime":"09:30","toTime":"12:00"}}].',
-    '- "compare morning volume with afternoon volume" -> analysisRequests:[{"kind":"window_compare","left":{"kind":"time_range","fromTime":"09:30","toTime":"12:00"},"right":{"kind":"time_range","fromTime":"12:00","toTime":"16:00"}}].',
-    '- "what kind of candle am I on" -> analysisRequests:[{"kind":"candle_shape","source":"current_chart_candle"}].',
-    '- "describe the 11:30 candle" -> analysisRequests:[{"kind":"candle_shape","source":"market_time","marketTime":"11:30"}].',
-    '- "how did AAPL do today" -> analysisRequests:[{"kind":"window_summary","window":{"kind":"whole_session"}}].',
-    '- "give me the move, total volume and candle anatomy from 10 to noon" -> analysisRequests:[{"kind":"window_change","window":{"kind":"time_range","fromTime":"10:00","toTime":"12:00"}},{"kind":"window_volume","window":{"kind":"time_range","fromTime":"10:00","toTime":"12:00"}},{"kind":"candle_shape","source":"market_time","marketTime":"12:00"}].',
-    '- "up to where I am now" or "so far" -> window:{"kind":"up_to_cursor"}.',
-    '- up to 4 analysisRequests are allowed in one turn, but never more than 4 and never none.',
-    '- Do NOT include computed numbers in analysisRequests (no open, high, low, close, volume, percent change, etc.). Only request the operation and the window.',
-    '- seekTime, queryTime and playback.untilTime must be valid clock times (00:00-23:59). If the user gives an invalid or out-of-range time (e.g. 25:00), return clarification. Do not guess a time.',
-    '- queryTime must be a clock time (HH:MM), never a phrase like "the bar" or "30 minutes earlier".',
-    '- Do NOT set playback unless the user explicitly says play, pause, or play_until.',
-    '- playback play_until with an end time -> {"action":"play_until","untilTime":"HH:MM"}.',
-    '- If the request is genuinely missing required info, return {"kind":"clarification","message":"..."}.',
-    '- If the operation cannot be represented (e.g. VWAP, backtest, trend, volatility, support/resistance), return {"kind":"unsupported","message":"..."}.',
-    '',
-    'Context reference rules:',
-    '- If the user refers to a prior action with "do that again", "repeat that", or "again", set contextReference:{"source":"latest_successful_action","mode":"repeat"}.',
-    '- If the user says "same timeframe", "same date as before", or "use the same X", set contextReference:{"source":"latest_successful_action","mode":"inherit","inherit":["X"]} where X is one or more of date/timeframe/seekTime/relativeSeekMinutes/playback/finalQuery.',
-    '- If the user says "one session before that" or "prior session to that", set contextReference:{"source":"latest_successful_action","mode":"anchor_relative_date"} and date:{"kind":"relative_trading","count":1,"direction":"backward"}.',
-    '- If the user says "go back to the candle we were discussing" or "the previous candle", set contextReference:{"source":"latest_returned_candle","mode":"use_as_target"}.',
-    '- Explicit user values always win over inherited values. Do not include a field in "inherit" if the user gave a new value for it.',
-    '- If the reference cannot be resolved (no prior action/candle), return clarification.',
-    '',
+    ...buildRules(selectedFields),
   ];
 
   if (recentActions) {
+    sections.push('');
     sections.push('RECENT ACTIONS');
     sections.push(recentActions);
-    sections.push('');
   }
 
   sections.push(
+    '',
     'Examples:',
-    '- "set me up on <SYMBOL> for the prior trading session, use N-minute bars, park the replay at HH:MM and tell me what candle I\'m on" -> {"kind":"chart_action","symbol":"<SYMBOL>","date":{"kind":"relative_trading","count":1,"direction":"backward"},"timeframeMinutes":N,"seekTime":"HH:MM","finalQuery":"current_candle"}',
-    '- "Switch to <SYMBOL>, go back two sessions, use 15m and seek to quarter to three p.m." -> {"kind":"chart_action","symbol":"<SYMBOL>","date":{"kind":"relative_trading","count":2,"direction":"backward"},"timeframeMinutes":15,"seekTime":"14:45"}',
-    '- "Park the replay at 2:45 p.m." -> {"kind":"chart_action","seekTime":"14:45"}',
-    '- "move the replay 30 minutes earlier and give me the bar" -> {"kind":"chart_action","relativeSeekMinutes":-30,"finalQuery":"current_candle"}',
-    '- "take me back to the previous stock" -> {"kind":"chart_action","previousSymbol":true}',
-    '- "Do that again on <SYMBOL>" -> {"kind":"chart_action","symbol":"<SYMBOL>","contextReference":{"source":"latest_successful_action","mode":"repeat"}}',
-    '- "Use the same timeframe on <SYMBOL>" -> {"kind":"chart_action","symbol":"<SYMBOL>","contextReference":{"source":"latest_successful_action","mode":"inherit","inherit":["timeframe"]}}',
-    '- "Use the same timeframe but go to the prior trading session" -> {"kind":"chart_action","date":{"kind":"relative_trading","count":1,"direction":"backward"},"contextReference":{"source":"latest_successful_action","mode":"inherit","inherit":["timeframe"]}}',
-    '- "Go back to the candle we were discussing" -> {"kind":"chart_action","contextReference":{"source":"latest_returned_candle","mode":"use_as_target"}}',
-    '- "Compare this candle with the previous candle you reported" -> {"kind":"chart_action","finalQuery":"compare_candles","compare":{"left":{"source":"latest_returned_candle"},"right":{"source":"previous_returned_candle"}}}',
-    '- "Compare the current chart candle with the last candle you reported" -> {"kind":"chart_action","finalQuery":"compare_candles","compare":{"left":{"source":"current_chart_candle"},"right":{"source":"latest_returned_candle"}}}',
-    '- "Compare the 11:30 candle with the 11:00 candle" -> {"kind":"chart_action","finalQuery":"compare_candles","compare":{"left":{"source":"market_time","marketTime":"11:30"},"right":{"source":"market_time","marketTime":"11:00"}}}',
-    '- "what was the range in the first hour" -> {"kind":"chart_action","analysisRequests":[{"kind":"window_ohlc","window":{"kind":"time_range","fromTime":"09:30","toTime":"10:30"}}]}',
-    '- "how did it do up to now" -> {"kind":"chart_action","analysisRequests":[{"kind":"window_summary","window":{"kind":"up_to_cursor"}}]}',
-    '- "compare morning and afternoon and tell me which had more volume" -> {"kind":"chart_action","analysisRequests":[{"kind":"window_compare","left":{"kind":"time_range","fromTime":"09:30","toTime":"12:00"},"right":{"kind":"time_range","fromTime":"12:00","toTime":"16:00"}},{"kind":"window_volume","window":{"kind":"time_range","fromTime":"09:30","toTime":"16:00"}}]}',
-    '- "do that analysis on NVDA" -> {"kind":"chart_action","symbol":"NVDA","contextReference":{"source":"latest_successful_action","mode":"repeat"}}',
-    '- "same thing but first hour" -> {"kind":"chart_action","contextReference":{"source":"latest_successful_action","mode":"inherit","inherit":["analysisRequests"]},"analysisRequests":[{"kind":"window_ohlc","window":{"kind":"time_range","fromTime":"09:30","toTime":"10:30"}}]}',
-    '- "what about volume?" -> {"kind":"chart_action","contextReference":{"source":"latest_successful_action","mode":"inherit","inherit":["analysisRequests"]},"analysisRequests":[{"kind":"window_volume"}]}',
-    '- "Jump to 25:00." -> {"kind":"clarification","message":"25:00 is not a valid clock time. Use HH:MM (00:00-23:59)."}',
-    '- "Move it over there." -> {"kind":"clarification","message":"Where should I move it?"}',
-    '- "Add VWAP and backtest a crossover." -> {"kind":"unsupported","message":"VWAP and backtest crossover are not supported."}',
+    ...buildExamples(selectedFields, analysisKinds),
     '',
     'Respond with minified JSON.'
   );
@@ -350,8 +974,8 @@ export function buildIntentExtractionPrompt(executionLog?: ExecutionContextStore
   return sections.join('\n');
 }
 
-export function buildIntentRepairPrompt(validationError: string): string {
-  return `Your previous JSON failed validation: ${validationError}. Return a corrected, minified JSON object matching the same schema. If the error is an invalid or out-of-range clock time and the user explicitly gave it, return clarification instead of inventing a time.`;
+export function buildIntentRepairPrompt(_validationError: string): string {
+  return 'Return a corrected, minified JSON object. If the user gave an invalid or out-of-range clock time, return clarification. Do not invent a time.';
 }
 
 // ---------------------------------------------------------------------------
@@ -1271,6 +1895,30 @@ export function preValidateSanitize(raw: Record<string, unknown>, text: string, 
     }
   }
 
+  // Normalize analysis requests to the fields allowed for their kind.
+  if ('analysisRequests' in raw && Array.isArray(raw.analysisRequests)) {
+    raw.analysisRequests = (raw.analysisRequests as Record<string, unknown>[]).map((r) => {
+      const kind = r.kind;
+      if (kind === 'candle_shape') {
+        if (typeof r.marketTime === 'string' && r.marketTime) {
+          return { kind, source: 'market_time', marketTime: r.marketTime };
+        }
+        const source = typeof r.source === 'string' ? r.source : 'current_chart_candle';
+        if (source === 'market_time') return { kind, source: 'current_chart_candle' };
+        return { kind, source };
+      }
+      if (kind === 'window_compare') {
+        const out: Record<string, unknown> = { kind };
+        if (r.left !== undefined) out.left = normalizeAnalysisWindow(r.left);
+        if (r.right !== undefined) out.right = normalizeAnalysisWindow(r.right);
+        return out;
+      }
+      const out: Record<string, unknown> = { kind };
+      if (r.window !== undefined) out.window = normalizeAnalysisWindow(r.window);
+      return out;
+    });
+  }
+
   // Strip top-level optional fields that are:
   //   - not requested by the user,
   //   - not grounded in the original text,
@@ -1335,7 +1983,7 @@ export async function extractSemanticIntent(
   const start = Date.now();
   agentTrace('llm intent start', { text, model: ORION_AGENT_MODEL });
 
-  const system = buildIntentExtractionPrompt(opts.executionLog);
+  const system = buildIntentExtractionPrompt({ executionLog: opts.executionLog, requestContext: opts.requestContext, text });
   const messages: OrionChatMessage[] = [
     { role: 'system', content: system },
     { role: 'user', content: text },

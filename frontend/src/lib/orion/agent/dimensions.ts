@@ -10,7 +10,7 @@
 // matching. It does not rely on exact full-sentence regexes.
 // =============================================================================
 
-import { extractDateInput, extractTimeframe, type ChartCommand } from '../planner';
+import { extractDateInput, extractTimeframe, extractTimes, type ChartCommand } from '../planner';
 
 export type ActionDimension =
   | 'symbol'
@@ -64,6 +64,13 @@ export function textRequestsDate(t: string): boolean {
   return extractDateInput(t) !== undefined;
 }
 
+export function textRequestsWholeSession(t: string): boolean {
+  const tlower = t.toLowerCase();
+  return /\b(?:whole|full|entire|all|complete)\s+(?:session|market\s+day|market\s+session|trading\s+day|trading\s+session|day)\b|\bfull\s+day(?:'s)?\s+session\b|\ball\s+day(?:'s)?\s+data\b/i.test(
+    tlower
+  );
+}
+
 export function textRequestsAbsoluteTime(t: string): boolean {
   return (
     /\b\d{1,2}:\d{2}\b/.test(t) ||
@@ -103,26 +110,30 @@ interface ConceptDef {
 }
 
 const ANALYSIS_CONCEPTS: Record<string, ConceptDef> = {
-  volume: { kind: 'window', terms: ['volume', 'volumes', 'vol', 'volumetric'] },
+  volume: { kind: 'window', terms: ['volume', 'volumes', 'vol', 'volumetric', 'shares', 'turnover', 'participation'] },
   range: { kind: 'window', terms: ['range', 'ranges', 'rang'] },
   change: { kind: 'window', terms: ['change', 'changes', 'changed', 'changing'] },
   move: { kind: 'window', terms: ['move', 'moved', 'moves', 'moving', 'movement', 'mover'] },
   high: { kind: 'window', terms: ['high', 'higher', 'highest', 'highs'] },
   low: { kind: 'window', terms: ['low', 'lower', 'lowest', 'lows'] },
-  open: { kind: 'window', terms: ['open', 'opening', 'opened', 'opens'] },
-  close: { kind: 'window', terms: ['close', 'closing', 'closed', 'closes'] },
+  open: { kind: 'window', terms: ['open', 'opened', 'opens'] },
+  close: { kind: 'window', terms: ['close', 'closed', 'closes'] },
+  opening: { kind: 'window', terms: ['opening'] },
+  closing: { kind: 'window', terms: ['closing'] },
+  final: { kind: 'window', terms: ['final'] },
   body: { kind: 'shape', terms: ['body', 'bodies'] },
   wick: { kind: 'shape', terms: ['wick', 'wicks'] },
   shadow: { kind: 'shape', terms: ['shadow', 'shadows'] },
   anatomy: { kind: 'shape', terms: ['anatomy'] },
-  shape: { kind: 'shape', terms: ['shape', 'shapes', 'shaped', 'kind', 'kinds', 'type', 'types', 'sort', 'sorts'] },
-  compare: { kind: 'compare', terms: ['compare', 'compared', 'comparing', 'comparison', 'vs', 'versus', 'against'] },
-  summary: { kind: 'summary', terms: ['summary', 'overview', 'recap', 'did', 'do', 'does', 'done', 'doing'] },
+  shape: { kind: 'shape', terms: ['shape', 'shapes', 'shaped', 'kind', 'kinds', 'type', 'types', 'sort', 'sorts', 'structure', 'structures'] },
+  compare: { kind: 'compare', terms: ['compare', 'compared', 'comparing', 'comparison', 'vs', 'versus', 'against', 'contrast', 'contrasted', 'contrasting'] },
+  summary: { kind: 'summary', terms: ['summary', 'overview', 'recap', 'did', 'do', 'does', 'done', 'doing', 'breakdown', 'summarize', 'summarized'] },
   session: { kind: 'time', terms: ['session', 'sessions', 'today', 'day', 'days'] },
   morning: { kind: 'window', terms: ['morning', 'mornings', 'mornin'] },
   afternoon: { kind: 'window', terms: ['afternoon', 'afternoons'] },
   hour: { kind: 'window', terms: ['hour', 'hours', 'hr', 'hrs'] },
   minute: { kind: 'window', terms: ['minute', 'minutes', 'min', 'mins'] },
+  period: { kind: 'window', terms: ['period', 'periods'] },
   first: { kind: 'window', terms: ['first'] },
   last: { kind: 'window', terms: ['last'] },
   candle: { kind: 'candle', terms: ['candle', 'candles', 'bar', 'bars', 'ohlc'] },
@@ -181,7 +192,8 @@ const CANDLE_QUERY_CUES: ReadonlySet<string> = new Set([
 ]);
 
 // Summary cues need a session/subject/window partner so bare "do it" is not
-// treated as an analysis request.
+// treated as an analysis request.  Window/boundary words are not subjects;
+// they are handled as window/boundary concepts.
 const SUMMARY_SUBJECTS: ReadonlySet<string> = new Set([
   'it',
   'stock',
@@ -195,19 +207,8 @@ const SUMMARY_SUBJECTS: ReadonlySet<string> = new Set([
   'rn',
   'current',
   'cursor',
-  'up',
-  'down',
-  'higher',
-  'lower',
-  'morning',
-  'afternoon',
-  'hour',
-  'minute',
-  'first',
-  'last',
-  'total',
-  'average',
   'analysis',
+  'breakdown',
 ]);
 
 function tokenizeForAnalysis(text: string): string[] {
@@ -265,11 +266,6 @@ function isFuzzyConceptMatch(token: string, term: string): boolean {
     if (long.length - short.length <= maxPrefixDiff(short.length)) return true;
   }
 
-  if (token.length === term.length && token.length >= 3) {
-    const dist = optimalStringAlignment(token, term);
-    if (dist === 1) return true;
-  }
-
   // A single internal insertion/deletion that keeps the first and last
   // characters intact is a typical typo (e.g. "mornig" vs "morning").
   // Deletions or insertions at the very start/end are handled by the
@@ -282,14 +278,32 @@ function isFuzzyConceptMatch(token: string, term: string): boolean {
   return false;
 }
 
-interface DetectedConcepts {
+// Phrasal-verb "up"/"down" should not be treated as price direction.
+const PHRASAL_HEADS: ReadonlySet<string> = new Set(['set', 'get', 'make', 'look', 'turn', 'shut', 'pick', 'take', 'give', 'fill', 'wake', 'clean', 'put']);
+
+export function hasNonPhrasalDirection(d: DetectedConcepts): boolean {
+  if (!d.concepts.has('direction')) return false;
+  const directionTerms = ANALYSIS_CONCEPTS.direction.terms;
+  for (let i = 1; i < d.tokens.length; i++) {
+    const tok = d.tokens[i];
+    if (!directionTerms.includes(tok)) continue;
+    const prev = d.tokens[i - 1];
+    const prev2 = d.tokens[i - 2];
+    // Phrasal verbs can split the particle: "set me up", "turn the volume up".
+    if (PHRASAL_HEADS.has(prev) || (prev2 && PHRASAL_HEADS.has(prev2))) continue;
+    return true;
+  }
+  return false;
+}
+
+export interface DetectedConcepts {
   tokens: string[];
   concepts: Set<string>;
   kinds: Record<ConceptDef['kind'], boolean>;
   hasPlaybackContext: boolean;
 }
 
-function detectAnalysisConcepts(text: string): DetectedConcepts {
+export function detectAnalysisConcepts(text: string): DetectedConcepts {
   const tokens = tokenizeForAnalysis(text);
   const concepts = new Set<string>();
   const kinds: Record<ConceptDef['kind'], boolean> = {
@@ -334,6 +348,8 @@ export function textRequestsAnalysis(t: string): boolean {
 }
 
 // Core window-metric concepts that can trigger a window analysis on their own.
+// Boundary-only words (first/last/morning/afternoon) are handled separately so
+// phrases like "quarter to three in the afternoon" are not treated as analysis.
 const CORE_WINDOW_CONCEPTS: ReadonlySet<string> = new Set([
   'volume',
   'range',
@@ -343,9 +359,7 @@ const CORE_WINDOW_CONCEPTS: ReadonlySet<string> = new Set([
   'low',
   'open',
   'close',
-  'compare',
-  'morning',
-  'afternoon',
+  'ohlc',
   'total',
   'average',
 ]);
@@ -355,8 +369,12 @@ const CORE_WINDOW_CONCEPTS: ReadonlySet<string> = new Set([
 const WINDOW_BOUNDARY_CONCEPTS: ReadonlySet<string> = new Set([
   'first',
   'last',
+  'final',
+  'opening',
+  'closing',
   'morning',
   'afternoon',
+  'period',
 ]);
 
 // Tokens that turn an "open"/"close" mention into a UI action or market
@@ -365,17 +383,27 @@ const OHLC_ACTION_CONTEXT: ReadonlySet<string> = new Set(['market', 'chart', 'ap
 
 const QUESTION_WORDS: ReadonlySet<string> = new Set(['what', 'how', 'which', 'where', 'when', 'why']);
 
+export function hasCompareLanguage(text: string, d: DetectedConcepts): boolean {
+  if (d.concepts.has('compare') || d.concepts.has('contrast')) return true;
+  const t = text.toLowerCase();
+  // "X or Y" between two detected concepts is an implicit comparison.
+  if (/\b(?:or|versus)\b/i.test(t) && d.concepts.size >= 2) return true;
+  return /\b(?:higher|lower|greater|less|more|fewer|bigger|smaller)\s+than\b|\b(?:more|less|fewer)\s+than\b|\bversus\b|\bvs\b|\bagainst\b/i.test(t);
+}
+
 export function textRequestsWindowAnalysis(t: string): boolean {
   const d = detectAnalysisConcepts(t);
   const coreConcepts = Array.from(d.concepts).filter((c) => CORE_WINDOW_CONCEPTS.has(c));
   const coreHit = coreConcepts.length > 0;
   const hasDuration = d.concepts.has('hour') || d.concepts.has('minute');
-  const hasBoundary = Array.from(d.concepts).some((c) => WINDOW_BOUNDARY_CONCEPTS.has(c));
+  const boundaryConcepts = Array.from(d.concepts).filter((c) => WINDOW_BOUNDARY_CONCEPTS.has(c));
+  const hasBoundary = boundaryConcepts.length > 0;
   const hasQuestion = d.tokens.some((tok) => QUESTION_WORDS.has(tok));
   const hasMultipleCores = coreConcepts.length >= 2;
   // A single bare core word (or a one-token typo of a core word) is enough
   // on its own, but a core word next to an unrelated non-analytical word is not.
   const singleCoreWord = coreConcepts.length === 1 && d.tokens.length === 1;
+  const singleBoundaryWord = boundaryConcepts.length === 1 && d.tokens.length === 1;
 
   if ((d.concepts.has('open') || d.concepts.has('close')) && d.tokens.some((tok) => OHLC_ACTION_CONTEXT.has(tok))) {
     // "market open", "close the chart", etc. are not window analysis unless
@@ -386,8 +414,30 @@ export function textRequestsWindowAnalysis(t: string): boolean {
     if (!otherCore && !(hasDuration && hasBoundary)) return false;
   }
 
-  if (!coreHit) return false;
-  if ((hasDuration && hasBoundary) || hasQuestion || hasMultipleCores || singleCoreWord) return true;
+  // Direction/move concepts with a question, duration, boundary or explicit
+  // time are change requests (e.g. "how did it do up to now").
+  const hasDirectionChange =
+    hasNonPhrasalDirection(d) ||
+    d.concepts.has('move') ||
+    d.concepts.has('change');
+  const explicitTimes = extractTimes(t);
+  if (hasDirectionChange && (hasQuestion || hasDuration || hasBoundary || explicitTimes.length >= 1)) return true;
+
+  // Explicit "from X to Y" (or any clock-time pair) with a core metric is an
+  // analysis request.
+  const hasExplicitTimeWindow = coreHit && explicitTimes.length >= 1;
+
+  // A summary cue ("summarize", "breakdown", "how did", ...) paired with a
+  // core metric implies a window/summary analysis.
+  const hasSummaryWithCore = d.kinds.summary && coreHit;
+
+  // A comparison between at least two windows/periods is an analysis request.
+  const hasCompare = hasCompareLanguage(t, d);
+  const hasCompareWindows = hasCompare && d.concepts.size >= 2;
+
+  if (!coreHit && !(hasDuration && hasBoundary) && !hasCompareWindows && !singleBoundaryWord) return false;
+  const hasCoreAndBoundary = coreHit && hasBoundary;
+  if ((hasDuration && hasBoundary) || hasCoreAndBoundary || hasQuestion || hasMultipleCores || singleCoreWord || singleBoundaryWord || hasExplicitTimeWindow || hasSummaryWithCore || hasCompareWindows) return true;
   return false;
 }
 
@@ -451,7 +501,11 @@ export function textRequestsCandleQuery(t: string): boolean {
   const d = detectAnalysisConcepts(t);
   const hasCandleContext = d.concepts.has('candle') || d.concepts.has('bar') || d.concepts.has('ohlc') || d.concepts.has('price');
   if (!hasCandleContext) return false;
-  return hasNearbyCandleSignal(d);
+  if (hasNearbyCandleSignal(d)) return true;
+  // "price at quarter past eleven" is a candle lookup even though the time is
+  // colloquial and not a single token.
+  if (d.concepts.has('price') && extractTimes(t).length >= 1) return true;
+  return false;
 }
 
 const ANAPHORA_TOKENS: ReadonlySet<string> = new Set([
@@ -462,51 +516,141 @@ const ANAPHORA_TOKENS: ReadonlySet<string> = new Set([
   'again',
   'previous',
   'prior',
+  'earlier',
 ]);
 
 const CONTEXT_ACTION_VERBS: ReadonlySet<string> = new Set(['do', 'run', 'perform']);
 
+const FOLLOW_UP_CUES: ReadonlySet<string> = new Set([
+  'what',
+  'how',
+  'and',
+  'also',
+  'but',
+  'now',
+  'yet',
+  'so',
+  'again',
+]);
+
+const NON_ELLIPTICAL_TIME_CONCEPTS: ReadonlySet<string> = new Set([
+  'hour',
+  'minute',
+  'period',
+  'session',
+  'today',
+  'day',
+  'now',
+  'here',
+  'rn',
+  'current',
+  'cursor',
+]);
+
+function isEllipticalFollowUp(text: string, d: DetectedConcepts, hasPriorAction: boolean): boolean {
+  if (!hasPriorAction) return false;
+
+  // The follow-up must actually be about a metric, window, shape or comparison;
+  // bare time words like "and 30 minutes" are not elliptical analysis.
+  const hasAnalysisConcept = Array.from(d.concepts).some(
+    (c) => !NON_ELLIPTICAL_TIME_CONCEPTS.has(c)
+  );
+  if (!hasAnalysisConcept) return false;
+
+  const tokens = d.tokens;
+  if (tokens.length === 0 || tokens.length > 8) return false;
+
+  // Must start with an additive/interrogative cue, optionally followed by "about".
+  const first = tokens[0];
+  const second = tokens[1];
+  const startsWithCue =
+    FOLLOW_UP_CUES.has(first) ||
+    ((first === 'what' || first === 'how') && second === 'about') ||
+    first === 'and' || first === 'also' || first === 'but' || first === 'now';
+  if (!startsWithCue) return false;
+
+  // Must not be a complete independent switch/playback/seek command.
+  if (looksLikeSwitch(text)) return false;
+  if (textRequestsPlaybackControl(text)) return false;
+  if (textRequestsRelativeSeek(text) && !d.tokens.some((tok) => ANAPHORA_TOKENS.has(tok))) return false;
+  if (textRequestsPreviousSymbol(text)) return false;
+
+  return true;
+}
+
 export function textRequestsContextReference(t: string, hasPriorAction = false): boolean {
   const d = detectAnalysisConcepts(t);
   const hasAnaphora = d.tokens.some((tok) => ANAPHORA_TOKENS.has(tok));
-  if (!hasAnaphora) return false;
-
-  if (d.concepts.size > 0) return true;
-  return hasPriorAction && d.tokens.some((tok) => CONTEXT_ACTION_VERBS.has(tok));
+  if (hasAnaphora) {
+    if (textRequestsAnalysis(t)) return true;
+    if (hasPriorAction && d.tokens.some((tok) => CONTEXT_ACTION_VERBS.has(tok))) return true;
+    // Anaphora with a window/period concept (but not a bare relative-time phrase)
+    // is a context reference: "same period", "that hour", "that range".
+    if (textRequestsRelativeSeek(t)) return false;
+    if (d.concepts.size > 0) return true;
+    return false;
+  }
+  return isEllipticalFollowUp(t, d, hasPriorAction);
 }
+
+// Summary cue tokens are recognized by the words themselves, not by the
+// concepts they map to, so we can distinguish helper verbs ("did"/"do") from
+// explicit summary nouns ("summary"/"breakdown"/"summarize").
+const SUMMARY_TOKENS: ReadonlySet<string> = new Set([
+  'summary', 'overview', 'recap', 'did', 'do', 'does', 'done', 'doing', 'summarize', 'summarized', 'breakdown',
+]);
+const EXPLICIT_SUMMARY_TOKENS: ReadonlySet<string> = new Set([
+  'summary', 'overview', 'recap', 'summarize', 'summarized', 'breakdown',
+]);
+const HELPER_SUMMARY_TOKENS: ReadonlySet<string> = new Set([
+  'did', 'do', 'does', 'done', 'doing',
+]);
 
 export function textRequestsSummary(t: string): boolean {
   const d = detectAnalysisConcepts(t);
-  const summaryCues = new Set(['summary', 'overview', 'recap', 'did', 'do', 'does', 'done', 'doing', 'how', 'what']);
-  const summaryCuesFound = Array.from(d.concepts).filter((c) => summaryCues.has(c));
-  if (summaryCuesFound.length === 0) return false;
+  const summaryTokens = d.tokens.filter((tok) => SUMMARY_TOKENS.has(tok));
+  if (summaryTokens.length === 0) return false;
+
+  const hasExplicitSummaryToken = summaryTokens.some((tok) => EXPLICIT_SUMMARY_TOKENS.has(tok));
+  const hasHelperSummaryToken = summaryTokens.some((tok) => HELPER_SUMMARY_TOKENS.has(tok));
+
+  // Helper-verb summary cues ("how did it move") with a concrete metric or
+  // comparison are not summaries; explicit summary cues ("summarize",
+  // "recap", "breakdown") combined with a metric are still summaries.
+  if (hasHelperSummaryToken && !hasExplicitSummaryToken) {
+    if (
+      d.concepts.has('volume') ||
+      d.concepts.has('range') ||
+      d.concepts.has('change') ||
+      d.concepts.has('move') ||
+      d.concepts.has('high') ||
+      d.concepts.has('low') ||
+      d.concepts.has('open') ||
+      d.concepts.has('close') ||
+      d.concepts.has('ohlc') ||
+      d.concepts.has('total') ||
+      d.concepts.has('average') ||
+      hasNonPhrasalDirection(d) ||
+      d.concepts.has('compare') ||
+      d.concepts.has('contrast')
+    ) {
+      return false;
+    }
+  }
 
   const subjectTokens = d.tokens.filter(
     (tok) => SUMMARY_SUBJECTS.has(tok) && !(tok === 'session' && textRequestsDate(t))
   );
   const onlySubjectIsIt = subjectTokens.length === 1 && subjectTokens[0] === 'it';
   // "do it" has only the imperative "do" and the pronoun "it"; without a
-  // question word or a second summary cue it is not a summary request.
-  if (onlySubjectIsIt && summaryCuesFound.length < 2) return false;
+  // second summary cue it is not a summary request.
+  if (onlySubjectIsIt && summaryTokens.length < 2) return false;
 
   const hasSubject = subjectTokens.length > 0;
   const hasWindowOrShape = d.kinds.window || d.kinds.shape;
   const hasSession = d.concepts.has('today') || d.concepts.has('day') || d.concepts.has('now');
 
-  // "Up" and "down" are only directional summaries when they are not part of
-  // a common phrasal verb (set up, look up, give up, ...).
-  const phrasalHeads = new Set(['set', 'get', 'make', 'look', 'turn', 'shut', 'pick', 'take', 'give', 'fill', 'wake', 'clean', 'put']);
-  const directionTerms = ANALYSIS_CONCEPTS.direction.terms;
-  let hasDirection = false;
-  for (let i = 1; i < d.tokens.length; i++) {
-    const tok = d.tokens[i];
-    if (!directionTerms.includes(tok)) continue;
-    if (phrasalHeads.has(d.tokens[i - 1])) continue;
-    hasDirection = true;
-    break;
-  }
-
-  return hasSubject || hasWindowOrShape || hasSession || hasDirection;
+  return hasSubject || hasWindowOrShape || hasSession;
 }
 
 // ---------------------------------------------------------------------------

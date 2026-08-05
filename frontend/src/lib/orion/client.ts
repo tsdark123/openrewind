@@ -290,12 +290,11 @@ export async function pullOrionModel(
  * tool calls. Never throws for expected offline states — surfaces them via
  * the `content` field so the sidepanel can show a normal chat bubble.
  */
-const DEFAULT_ORION_CHAT_TIMEOUT_MS = getEnvOrionChatTimeoutMs();
-
 export async function orionChat(opts: OrionChatOptions): Promise<OrionChatResponse> {
   const start = Date.now();
+  const defaultTimeout = getEnvOrionChatTimeoutMs();
   const model = opts.tier === 'agent' ? ORION_AGENT_MODEL : ORION_CHAT_MODEL;
-  agentTrace('orionChat start', { tier: opts.tier, model, timeout: opts.timeout ?? DEFAULT_ORION_CHAT_TIMEOUT_MS });
+  agentTrace('orionChat start', { tier: opts.tier, model, timeout: opts.timeout ?? defaultTimeout });
 
   if (opts.signal?.aborted) {
     throw Object.assign(new Error('Orion cancelled the request because a new one started.'), { code: 'ABORTED' });
@@ -341,7 +340,7 @@ export async function orionChat(opts: OrionChatOptions): Promise<OrionChatRespon
     body.think = think;
   }
 
-  const timeout = opts.timeout ?? DEFAULT_ORION_CHAT_TIMEOUT_MS;
+  const timeout = opts.timeout ?? defaultTimeout;
   const res = await ollamaFetchWithTimeout(
     '/api/chat',
     {

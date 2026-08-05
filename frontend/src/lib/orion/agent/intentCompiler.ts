@@ -20,6 +20,8 @@ import type {
 } from './types';
 import type { AgentContext } from './types';
 import { getCapability } from './capabilities';
+import { normalizeAnalysisWindow } from './intent';
+import { textRequestsContextReference, textRequestsWholeSession, textRequestsSummary } from './dimensions';
 
 export interface CompileOptions {
   /** Anchor for relative_trading dates (YYYY-MM-DD). Defaults to today. */
@@ -92,12 +94,26 @@ function mergeAnalysisRequests(
     const inheritedWindow = baseReq ? analysisRequestWindow(baseReq) : baseWindow;
 
     if (cur.kind === 'window_compare') {
-      const left = cur.left ??
+      let left = cur.left ??
         (baseReq?.kind === 'window_compare' ? baseReq.left : inheritedWindow) ??
         defaultAnalysisWindow();
       const right = cur.right ??
         (baseReq?.kind === 'window_compare' ? baseReq.right : inheritedWindow) ??
         defaultAnalysisWindow();
+
+      // Contextual comparison follow-ups ("compare that with the last hour")
+      // sometimes copy the new window into both sides. If left and right are
+      // identical, prefer the inherited window for the left side.
+      if (
+        inheritedWindow &&
+        left &&
+        right &&
+        JSON.stringify(left) === JSON.stringify(right) &&
+        JSON.stringify(left) !== JSON.stringify(inheritedWindow)
+      ) {
+        left = inheritedWindow;
+      }
+
       resolved.push({ kind: 'window_compare', left, right });
       continue;
     }
@@ -116,6 +132,143 @@ function mergeAnalysisRequests(
     const window = cur.window ?? inheritedWindow ?? defaultAnalysisWindow();
     resolved.push({ kind, window } as AnalysisRequest);
   }
+  return { ok: true, requests: resolved };
+}
+
+export interface ResolveAnalysisInheritanceOptions {
+  text: string;
+  /** True when any prior successful action exists in the execution log. */
+  hasPriorAction: boolean;
+}
+
+function isUngroundedWholeSession(win: AnalysisWindow | undefined, text: string, isContextual: boolean): boolean {
+  if (win?.kind !== 'whole_session') return false;
+  // whole_session is grounded when the user explicitly asks for it.
+  if (textRequestsWholeSession(text)) return false;
+  // In a contextual short follow-up, an unrequested whole_session is a
+  // model-invented default and must not bypass missing-context clarification.
+  if (isContextual) return true;
+  // For a non-contextual new analysis (e.g. "How did AAPL do today?"),
+  // whole_session is the legitimate default.
+  return false;
+}
+
+function isWindowExplicitlyGrounded(win: AnalysisWindow | undefined, text: string): boolean {
+  if (!win) return false;
+  if (win.kind === 'time_range' || win.kind === 'up_to_cursor') return true;
+  // whole_session is only explicit when the user asked for the whole session.
+  if (win.kind === 'whole_session' && textRequestsWholeSession(text)) return true;
+  return false;
+}
+
+/**
+ * Resolve inherited analysis windows for short metric/comparison follow-ups.
+ *
+ * - Contextual short follow-ups ("what about volume?", "compare that with the
+ *   last hour") without an explicit window inherit from the prior action's
+ *   analysisRequests.
+ * - A model-invented whole_session cannot bypass missing-context clarification
+ *   when there is no prior analysis and the user did not ask for it.
+ * - Explicit time ranges always win, and the inherited window is only used to
+ *   fill genuinely missing dimensions.
+ */
+export function resolveAnalysisInheritance(
+  current: AnalysisRequest[] | undefined,
+  base: AnalysisRequest[] | undefined,
+  opts: ResolveAnalysisInheritanceOptions
+): { ok: true; requests: AnalysisRequest[] } | { ok: false; error: string } {
+  if (!current || current.length === 0) return { ok: true, requests: base ?? [] };
+
+  const isContextual = textRequestsContextReference(opts.text, opts.hasPriorAction) && !textRequestsSummary(opts.text);
+
+  const lastBase = base && base.length > 0 ? base[base.length - 1] : undefined;
+  const baseWindow = lastBase ? analysisRequestWindow(lastBase) : undefined;
+
+  const resolved: AnalysisRequest[] = [];
+  for (let i = 0; i < current.length; i++) {
+    const cur = current[i];
+    const baseReq = base && i < base.length ? base[i] : lastBase;
+    const inheritedWindow = baseReq ? analysisRequestWindow(baseReq) : baseWindow;
+
+    if (cur.kind === 'candle_shape') {
+      resolved.push({ kind: 'candle_shape', source: cur.source, marketTime: cur.marketTime });
+      continue;
+    }
+
+    if (cur.kind === 'window_compare') {
+      let left = (cur.left ? normalizeAnalysisWindow(cur.left) : undefined) as AnalysisWindow | undefined;
+      let right = (cur.right ? normalizeAnalysisWindow(cur.right) : undefined) as AnalysisWindow | undefined;
+
+      if (isUngroundedWholeSession(left, opts.text, isContextual)) left = undefined;
+      if (isUngroundedWholeSession(right, opts.text, isContextual)) right = undefined;
+
+      if (baseReq || inheritedWindow) {
+        const baseCompareLeft = baseReq?.kind === 'window_compare' ? baseReq.left : inheritedWindow;
+        const baseCompareRight = baseReq?.kind === 'window_compare' ? baseReq.right : inheritedWindow;
+
+        if (!left && !right) {
+          // Copy the entire comparison when both sides are missing.
+          if (baseReq?.kind === 'window_compare' && baseReq.left && baseReq.right) {
+            left = baseReq.left;
+            right = baseReq.right;
+          } else {
+            left = inheritedWindow ?? defaultAnalysisWindow();
+            right = inheritedWindow ?? defaultAnalysisWindow();
+          }
+        } else {
+          if (!left) left = baseCompareLeft ?? right ?? defaultAnalysisWindow();
+          if (!right) right = baseCompareRight ?? left ?? defaultAnalysisWindow();
+
+          // Contextual comparison follow-ups sometimes copy the new window into
+          // both sides (e.g. "compare that with the last hour"). When left and
+          // right are identical and different from the inherited window, the
+          // left side should be the inherited prior window.
+          if (
+            isContextual &&
+            left &&
+            right &&
+            baseCompareLeft &&
+            JSON.stringify(left) === JSON.stringify(right) &&
+            JSON.stringify(left) !== JSON.stringify(baseCompareLeft)
+          ) {
+            left = baseCompareLeft;
+          }
+        }
+      } else {
+        if (!left || !right) {
+          return { ok: false, error: 'Please specify both windows to compare.' };
+        }
+      }
+
+      if (!left || !right) {
+        return { ok: false, error: 'Could not resolve the comparison windows.' };
+      }
+
+      resolved.push({ kind: 'window_compare', left, right });
+      continue;
+    }
+
+    // Non-compare windowed analysis.
+    const win = (cur.window ? normalizeAnalysisWindow(cur.window) : undefined) as AnalysisWindow | undefined;
+
+    if (isWindowExplicitlyGrounded(win, opts.text)) {
+      resolved.push({ kind: cur.kind, window: win } as AnalysisRequest);
+      continue;
+    }
+
+    const inherited = inheritedWindow;
+    if (inherited) {
+      resolved.push({ kind: cur.kind, window: inherited } as AnalysisRequest);
+      continue;
+    }
+
+    if (isContextual) {
+      return { ok: false, error: "I need to know which time window you'd like." };
+    }
+
+    resolved.push({ kind: cur.kind, window: defaultAnalysisWindow() } as AnalysisRequest);
+  }
+
   return { ok: true, requests: resolved };
 }
 
