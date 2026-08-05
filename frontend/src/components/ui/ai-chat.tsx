@@ -76,6 +76,10 @@ export function OrionChatSidepanel({
   const [isTyping, setIsTyping] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
 
+  // AbortController for the in-flight model call. A new user message cancels
+  // the previous one so the UI never stays stuck on a stale request.
+  const pendingControllerRef = useRef<AbortController | null>(null);
+
   // Live app-state ref for async helpers (intervals/waiters) that cannot see
   // the latest render-propped state inside closures.
   const appStateRef = useRef(appState);
@@ -140,9 +144,26 @@ export function OrionChatSidepanel({
     setThreads((prev) => setThreadMessages(prev, threadKey, [DEFAULT_GREETING]));
   };
 
+  const cleanupPending = (controller: AbortController) => {
+    if (pendingControllerRef.current === controller) {
+      pendingControllerRef.current = null;
+    }
+  };
+
   const handleSend = async () => {
     const trimmed = input.trim();
-    if (!trimmed || isTyping) return;
+    if (!trimmed) return;
+
+    // Cancel any in-flight model call (chat or agent) before starting a new
+    // turn. This prevents a slow/hung response from locking the input forever.
+    if (pendingControllerRef.current) {
+      pendingControllerRef.current.abort();
+      pendingControllerRef.current = null;
+    }
+    orionController.cancel();
+
+    const controller = new AbortController();
+    pendingControllerRef.current = controller;
 
     const userMessage: ChatMessage = { sender: 'user', text: trimmed };
     const nextMessages = [...messages, userMessage];
@@ -161,7 +182,7 @@ export function OrionChatSidepanel({
     if (cmd.intent === 'unknown' && setupStage === 'ready') {
       try {
         const world = buildWorldState(appState, chartRef, performanceLog);
-        const smart = await parseChartCommandWithLLM(trimmed, availableTickers, world);
+        const smart = await parseChartCommandWithLLM(trimmed, availableTickers, world, controller.signal);
         if (smart && smart.intent !== 'unknown') {
           cmd = smart;
         }
@@ -179,6 +200,7 @@ export function OrionChatSidepanel({
           })
         );
         setIsTyping(false);
+        cleanupPending(controller);
         return;
       }
 
@@ -204,6 +226,7 @@ export function OrionChatSidepanel({
         setThreads((prev) => appendMessage(prev, threadKey, { sender: 'ai', text: `Orion couldn't run that: ${detail}` }));
       } finally {
         setIsTyping(false);
+        cleanupPending(controller);
       }
       return;
     }
@@ -213,6 +236,7 @@ export function OrionChatSidepanel({
       if (common) {
         setThreads((prev) => appendMessage(prev, threadKey, { sender: 'ai', text: common }));
         setIsTyping(false);
+        cleanupPending(controller);
         return;
       }
       const suggestion = suggestCommand(trimmed);
@@ -221,6 +245,7 @@ export function OrionChatSidepanel({
         : `"${trimmed}" is not recognized as a request. Try 'help' to see available commands.`;
       setThreads((prev) => appendMessage(prev, threadKey, { sender: 'ai', text }));
       setIsTyping(false);
+      cleanupPending(controller);
       return;
     }
 
@@ -265,15 +290,24 @@ export function OrionChatSidepanel({
     // to the automation driver. The controller posts its own replies to the
     // active thread, so we just need to refresh the UI after it finishes.
     if (wantsAgent && agentModelStatus === 'ready') {
-      if (orionController.status !== 'idle') {
+      // Give a cancelled previous task a moment to clean up; then run.
+      let result: Awaited<ReturnType<typeof orionController.runAgentTask>> | null = null;
+      for (let wait = 0; wait <= 300; wait += 50) {
+        if (orionController.status === 'idle') {
+          result = await orionController.runAgentTask(trimmed);
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      if (!result) {
         setThreads((prev) =>
-          appendMessage(prev, threadKey, { sender: 'ai', text: 'Orion is already running a task. Press Esc to cancel it first.' })
+          appendMessage(prev, threadKey, { sender: 'ai', text: 'Orion is still finishing the previous task. Press Esc to cancel it first.' })
         );
+        cleanupPending(controller);
         setIsTyping(false);
         return;
       }
       try {
-        const result = await orionController.runAgentTask(trimmed);
         if (!result.ok) {
           setThreads((prev) =>
             appendMessage(prev, threadKey, {
@@ -290,6 +324,7 @@ export function OrionChatSidepanel({
         setThreads((prev) => appendMessage(prev, threadKey, { sender: 'ai', text: `Orion task failed: ${detail}` }));
       } finally {
         setIsTyping(false);
+        cleanupPending(controller);
       }
       return;
     }
@@ -333,6 +368,7 @@ export function OrionChatSidepanel({
       const response = await orionChat({
         tier: effectiveTier,
         messages: [{ role: 'system', content: systemPrompt }, ...history],
+        signal: controller.signal,
       });
 
       // First successful agent-tier call confirms the model is present.
@@ -346,12 +382,20 @@ export function OrionChatSidepanel({
     } catch (err) {
       const code = (err as { code?: string })?.code;
       const detail = err instanceof Error ? err.message : String(err);
-      const message = code === 'MODEL_MISSING'
-        ? `Orion needs the ${effectiveTier === 'agent' ? ORION_AGENT_MODEL : 'chat'} model pulled locally. Pull it via Ollama and retry.`
-        : `Orion is offline — start Ollama locally and ensure the model is pulled. (${detail})`;
+      let message: string;
+      if (code === 'MODEL_MISSING') {
+        message = `Orion needs the ${effectiveTier === 'agent' ? ORION_AGENT_MODEL : 'chat'} model pulled locally. Pull it via Ollama and retry.`;
+      } else if (code === 'TIMEOUT') {
+        message = 'The local model did not respond in time. Please try again.';
+      } else if (code === 'ABORTED') {
+        message = 'Orion cancelled the previous request.';
+      } else {
+        message = `Orion is offline — start Ollama locally and ensure the model is pulled. (${detail})`;
+      }
       setThreads((prev) => appendMessage(prev, threadKey, { sender: 'ai', text: message }));
     } finally {
       setIsTyping(false);
+      cleanupPending(controller);
     }
   };
 

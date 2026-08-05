@@ -102,6 +102,7 @@ class OrionControllerImpl {
 
   private bridge: OrionControllerBridge | null = null;
   private cancelRequested = false;
+  private currentAbortController: AbortController | null = null;
   private listeners = new Set<Listener>();
 
   bind(bridge: OrionControllerBridge): void {
@@ -130,6 +131,7 @@ class OrionControllerImpl {
   cancel(): void {
     if (this.status === 'idle') return;
     this.cancelRequested = true;
+    this.currentAbortController?.abort();
     this.log('info', 'Cancel requested by user.');
   }
 
@@ -289,6 +291,9 @@ class OrionControllerImpl {
     this.activity = [];
     this.log('info', `Task received: ${userMessage.slice(0, 120)}`);
 
+    const runController = new AbortController();
+    this.currentAbortController = runController;
+
     let snap: SessionSnapshot | null = null;
     try {
       this.setStatus('planning');
@@ -339,6 +344,7 @@ class OrionControllerImpl {
           messages,
           tools: ollamaToolSchemas('driving'),
           keepAlive: AGENT_KEEP_ALIVE,
+          signal: runController.signal,
         });
 
         if (response.toolCalls.length === 0) {
@@ -430,6 +436,9 @@ class OrionControllerImpl {
       return { ok: false, reason };
     } finally {
       setAutomationActive(false);
+      if (this.currentAbortController === runController) {
+        this.currentAbortController = null;
+      }
     }
   }
 }

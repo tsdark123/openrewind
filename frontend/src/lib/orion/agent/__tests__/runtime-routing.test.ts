@@ -7,6 +7,9 @@ import { createExecutionContext } from '../executionContext';
 import type { OrionChatMessage } from '../../client';
 
 vi.mock('../../client', () => ({
+  ORION_AGENT_MODEL: 'llama3.2:latest',
+  ORION_CHAT_MODEL: 'llama3.2',
+  AGENT_KEEP_ALIVE: '5m',
   orionChat: vi.fn().mockResolvedValue({ content: 'Got it.', toolCalls: [], raw: {} }),
 }));
 
@@ -88,7 +91,8 @@ function makeCtx(overrides: Partial<AgentContext> = {}): AgentContext {
 }
 
 beforeEach(() => {
-  vi.mocked(orionChat).mockClear();
+  vi.mocked(orionChat).mockReset();
+  vi.mocked(orionChat).mockResolvedValue({ content: 'Got it.', toolCalls: [], raw: {} });
 });
 
 describe('OrionTerminal-style submission through the orchestrator', () => {
@@ -224,5 +228,51 @@ describe('Switch-like raw ticker extraction and failure preservation', () => {
     const r = await handleOrionMessage({ text: 'Play at 10x.', ctx, setupReady: true });
     expect(r.route).toBe('deterministic');
     expect(orionChat).not.toHaveBeenCalled();
+  });
+});
+
+describe('Bounded model request policy', () => {
+  it('cancels an in-flight orionChat when a second handleOrionMessage starts', async () => {
+    const ctx = makeCtx();
+    ctx.getState().symbol = 'AAPL';
+    ctx.getState().sessionActive = true;
+
+    vi.mocked(orionChat).mockImplementation(async (opts) => {
+      // Simulate a long model call that respects the abort signal.
+      await new Promise<void>((_, reject) => {
+        const check = () => {
+          if (opts.signal?.aborted) {
+            reject(Object.assign(new Error('aborted by new request'), { code: 'ABORTED' }));
+            return;
+          }
+          setTimeout(check, 10);
+        };
+        check();
+      });
+      return { content: '', toolCalls: [], raw: {} };
+    });
+
+    const first = handleOrionMessage({ text: 'what kind of candle am I on right now', ctx, setupReady: true });
+    // Give the first call a tick to register its abort controller.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const second = handleOrionMessage({ text: 'switch to MSFT', ctx, setupReady: true });
+
+    const [firstResult] = await Promise.all([first, second]);
+    expect(firstResult.message).toMatch(/cancelled|new one started/i);
+
+    // The second call should still be able to proceed (route may be resolve or deterministic).
+    const secondResult = await second;
+    expect(secondResult.ok).toBe(true);
+  });
+
+  it('passes an abort signal to orionChat so the caller can cancel a hung response', async () => {
+    const ctx = makeCtx();
+    ctx.getState().symbol = 'AAPL';
+    ctx.getState().sessionActive = true;
+
+    await handleOrionMessage({ text: 'what kind of candle am I on right now', ctx, setupReady: true });
+    expect(orionChat).toHaveBeenCalled();
+    const call = vi.mocked(orionChat).mock.calls[0]?.[0];
+    expect(call?.signal).toBeInstanceOf(AbortSignal);
   });
 });

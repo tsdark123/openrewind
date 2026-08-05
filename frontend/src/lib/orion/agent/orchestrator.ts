@@ -104,17 +104,27 @@ function makePlanId(): string {
 }
 
 let activeCancellation: CancellationSource | null = null;
+let activeAbortController: AbortController | null = null;
 
 function cancelPreviousPlan(): void {
   if (activeCancellation && !activeCancellation.cancelled) {
     activeCancellation.cancel('new message received');
+  }
+  if (activeAbortController) {
+    try { activeAbortController.abort(); } catch { /* ignore */ }
+    activeAbortController = null;
   }
 }
 
 function newCancellation(): CancellationSource {
   cancelPreviousPlan();
   activeCancellation = createCancellationSource();
+  activeAbortController = new AbortController();
   return activeCancellation;
+}
+
+function currentAbortSignal(): AbortSignal | undefined {
+  return activeAbortController?.signal;
 }
 
 function now(): number {
@@ -383,6 +393,7 @@ async function runChat(text: string, ctx: AgentContext, setupReady: boolean, sta
         { role: 'system', content: systemPrompt },
         { role: 'user', content: text },
       ],
+      signal: currentAbortSignal(),
     });
     const total = now() - llmStart;
     agentTrace('llm chat end', { text, total, firstToken: total });
@@ -390,8 +401,15 @@ async function runChat(text: string, ctx: AgentContext, setupReady: boolean, sta
   } catch (e) {
     const total = now() - llmStart;
     const err = e instanceof Error ? e.message : String(e);
+    const code = (e as { code?: string }).code;
     console.warn('[orchestrator] chat failed:', err);
-    agentTrace('llm chat failed', { text, total, error: err });
+    agentTrace('llm chat failed', { text, total, error: err, code });
+    if (code === 'TIMEOUT') {
+      return 'The local model did not respond in time. Please try again.';
+    }
+    if (code === 'ABORTED') {
+      return 'Orion cancelled the request because a new one started.';
+    }
     return `I'm here, but my chat model is not responding right now (${err}). What would you like to do?`;
   }
 }
@@ -1152,6 +1170,7 @@ async function routeMessage(
         missing,
         baseDate,
       },
+      signal: currentAbortSignal(),
     });
     agentTrace('llm intent end', { ok: extraction.ok ? 'intent' : extraction.kind });
 
@@ -1244,6 +1263,7 @@ export async function handleOrionMessage(opts: OrchestratorOptions): Promise<Orc
 
   cancelPreviousPlan();
   const token = newCancellation();
+  const thisController = activeAbortController;
 
   agentTrace('handleOrionMessage start', text, { tickers: ctx.availableTickers.length });
 
@@ -1254,9 +1274,14 @@ export async function handleOrionMessage(opts: OrchestratorOptions): Promise<Orc
     routeOutput = await routeMessage(text, ctx, setupReady, token);
   } catch (e) {
     const err = e instanceof Error ? e.message : String(e);
+    const code = (e as { code?: string }).code;
     console.error('[orchestrator] route failed:', e);
-    agentTrace('route', 'error', { error: err });
+    agentTrace('route', 'error', { error: err, code });
     routeOutput = { ok: false, message: `Internal error: ${err}`, wasChat: false, route: 'error' };
+  } finally {
+    if (activeAbortController === thisController) {
+      activeAbortController = null;
+    }
   }
 
   const after = buildCompactStateSnapshot(ctx.getState(), ctx.chartRef);

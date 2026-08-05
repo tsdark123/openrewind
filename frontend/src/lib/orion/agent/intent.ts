@@ -1308,6 +1308,8 @@ export interface IntentExtractionOptions {
   executionLog?: ExecutionContextStore;
   /** Optional deterministic-parser context for diagnostics. */
   requestContext?: RequestContext;
+  /** Optional abort signal so a newer request can cancel this model call. */
+  signal?: AbortSignal;
 }
 
 export type IntentExtractionResult =
@@ -1350,10 +1352,18 @@ export async function extractSemanticIntent(
         messages,
         format: 'json',
         options: { temperature: 0, seed: 42, num_predict: 160 },
+        signal: opts.signal,
       });
     } catch (e) {
       const err = e instanceof Error ? e.message : String(e);
-      agentTrace('llm intent offline', err);
+      const code = (e as { code?: string })?.code;
+      agentTrace('llm intent failed', { err, code });
+      if (code === 'TIMEOUT') {
+        return { ok: false, kind: 'offline', message: 'The local model did not respond in time. Please try again.', elapsed: Date.now() - start };
+      }
+      if (code === 'ABORTED') {
+        return { ok: false, kind: 'offline', message: 'Orion cancelled the request because a new one started.', elapsed: Date.now() - start };
+      }
       return { ok: false, kind: 'offline', message: `The agent model is not available right now (${err}).`, elapsed: Date.now() - start };
     }
 

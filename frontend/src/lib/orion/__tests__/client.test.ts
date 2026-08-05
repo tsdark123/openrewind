@@ -137,4 +137,86 @@ describe('orion client warm-up', () => {
     // Finish the warm-up so the test can clean up without dangling promises.
     await warmup;
   });
+
+  it('times out a stalled model request with a typed TIMEOUT code', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const fetchMock = makeFetchMock((url) => {
+      if (url.includes('/api/show')) {
+        return { ok: true, status: 200, json: () => ({}) };
+      }
+      return new Promise<Response>(() => { /* never resolves */ });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const client = await import('../client');
+    const call = client.orionChat({
+      tier: 'chat',
+      messages: [{ role: 'user', content: 'what kind of candle am I on right now' }],
+      timeout: 1000,
+    });
+
+    vi.advanceTimersByTime(1000);
+    await expect(call).rejects.toMatchObject({
+      message: 'The local model did not respond in time.',
+      code: 'TIMEOUT',
+    });
+
+    vi.useRealTimers();
+  });
+
+  it('aborts an in-flight request when the external signal is cancelled', async () => {
+    const fetchMock = makeFetchMock((url) => {
+      if (url.includes('/api/show')) {
+        return { ok: true, status: 200, json: () => ({}) };
+      }
+      return new Promise<Response>(() => { /* never resolves */ });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const client = await import('../client');
+    const controller = new AbortController();
+    const call = client.orionChat({
+      tier: 'chat',
+      messages: [{ role: 'user', content: 'switch to nvidia' }],
+      signal: controller.signal,
+      timeout: 120000,
+    });
+
+    controller.abort();
+    await expect(call).rejects.toMatchObject({
+      message: 'Orion cancelled the request because a new one started.',
+      code: 'ABORTED',
+    });
+  });
+
+  it('does not let a late response overwrite a completed timeout', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let resolveFetch: ((r: Response) => void) | undefined;
+    const fetchMock = makeFetchMock((url) => {
+      if (url.includes('/api/show')) {
+        return { ok: true, status: 200, json: () => ({}) };
+      }
+      return new Promise<Response>((resolve) => { resolveFetch = resolve; });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const client = await import('../client');
+    const call = client.orionChat({
+      tier: 'chat',
+      messages: [{ role: 'user', content: 'hello' }],
+      timeout: 500,
+    });
+
+    vi.advanceTimersByTime(500);
+    await expect(call).rejects.toMatchObject({
+      code: 'TIMEOUT',
+    });
+
+    // Simulate a late fetch resolution; the promise should already be settled.
+    if (resolveFetch) {
+      resolveFetch({ ok: true, status: 200, json: () => ({ message: { content: 'late' } }) } as unknown as Response);
+    }
+
+    vi.useRealTimers();
+  });
 });

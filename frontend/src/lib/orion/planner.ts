@@ -1103,7 +1103,8 @@ function normalizeLLMTime(raw: unknown): ParsedTime | undefined {
 export async function parseChartCommandWithLLM(
   text: string,
   availableTickers: string[],
-  world: WorldState
+  world: WorldState,
+  signal?: AbortSignal
 ): Promise<ChartCommand | null> {
   const example: ChartCommand = {
     intent: 'fast_forward',
@@ -1143,6 +1144,7 @@ export async function parseChartCommandWithLLM(
         { role: 'system', content: system },
         { role: 'user', content: text },
       ],
+      signal,
     });
 
     const content = response.content || '';

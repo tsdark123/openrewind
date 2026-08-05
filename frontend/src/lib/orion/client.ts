@@ -29,6 +29,14 @@ function getEnvOrionAgentModel(): string | undefined {
   return envProcess?.env?.ORION_AGENT_MODEL;
 }
 
+function getEnvOrionChatTimeoutMs(): number {
+  const envProcess = (globalThis as typeof globalThis & { process?: { env?: Record<string, string> } }).process;
+  const raw = envProcess?.env?.ORION_CHAT_TIMEOUT_MS;
+  if (!raw) return 60_000;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : 60_000;
+}
+
 // Production default is llama3.2:latest. The optional ORION_AGENT_MODEL env var
 // is provided for local model validation without hard-coding a dev override.
 export const ORION_AGENT_MODEL = getEnvOrionAgentModel() ?? 'llama3.2:latest';
@@ -96,6 +104,10 @@ export interface OrionChatOptions {
   think?: boolean;
   /** Internal: bypass the warm-up wait for the agent model. */
   skipWarmup?: boolean;
+  /** Optional external abort signal (e.g. a newer user message superseded this one). */
+  signal?: AbortSignal;
+  /** Optional override for the default model-call timeout in milliseconds. */
+  timeout?: number;
 }
 
 export interface OrionChatResponse {
@@ -123,16 +135,50 @@ async function ollamaFetch(path: string, init: RequestInit): Promise<Response> {
   return isTauri() ? tauriFetch(url, init as any) : fetch(url, init);
 }
 
-function ollamaFetchWithTimeout(path: string, init: RequestInit, ms: number, reason: string): Promise<Response> {
-  const controller = new AbortController();
+function ollamaFetchWithTimeout(
+  path: string,
+  init: RequestInit,
+  ms: number,
+  reason: string,
+  externalSignal?: AbortSignal
+): Promise<Response> {
   return new Promise((resolve, reject) => {
-    const id = setTimeout(() => {
-      controller.abort();
-      reject(new Error(reason));
+    const controller = new AbortController();
+    let settled = false;
+
+    const cleanup = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutId);
+      if (externalHandler && externalSignal) {
+        externalSignal.removeEventListener('abort', externalHandler);
+      }
+    };
+
+    if (externalSignal?.aborted) {
+      reject(Object.assign(new Error('Orion cancelled the request because a new one started.'), { code: 'ABORTED' }));
+      return;
+    }
+
+    let externalHandler: (() => void) | undefined;
+    if (externalSignal) {
+      externalHandler = () => {
+        try { controller.abort(); } catch { /* ignore */ }
+        cleanup();
+        reject(Object.assign(new Error('Orion cancelled the request because a new one started.'), { code: 'ABORTED' }));
+      };
+      externalSignal.addEventListener('abort', externalHandler, { once: true });
+    }
+
+    const timeoutId = setTimeout(() => {
+      try { controller.abort(); } catch { /* ignore */ }
+      cleanup();
+      reject(Object.assign(new Error(reason), { code: 'TIMEOUT' }));
     }, ms);
+
     ollamaFetch(path, { ...init, signal: controller.signal }).then(
-      (r) => { clearTimeout(id); resolve(r); },
-      (e) => { clearTimeout(id); reject(e); }
+      (r) => { cleanup(); resolve(r); },
+      (e) => { cleanup(); reject(e); }
     );
   });
 }
@@ -244,10 +290,16 @@ export async function pullOrionModel(
  * tool calls. Never throws for expected offline states — surfaces them via
  * the `content` field so the sidepanel can show a normal chat bubble.
  */
+const DEFAULT_ORION_CHAT_TIMEOUT_MS = getEnvOrionChatTimeoutMs();
+
 export async function orionChat(opts: OrionChatOptions): Promise<OrionChatResponse> {
   const start = Date.now();
   const model = opts.tier === 'agent' ? ORION_AGENT_MODEL : ORION_CHAT_MODEL;
-  agentTrace('orionChat start', { tier: opts.tier, model });
+  agentTrace('orionChat start', { tier: opts.tier, model, timeout: opts.timeout ?? DEFAULT_ORION_CHAT_TIMEOUT_MS });
+
+  if (opts.signal?.aborted) {
+    throw Object.assign(new Error('Orion cancelled the request because a new one started.'), { code: 'ABORTED' });
+  }
 
   // Agent calls coordinate with the one-shot background warm-up so the model
   // is loaded before we begin. A failed or stale warm-up is ignored so the
@@ -263,8 +315,6 @@ export async function orionChat(opts: OrionChatOptions): Promise<OrionChatRespon
 
   const ensured = await ensureModel(model);
   if (!ensured.ready) {
-    // The agent model may not be installed yet. Let the caller decide
-    // whether to trigger `pullOrionModel` (progress UI) or fall back.
     throw Object.assign(new Error(ensured.error ?? 'model-missing'), {
       code: 'MODEL_MISSING',
       model,
@@ -291,11 +341,18 @@ export async function orionChat(opts: OrionChatOptions): Promise<OrionChatRespon
     body.think = think;
   }
 
-  const res = await ollamaFetch('/api/chat', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
+  const timeout = opts.timeout ?? DEFAULT_ORION_CHAT_TIMEOUT_MS;
+  const res = await ollamaFetchWithTimeout(
+    '/api/chat',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    },
+    timeout,
+    'The local model did not respond in time.',
+    opts.signal
+  );
   if (!res.ok) {
     throw new Error(`Ollama /api/chat ${res.status}`);
   }
@@ -365,15 +422,20 @@ export function warmOrionAgent(): Promise<WarmupResult> {
 
 export async function releaseAgentModel(): Promise<void> {
   try {
-    await ollamaFetch('/api/generate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: ORION_AGENT_MODEL,
-        keep_alive: AGENT_KEEP_ALIVE_IDLE,
-        prompt: '',
-      }),
-    });
+    await ollamaFetchWithTimeout(
+      '/api/generate',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: ORION_AGENT_MODEL,
+          keep_alive: AGENT_KEEP_ALIVE_IDLE,
+          prompt: '',
+        }),
+      },
+      5000,
+      'Model release timed out'
+    );
   } catch {
     // Best-effort — Ollama will unload on its own eventually.
   }
