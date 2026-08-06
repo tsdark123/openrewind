@@ -362,6 +362,7 @@ export const scenarioSchema = z.object({
   knownUnsupportedBehavior: z.array(unsupportedCheckSchema).default([]),
   latencyLimits: latencyLimitsSchema.default({}),
   turns: z.array(turnSchema).min(1),
+  meta: z.record(z.unknown()).optional(),
 });
 
 export type Scenario = z.infer<typeof scenarioSchema>;

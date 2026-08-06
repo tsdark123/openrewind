@@ -35,8 +35,11 @@
 .PARAMETER Model
     Model tag to verify. Default qwen3:8b.
 
+.PARAMETER ScenariosDir
+    Directory containing scenario JSON files. If omitted, lab/scenarios is used. Ignored if -Manifest is provided.
+
 .PARAMETER Manifest
-    Path to a scenario manifest. If omitted, all files under lab/scenarios are used.
+    Path to a scenario manifest. If omitted, all files under -ScenariosDir or lab/scenarios are used.
 
 .PARAMETER OutboxDir
     Directory for events.jsonl, summary.json and report.md. Default lab/outbox/<runId>.
@@ -56,6 +59,7 @@ param(
     [string]$OllamaUrl = "http://127.0.0.1:11434",
     [string]$EngineUrl = "",
     [string]$Model = "qwen3:8b",
+    [string]$ScenariosDir = "",
     [string]$Manifest = "",
     [string]$OutboxDir = "",
     [string]$AdapterModule = "",
@@ -73,7 +77,10 @@ if ([string]::IsNullOrEmpty($OutboxDir)) {
     $OutboxDir = Join-Path $PSScriptRoot "outbox" $RunId
 }
 $InboxDir = Join-Path $PSScriptRoot "inbox"
-$ScenariosDir = Join-Path $PSScriptRoot "scenarios"
+$DefaultScenariosDir = Join-Path $PSScriptRoot "scenarios"
+if ([string]::IsNullOrEmpty($ScenariosDir)) {
+    $ScenariosDir = $DefaultScenariosDir
+}
 $DataDir = (Resolve-Path $DataDir).Path
 
 function Write-Log([string]$Message) {
@@ -148,7 +155,9 @@ function New-Manifest {
 
     $files = Get-ChildItem -Path $ScenariosDir -Recurse -Filter "*.json" | Select-Object -ExpandProperty FullName
     $manifest = @{ scenarios = $files } | ConvertTo-Json -Depth 3
-    $manifestPath = Join-Path $InboxDir "manifest.json"
+    $dir = Join-Path $InboxDir "manifests"
+    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    $manifestPath = Join-Path $dir "manifest.json"
     $manifest | Out-File -FilePath $manifestPath -Encoding utf8
     Write-Log "Generated manifest: $manifestPath"
     return $manifestPath

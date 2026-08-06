@@ -10,6 +10,7 @@
     "generate:schemas": "tsx scripts/generate-schemas.ts",
     "generate:fixture": "tsx reference/generate-fixture.ts",
     "generate:smoke-responses": "tsx scripts/generate-smoke-fixtures.ts",
+    "mutation:preview": "tsx scripts/generate-mutations.ts",
     "fixture:run": "tsx runner/run-fixture.ts"
   },
   "devDependencies": {
