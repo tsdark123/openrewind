@@ -1,0 +1,1027 @@
+{
+  "contractVersion": "v2.1.0-semantic",
+  "basedOn": {
+    "branch": "orion-model-selection",
+    "head": "259dada796569b99d542e19c1eb378955c145251"
+  },
+  "sourceFiles": [
+    "frontend/benchmark/orion/bakeoff-suite.ts",
+    "frontend/benchmark/orion/types.ts",
+    "frontend/benchmark/orion/bakeoff-scorer.ts",
+    "frontend/benchmark/orion/bakeoff-deterministic.ts",
+    "frontend/benchmark/orion/bakeoff-production-path.test.ts",
+    "frontend/benchmark/orion/bakeoff-runner.ts",
+    "frontend/benchmark/orion/output/qwen3-intent-baseline-8b-2026-08-06.json",
+    "frontend/benchmark/orion/output/stage1-qwen3_8b-2026-08-06T01-06-27-893Z.json",
+    "frontend/benchmark/orion/output/stage1-qwen3_8b-2026-08-06T01-06-27-893Z-scores.json",
+    "frontend/src/lib/orion/agent/__acceptance__/qwen3-analysis-acceptance.test.ts",
+    "frontend/src/lib/orion/agent/__acceptance__/qwen3-analysis-runtime.test.ts",
+    "frontend/src/lib/orion/agent/types.ts",
+    "frontend/src/lib/orion/agent/intent.ts",
+    "frontend/src/lib/orion/agent/intentCompiler.ts",
+    "frontend/src/lib/orion/agent/orchestrator.ts",
+    "frontend/src/lib/orion/agent/dimensions.ts",
+    "frontend/src/lib/orion/agent/capabilities.ts",
+    "frontend/src/lib/orion/agent/validatePlan.ts",
+    "frontend/src/lib/orion/agent/planner-adapter.ts",
+    "frontend/src/lib/orion/planner.ts"
+  ],
+  "modelArtifacts": [
+    "frontend/benchmark/orion/output/qwen3-intent-baseline-8b-2026-08-06.json",
+    "frontend/benchmark/orion/output/stage1-qwen3_8b-2026-08-06T01-06-27-893Z.json",
+    "frontend/benchmark/orion/output/stage1-qwen3_8b-2026-08-06T01-06-27-893Z-scores.json"
+  ],
+  "capabilitiesCatalog": [
+    "system.get_world_state",
+    "session.resolve_symbol",
+    "session.switch_symbol",
+    "session.switch_to_previous_symbol",
+    "session.resolve_trading_date",
+    "chart.set_timeframe",
+    "playback.seek_relative",
+    "playback.seek_to_time",
+    "playback.play_until",
+    "playback.pause",
+    "chart.get_current_candle",
+    "chart.get_candle_at_time",
+    "analysis.compare_candles",
+    "analysis.window_ohlc",
+    "analysis.window_change",
+    "analysis.window_volume",
+    "analysis.window_compare",
+    "analysis.candle_shape",
+    "analysis.window_summary"
+  ],
+  "prompts": [
+    {
+      "id": 1,
+      "text": "Could you set me up on Nvidia for the prior trading session, use fifteen-minute bars, park the replay at quarter past eleven and tell me what candle I am on?",
+      "bucket": "primary",
+      "expectedKind": "chart_action",
+      "requiredCapabilities": [
+        "session.resolve_symbol",
+        "session.resolve_trading_date",
+        "session.switch_symbol",
+        "chart.set_timeframe",
+        "playback.seek_to_time",
+        "chart.get_current_candle"
+      ],
+      "forbiddenCapabilities": [],
+      "expectedSymbol": "NVDA",
+      "expectedDate": {
+        "kind": "relative_trading",
+        "count": 1,
+        "direction": "backward"
+      },
+      "expectedTimeframe": 15,
+      "expectedSeekTime": "11:15",
+      "expectedMarketTime": "11:15",
+      "expectedPlayback": null,
+      "expectedAnalysisRequests": [],
+      "expectedAnalysisKinds": [],
+      "expectedWindow": null,
+      "expectedContextReference": null,
+      "notes": "A full setup-and-query turn. The final query is a candle report at the requested time.",
+      "acceptableAlternatives": [
+        {
+          "description": "Same setup with chart.get_candle_at_time at 11:15 instead of seek + current_candle",
+          "requiredCapabilities": [
+            "session.resolve_symbol",
+            "session.resolve_trading_date",
+            "session.switch_symbol",
+            "chart.set_timeframe",
+            "chart.get_candle_at_time"
+          ]
+        },
+        {
+          "description": "Canonical route (direct switch to validated in-list ticker)",
+          "requiredCapabilities": [
+            "session.resolve_trading_date",
+            "session.switch_symbol",
+            "chart.set_timeframe",
+            "playback.seek_to_time",
+            "chart.get_current_candle"
+          ]
+        },
+        {
+          "description": "Same setup with chart.get_candle_at_time at 11:15 instead of seek + current_candle (direct switch to validated in-list ticker)",
+          "requiredCapabilities": [
+            "session.resolve_trading_date",
+            "session.switch_symbol",
+            "chart.set_timeframe",
+            "chart.get_candle_at_time"
+          ]
+        }
+      ],
+      "reasonForChangeFromLegacy": "Legacy used finalQuery \"current_candle\". V2 keeps the same semantic but makes the seek-to-time + current-candle plan explicit; the alternative direct candle-at-time read is equally acceptable.",
+      "contextProfile": "empty",
+      "certificationCritical": false,
+      "diagnosticOnly": false
+    },
+    {
+      "id": 2,
+      "text": "Set me up on AAPL for the prior session, use 5m, park at 10:30 and give me the candle.",
+      "bucket": "primary",
+      "expectedKind": "chart_action",
+      "requiredCapabilities": [
+        "session.resolve_symbol",
+        "session.resolve_trading_date",
+        "session.switch_symbol",
+        "chart.set_timeframe",
+        "playback.seek_to_time",
+        "chart.get_current_candle"
+      ],
+      "forbiddenCapabilities": [],
+      "expectedSymbol": "AAPL",
+      "expectedDate": {
+        "kind": "relative_trading",
+        "count": 1,
+        "direction": "backward"
+      },
+      "expectedTimeframe": 5,
+      "expectedSeekTime": "10:30",
+      "expectedMarketTime": "10:30",
+      "expectedPlayback": null,
+      "expectedAnalysisRequests": [],
+      "expectedAnalysisKinds": [],
+      "expectedWindow": null,
+      "expectedContextReference": null,
+      "notes": "Compact version of prompt 1 with a different ticker and time.",
+      "acceptableAlternatives": [
+        {
+          "description": "Direct candle-at-time read at 10:30",
+          "requiredCapabilities": [
+            "session.resolve_symbol",
+            "session.resolve_trading_date",
+            "session.switch_symbol",
+            "chart.set_timeframe",
+            "chart.get_candle_at_time"
+          ]
+        },
+        {
+          "description": "Canonical route (direct switch to validated in-list ticker)",
+          "requiredCapabilities": [
+            "session.resolve_trading_date",
+            "session.switch_symbol",
+            "chart.set_timeframe",
+            "playback.seek_to_time",
+            "chart.get_current_candle"
+          ]
+        },
+        {
+          "description": "Direct candle-at-time read at 10:30 (direct switch to validated in-list ticker)",
+          "requiredCapabilities": [
+            "session.resolve_trading_date",
+            "session.switch_symbol",
+            "chart.set_timeframe",
+            "chart.get_candle_at_time"
+          ]
+        }
+      ],
+      "reasonForChangeFromLegacy": "Same V2 semantic simplification as prompt 1.",
+      "contextProfile": "empty",
+      "certificationCritical": false,
+      "diagnosticOnly": false
+    },
+    {
+      "id": 3,
+      "text": "Set me up on MSFT for the prior trading session, use 60m bars, park at half past nine and show the candle.",
+      "bucket": "primary",
+      "expectedKind": "chart_action",
+      "requiredCapabilities": [
+        "session.resolve_symbol",
+        "session.resolve_trading_date",
+        "session.switch_symbol",
+        "chart.set_timeframe",
+        "playback.seek_to_time",
+        "chart.get_current_candle"
+      ],
+      "forbiddenCapabilities": [],
+      "expectedSymbol": "MSFT",
+      "expectedDate": {
+        "kind": "relative_trading",
+        "count": 1,
+        "direction": "backward"
+      },
+      "expectedTimeframe": 60,
+      "expectedSeekTime": "09:30",
+      "expectedMarketTime": "09:30",
+      "expectedPlayback": null,
+      "expectedAnalysisRequests": [],
+      "expectedAnalysisKinds": [],
+      "expectedWindow": null,
+      "expectedContextReference": null,
+      "notes": "Full setup with 60-minute bars and a 09:30 seek.",
+      "acceptableAlternatives": [
+        {
+          "description": "Direct candle-at-time read at 09:30",
+          "requiredCapabilities": [
+            "session.resolve_symbol",
+            "session.resolve_trading_date",
+            "session.switch_symbol",
+            "chart.set_timeframe",
+            "chart.get_candle_at_time"
+          ]
+        },
+        {
+          "description": "Canonical route (direct switch to validated in-list ticker)",
+          "requiredCapabilities": [
+            "session.resolve_trading_date",
+            "session.switch_symbol",
+            "chart.set_timeframe",
+            "playback.seek_to_time",
+            "chart.get_current_candle"
+          ]
+        },
+        {
+          "description": "Direct candle-at-time read at 09:30 (direct switch to validated in-list ticker)",
+          "requiredCapabilities": [
+            "session.resolve_trading_date",
+            "session.switch_symbol",
+            "chart.set_timeframe",
+            "chart.get_candle_at_time"
+          ]
+        }
+      ],
+      "reasonForChangeFromLegacy": "Same pattern as prompts 1 and 2.",
+      "contextProfile": "empty",
+      "certificationCritical": false,
+      "diagnosticOnly": false
+    },
+    {
+      "id": 4,
+      "text": "Pull up the bar at 11:15 for NVDA on 2026-07-31.",
+      "bucket": "primary",
+      "expectedKind": "chart_action",
+      "requiredCapabilities": [
+        "session.resolve_symbol",
+        "session.resolve_trading_date",
+        "session.switch_symbol",
+        "chart.get_candle_at_time"
+      ],
+      "forbiddenCapabilities": [],
+      "expectedSymbol": "NVDA",
+      "expectedDate": {
+        "kind": "absolute",
+        "value": "2026-07-31"
+      },
+      "expectedTimeframe": null,
+      "expectedSeekTime": null,
+      "expectedMarketTime": "11:15",
+      "expectedPlayback": null,
+      "expectedAnalysisRequests": [],
+      "expectedAnalysisKinds": [],
+      "expectedWindow": null,
+      "expectedContextReference": null,
+      "notes": "Candle-at-time query. No explicit timeframe is requested, so the active/default chart timeframe is used.",
+      "acceptableAlternatives": [
+        {
+          "description": "Seek to 11:15 and then report the current candle",
+          "requiredCapabilities": [
+            "session.resolve_symbol",
+            "session.resolve_trading_date",
+            "session.switch_symbol",
+            "playback.seek_to_time",
+            "chart.get_current_candle"
+          ]
+        },
+        {
+          "description": "Seek to 11:15 and then read the candle at that time",
+          "requiredCapabilities": [
+            "session.resolve_symbol",
+            "session.resolve_trading_date",
+            "session.switch_symbol",
+            "playback.seek_to_time",
+            "chart.get_candle_at_time"
+          ]
+        },
+        {
+          "description": "Canonical route (direct switch to validated in-list ticker)",
+          "requiredCapabilities": [
+            "session.resolve_trading_date",
+            "session.switch_symbol",
+            "chart.get_candle_at_time"
+          ]
+        },
+        {
+          "description": "Seek to 11:15 and then report the current candle (direct switch to validated in-list ticker)",
+          "requiredCapabilities": [
+            "session.resolve_trading_date",
+            "session.switch_symbol",
+            "playback.seek_to_time",
+            "chart.get_current_candle"
+          ]
+        },
+        {
+          "description": "Seek to 11:15 and then read the candle at that time (direct switch to validated in-list ticker)",
+          "requiredCapabilities": [
+            "session.resolve_trading_date",
+            "session.switch_symbol",
+            "playback.seek_to_time",
+            "chart.get_candle_at_time"
+          ]
+        }
+      ],
+      "reasonForChangeFromLegacy": "Legacy finalQuery \"candle_at_time\" is retained as the semantic capability chart.get_candle_at_time. qwen3:8b over-generated by adding count to the absolute date, timeframeMinutes:1, and seekTime, which the V2 contract treats as hallucinated/ungrouded extras.",
+      "contextProfile": "empty",
+      "certificationCritical": false,
+      "diagnosticOnly": false
+    },
+    {
+      "id": 5,
+      "text": "Switch to AAPL, go back two sessions, set 15m and seek to quarter to three p.m.",
+      "bucket": "primary",
+      "expectedKind": "chart_action",
+      "requiredCapabilities": [
+        "session.resolve_symbol",
+        "session.resolve_trading_date",
+        "session.switch_symbol",
+        "chart.set_timeframe",
+        "playback.seek_to_time"
+      ],
+      "forbiddenCapabilities": [
+        "chart.get_current_candle",
+        "chart.get_candle_at_time"
+      ],
+      "expectedSymbol": "AAPL",
+      "expectedDate": {
+        "kind": "relative_trading",
+        "count": 2,
+        "direction": "backward"
+      },
+      "expectedTimeframe": 15,
+      "expectedSeekTime": "14:45",
+      "expectedMarketTime": "14:45",
+      "expectedPlayback": null,
+      "expectedAnalysisRequests": [],
+      "expectedAnalysisKinds": [],
+      "expectedWindow": null,
+      "expectedContextReference": null,
+      "notes": "Compound navigation setup: switch, set timeframe, and seek. No candle report is requested.",
+      "acceptableAlternatives": [
+        {
+          "description": "Canonical route (direct switch to validated in-list ticker)",
+          "requiredCapabilities": [
+            "session.resolve_trading_date",
+            "session.switch_symbol",
+            "chart.set_timeframe",
+            "playback.seek_to_time"
+          ]
+        }
+      ],
+      "reasonForChangeFromLegacy": "Legacy finalQuery \"current_candle\". V2 permits either seek+current or direct candle-at-time.",
+      "contextProfile": "empty",
+      "certificationCritical": false,
+      "diagnosticOnly": false
+    },
+    {
+      "id": 6,
+      "text": "Move the replay half an hour earlier and give me the bar I land on.",
+      "bucket": "primary",
+      "expectedKind": "chart_action",
+      "requiredCapabilities": [
+        "playback.seek_relative",
+        "chart.get_current_candle"
+      ],
+      "forbiddenCapabilities": [
+        "session.switch_symbol",
+        "session.resolve_symbol",
+        "session.resolve_trading_date"
+      ],
+      "expectedSymbol": null,
+      "expectedDate": null,
+      "expectedTimeframe": null,
+      "expectedSeekTime": null,
+      "expectedMarketTime": null,
+      "expectedPlayback": null,
+      "expectedAnalysisRequests": [],
+      "expectedAnalysisKinds": [],
+      "expectedWindow": null,
+      "expectedContextReference": null,
+      "notes": "Relative seek in the active NVDA 15m session. The candle is reported after the seek.",
+      "acceptableAlternatives": [],
+      "reasonForChangeFromLegacy": "No change in semantic; V2 verifies only a relative seek + current-candle report with no session switch.",
+      "contextProfile": "active",
+      "certificationCritical": false,
+      "diagnosticOnly": false,
+      "expectedRelativeSeekMinutes": -30
+    },
+    {
+      "id": 7,
+      "text": "Skip the replay forward 15 minutes.",
+      "bucket": "primary",
+      "expectedKind": "chart_action",
+      "requiredCapabilities": [
+        "playback.seek_relative"
+      ],
+      "forbiddenCapabilities": [
+        "session.switch_symbol",
+        "session.resolve_symbol",
+        "session.resolve_trading_date",
+        "chart.get_current_candle"
+      ],
+      "expectedSymbol": null,
+      "expectedDate": null,
+      "expectedTimeframe": null,
+      "expectedSeekTime": null,
+      "expectedMarketTime": null,
+      "expectedPlayback": null,
+      "expectedAnalysisRequests": [],
+      "expectedAnalysisKinds": [],
+      "expectedWindow": null,
+      "expectedContextReference": null,
+      "notes": "Pure relative seek forward.",
+      "acceptableAlternatives": [],
+      "reasonForChangeFromLegacy": "No change.",
+      "contextProfile": "active",
+      "certificationCritical": false,
+      "diagnosticOnly": false,
+      "expectedRelativeSeekMinutes": 15
+    },
+    {
+      "id": 8,
+      "text": "Play from here until 3:45pm at 4x.",
+      "bucket": "primary",
+      "expectedKind": "chart_action",
+      "requiredCapabilities": [
+        "playback.play_until"
+      ],
+      "forbiddenCapabilities": [
+        "session.switch_symbol",
+        "session.resolve_symbol",
+        "session.resolve_trading_date"
+      ],
+      "expectedSymbol": null,
+      "expectedDate": null,
+      "expectedTimeframe": null,
+      "expectedSeekTime": null,
+      "expectedMarketTime": "15:45",
+      "expectedPlayback": {
+        "action": "play_until",
+        "untilTime": "15:45",
+        "speed": 4,
+        "direction": "forward"
+      },
+      "expectedAnalysisRequests": [],
+      "expectedContextReference": null,
+      "notes": "Playback-only turn in the active session. The start time is implicit (current cursor).",
+      "acceptableAlternatives": [],
+      "reasonForChangeFromLegacy": "No change.",
+      "expectedAnalysisKinds": [],
+      "expectedWindow": null,
+      "contextProfile": "active",
+      "certificationCritical": false,
+      "diagnosticOnly": false
+    },
+    {
+      "id": 9,
+      "text": "Use five-minute bars.",
+      "bucket": "deterministic",
+      "expectedKind": "chart_action",
+      "requiredCapabilities": [
+        "chart.set_timeframe"
+      ],
+      "forbiddenCapabilities": [
+        "session.switch_symbol",
+        "session.resolve_symbol",
+        "session.resolve_trading_date"
+      ],
+      "expectedSymbol": null,
+      "expectedDate": null,
+      "expectedTimeframe": 5,
+      "expectedSeekTime": null,
+      "expectedMarketTime": null,
+      "expectedPlayback": null,
+      "expectedAnalysisRequests": [],
+      "expectedAnalysisKinds": [],
+      "expectedWindow": null,
+      "expectedContextReference": null,
+      "notes": "Timeframe-only request with no active session. The deterministic parser emits a set_timeframe plan, which is semantically correct even though execution will fail until a session is started.",
+      "acceptableAlternatives": [],
+      "reasonForChangeFromLegacy": "No legacy gold existed. V2 states the single capability a valid deterministic/compact parser must emit.",
+      "contextProfile": "empty",
+      "certificationCritical": false,
+      "diagnosticOnly": false
+    },
+    {
+      "id": 10,
+      "text": "Switch to AAPL 2026-07-31, use 15m and play at 2x until 10:30.",
+      "bucket": "deterministic",
+      "expectedKind": "chart_action",
+      "requiredCapabilities": [
+        "session.resolve_symbol",
+        "session.resolve_trading_date",
+        "session.switch_symbol",
+        "chart.set_timeframe",
+        "playback.play_until"
+      ],
+      "forbiddenCapabilities": [],
+      "expectedSymbol": "AAPL",
+      "expectedDate": {
+        "kind": "absolute",
+        "value": "2026-07-31"
+      },
+      "expectedTimeframe": 15,
+      "expectedSeekTime": null,
+      "expectedMarketTime": "10:30",
+      "expectedPlayback": {
+        "action": "play_until",
+        "untilTime": "10:30",
+        "speed": 2,
+        "direction": "forward"
+      },
+      "expectedAnalysisRequests": [],
+      "expectedContextReference": null,
+      "notes": "Compound switch + timeframe + play-until. The deterministic parser currently routes this as a switch+seek, but the V2 semantic requires the play_until capability with speed 2 and untilTime 10:30.",
+      "acceptableAlternatives": [
+        {
+          "description": "Canonical route (direct switch to validated in-list ticker)",
+          "requiredCapabilities": [
+            "session.resolve_trading_date",
+            "session.switch_symbol",
+            "chart.set_timeframe",
+            "playback.play_until"
+          ]
+        }
+      ],
+      "reasonForChangeFromLegacy": "No legacy gold. V2 captures the full playback intent that the legacy parser was missing.",
+      "expectedAnalysisKinds": [],
+      "expectedWindow": null,
+      "contextProfile": "empty",
+      "certificationCritical": false,
+      "diagnosticOnly": true
+    },
+    {
+      "id": 11,
+      "text": "Park the replay at quarter to three in the afternoon.",
+      "bucket": "primary",
+      "expectedKind": "chart_action",
+      "requiredCapabilities": [
+        "playback.seek_to_time"
+      ],
+      "forbiddenCapabilities": [
+        "session.switch_symbol",
+        "session.resolve_symbol",
+        "session.resolve_trading_date",
+        "chart.get_current_candle",
+        "chart.get_candle_at_time"
+      ],
+      "expectedSymbol": null,
+      "expectedDate": null,
+      "expectedTimeframe": null,
+      "expectedSeekTime": "14:45",
+      "expectedMarketTime": "14:45",
+      "expectedPlayback": null,
+      "expectedAnalysisRequests": [],
+      "expectedAnalysisKinds": [],
+      "expectedWindow": null,
+      "expectedContextReference": null,
+      "notes": "Navigation-only seek to 14:45 in the active session. No candle report is requested.",
+      "acceptableAlternatives": [],
+      "reasonForChangeFromLegacy": "Same as prompt 1/2/3: seek+current is canonical, direct candle-at-time is acceptable.",
+      "contextProfile": "active",
+      "certificationCritical": false,
+      "diagnosticOnly": false
+    },
+    {
+      "id": 12,
+      "text": "Give me the candle at noon for AAPL.",
+      "bucket": "diagnostic",
+      "expectedKind": "clarification",
+      "requiredCapabilities": [],
+      "forbiddenCapabilities": [
+        "session.switch_symbol",
+        "session.resolve_trading_date",
+        "chart.get_candle_at_time",
+        "chart.set_timeframe",
+        "playback.play_until"
+      ],
+      "expectedSymbol": null,
+      "expectedDate": null,
+      "expectedTimeframe": null,
+      "expectedSeekTime": null,
+      "expectedMarketTime": null,
+      "expectedPlayback": null,
+      "expectedAnalysisRequests": [],
+      "expectedAnalysisKinds": [],
+      "expectedWindow": null,
+      "expectedContextReference": null,
+      "notes": "Precondition/diagnostic prompt: a symbol is named but no date is provided in an empty context. A valid executable chart plan cannot be produced.",
+      "acceptableAlternatives": [],
+      "reasonForChangeFromLegacy": "Expected clarification. qwen3:8b hallucinated an executable chart_action with an ungrounded date, which the V2 contract must reject.",
+      "contextProfile": "empty",
+      "certificationCritical": false,
+      "diagnosticOnly": true
+    },
+    {
+      "id": 13,
+      "text": "Take me back to the previous stock.",
+      "bucket": "primary",
+      "expectedKind": "chart_action",
+      "requiredCapabilities": [
+        "session.switch_to_previous_symbol"
+      ],
+      "forbiddenCapabilities": [
+        "session.resolve_symbol",
+        "session.resolve_trading_date",
+        "session.switch_symbol"
+      ],
+      "expectedSymbol": null,
+      "expectedDate": null,
+      "expectedTimeframe": null,
+      "expectedSeekTime": null,
+      "expectedMarketTime": null,
+      "expectedPlayback": null,
+      "expectedAnalysisRequests": [],
+      "expectedAnalysisKinds": [],
+      "expectedWindow": null,
+      "expectedContextReference": null,
+      "notes": "Session-history switch. The capability carries no symbol argument.",
+      "acceptableAlternatives": [],
+      "reasonForChangeFromLegacy": "No change.",
+      "contextProfile": "active",
+      "certificationCritical": false,
+      "diagnosticOnly": false
+    },
+    {
+      "id": 14,
+      "text": "Do that again on AAPL.",
+      "bucket": "primary",
+      "expectedKind": "chart_action",
+      "requiredCapabilities": [
+        "session.resolve_symbol",
+        "session.resolve_trading_date",
+        "session.switch_symbol",
+        "chart.set_timeframe",
+        "playback.seek_to_time",
+        "chart.get_current_candle"
+      ],
+      "forbiddenCapabilities": [],
+      "expectedSymbol": "AAPL",
+      "expectedDate": {
+        "kind": "absolute",
+        "value": "2026-07-31"
+      },
+      "expectedTimeframe": 15,
+      "expectedSeekTime": "11:15",
+      "expectedMarketTime": "11:15",
+      "expectedPlayback": null,
+      "expectedAnalysisRequests": [],
+      "expectedContextReference": {
+        "source": "latest_successful_action",
+        "mode": "repeat"
+      },
+      "notes": "Context reference: repeat the latest successful action but with the symbol overridden to AAPL.",
+      "acceptableAlternatives": [
+        {
+          "description": "Direct read with chart.get_candle_at_time at 11:15",
+          "requiredCapabilities": [
+            "session.resolve_symbol",
+            "session.resolve_trading_date",
+            "session.switch_symbol",
+            "chart.set_timeframe",
+            "chart.get_candle_at_time"
+          ]
+        },
+        {
+          "description": "Canonical route (direct switch to validated in-list ticker)",
+          "requiredCapabilities": [
+            "session.resolve_trading_date",
+            "session.switch_symbol",
+            "chart.set_timeframe",
+            "playback.seek_to_time",
+            "chart.get_current_candle"
+          ]
+        },
+        {
+          "description": "Direct read with chart.get_candle_at_time at 11:15 (direct switch to validated in-list ticker)",
+          "requiredCapabilities": [
+            "session.resolve_trading_date",
+            "session.switch_symbol",
+            "chart.set_timeframe",
+            "chart.get_candle_at_time"
+          ]
+        }
+      ],
+      "reasonForChangeFromLegacy": "Legacy gold uses contextReference repeat. V2 describes the resolved semantic and the inherited values.",
+      "expectedAnalysisKinds": [],
+      "expectedWindow": null,
+      "contextProfile": "active",
+      "certificationCritical": true,
+      "diagnosticOnly": false
+    },
+    {
+      "id": 15,
+      "text": "Use the same timeframe but go to the prior trading session.",
+      "bucket": "primary",
+      "expectedKind": "chart_action",
+      "requiredCapabilities": [
+        "session.resolve_symbol",
+        "session.resolve_trading_date",
+        "session.switch_symbol",
+        "chart.set_timeframe"
+      ],
+      "forbiddenCapabilities": [],
+      "expectedSymbol": "NVDA",
+      "expectedDate": {
+        "kind": "relative_trading",
+        "count": 1,
+        "direction": "backward"
+      },
+      "expectedTimeframe": 15,
+      "expectedSeekTime": null,
+      "expectedMarketTime": null,
+      "expectedPlayback": null,
+      "expectedAnalysisRequests": [],
+      "expectedContextReference": {
+        "source": "latest_successful_action",
+        "mode": "inherit",
+        "inherit": [
+          "timeframe"
+        ]
+      },
+      "notes": "Context reference: inherit the timeframe (15m) from the latest successful action and apply it to the prior trading session.",
+      "acceptableAlternatives": [
+        {
+          "description": "Canonical route (direct switch to validated in-list ticker)",
+          "requiredCapabilities": [
+            "session.resolve_trading_date",
+            "session.switch_symbol",
+            "chart.set_timeframe"
+          ]
+        }
+      ],
+      "reasonForChangeFromLegacy": "qwen3:8b incorrectly emitted previousSymbol:true together with a date, which is invalid. V2 separates the inherit-context reference from the new relative date.",
+      "expectedAnalysisKinds": [],
+      "expectedWindow": null,
+      "contextProfile": "active",
+      "certificationCritical": true,
+      "diagnosticOnly": false
+    },
+    {
+      "id": 16,
+      "text": "Go back to the candle we were discussing.",
+      "bucket": "primary",
+      "expectedKind": "chart_action",
+      "requiredCapabilities": [
+        "playback.seek_to_time"
+      ],
+      "forbiddenCapabilities": [
+        "session.switch_symbol",
+        "session.resolve_symbol",
+        "session.resolve_trading_date"
+      ],
+      "expectedSymbol": null,
+      "expectedDate": null,
+      "expectedTimeframe": null,
+      "expectedSeekTime": "11:15",
+      "expectedMarketTime": "11:15",
+      "expectedPlayback": null,
+      "expectedAnalysisRequests": [],
+      "expectedContextReference": {
+        "source": "latest_returned_candle",
+        "mode": "use_as_target"
+      },
+      "notes": "Context reference: use the latest returned candle as the seek target (11:15 in the active NVDA session).",
+      "acceptableAlternatives": [],
+      "reasonForChangeFromLegacy": "No change.",
+      "expectedAnalysisKinds": [],
+      "expectedWindow": null,
+      "contextProfile": "active",
+      "certificationCritical": true,
+      "diagnosticOnly": false
+    },
+    {
+      "id": 17,
+      "text": "Compare this candle with the previous candle you reported.",
+      "bucket": "primary",
+      "expectedKind": "chart_action",
+      "requiredCapabilities": [
+        "analysis.compare_candles"
+      ],
+      "forbiddenCapabilities": [
+        "session.switch_symbol",
+        "session.resolve_symbol",
+        "session.resolve_trading_date"
+      ],
+      "expectedSymbol": null,
+      "expectedDate": null,
+      "expectedTimeframe": null,
+      "expectedSeekTime": null,
+      "expectedMarketTime": null,
+      "expectedPlayback": null,
+      "expectedAnalysisRequests": [],
+      "expectedAnalysisKinds": [
+        "compare_candles"
+      ],
+      "expectedWindow": null,
+      "expectedContextReference": null,
+      "notes": "Candle-to-candle comparison of the two most recently reported candles. The left side is the latest returned candle; the right side is the previous returned candle.",
+      "acceptableAlternatives": [],
+      "reasonForChangeFromLegacy": "Legacy finalQuery \"compare_candles\" maps to the analysis.compare_candles capability. qwen3:8b failed because the V1 sanitizer stripped the compare finalQuery when it was classified as a window analysis; V2 must keep compare_candles as a first-class candle-query semantic.",
+      "contextProfile": "active",
+      "certificationCritical": true,
+      "diagnosticOnly": false
+    },
+    {
+      "id": 18,
+      "text": "One session before that.",
+      "bucket": "primary",
+      "expectedKind": "chart_action",
+      "requiredCapabilities": [
+        "session.resolve_symbol",
+        "session.resolve_trading_date",
+        "session.switch_symbol"
+      ],
+      "forbiddenCapabilities": [],
+      "expectedSymbol": "NVDA",
+      "expectedDate": {
+        "kind": "relative_trading",
+        "count": 1,
+        "direction": "backward"
+      },
+      "expectedTimeframe": null,
+      "expectedSeekTime": null,
+      "expectedMarketTime": null,
+      "expectedPlayback": null,
+      "expectedAnalysisRequests": [],
+      "expectedContextReference": {
+        "source": "latest_successful_action",
+        "mode": "anchor_relative_date"
+      },
+      "notes": "Context reference: anchor a one-session-backward date to the resolved date of the latest successful action.",
+      "acceptableAlternatives": [
+        {
+          "description": "Canonical route (direct switch to validated in-list ticker)",
+          "requiredCapabilities": [
+            "session.resolve_trading_date",
+            "session.switch_symbol"
+          ]
+        }
+      ],
+      "reasonForChangeFromLegacy": "qwen3:8b misplaced the date inside the contextReference object, which is not part of the contextReference schema. V2 requires the date at the top level.",
+      "expectedAnalysisKinds": [],
+      "expectedWindow": null,
+      "contextProfile": "active",
+      "certificationCritical": true,
+      "diagnosticOnly": false
+    },
+    {
+      "id": 19,
+      "text": "Move it over there.",
+      "bucket": "safety",
+      "expectedKind": "clarification",
+      "requiredCapabilities": [],
+      "forbiddenCapabilities": [
+        "session.switch_symbol",
+        "session.resolve_symbol",
+        "session.resolve_trading_date",
+        "chart.set_timeframe",
+        "playback.seek_to_time",
+        "playback.seek_relative",
+        "playback.play_until",
+        "chart.get_current_candle",
+        "chart.get_candle_at_time",
+        "analysis.compare_candles",
+        "analysis.window_ohlc",
+        "analysis.window_change",
+        "analysis.window_volume",
+        "analysis.window_compare",
+        "analysis.candle_shape",
+        "analysis.window_summary"
+      ],
+      "expectedSymbol": null,
+      "expectedDate": null,
+      "expectedTimeframe": null,
+      "expectedSeekTime": null,
+      "expectedMarketTime": null,
+      "expectedPlayback": null,
+      "expectedAnalysisRequests": [],
+      "expectedAnalysisKinds": [],
+      "expectedWindow": null,
+      "expectedContextReference": null,
+      "notes": "Safety prompt: no grounded object, direction, or destination.",
+      "acceptableAlternatives": [],
+      "reasonForChangeFromLegacy": "No change.",
+      "contextProfile": "empty",
+      "certificationCritical": false,
+      "diagnosticOnly": false
+    },
+    {
+      "id": 20,
+      "text": "Add VWAP and backtest a crossover.",
+      "bucket": "safety",
+      "expectedKind": "unsupported",
+      "requiredCapabilities": [],
+      "forbiddenCapabilities": [
+        "session.switch_symbol",
+        "session.resolve_symbol",
+        "session.resolve_trading_date",
+        "chart.set_timeframe",
+        "playback.seek_to_time",
+        "playback.seek_relative",
+        "playback.play_until",
+        "chart.get_current_candle",
+        "chart.get_candle_at_time",
+        "analysis.compare_candles",
+        "analysis.window_ohlc",
+        "analysis.window_change",
+        "analysis.window_volume",
+        "analysis.window_compare",
+        "analysis.candle_shape",
+        "analysis.window_summary"
+      ],
+      "expectedSymbol": null,
+      "expectedDate": null,
+      "expectedTimeframe": null,
+      "expectedSeekTime": null,
+      "expectedMarketTime": null,
+      "expectedPlayback": null,
+      "expectedAnalysisRequests": [],
+      "expectedAnalysisKinds": [],
+      "expectedWindow": null,
+      "expectedContextReference": null,
+      "notes": "Safety prompt: VWAP and backtesting are not supported capabilities.",
+      "acceptableAlternatives": [],
+      "reasonForChangeFromLegacy": "No change.",
+      "contextProfile": "empty",
+      "certificationCritical": false,
+      "diagnosticOnly": false
+    },
+    {
+      "id": 21,
+      "text": "Jump to 25:00.",
+      "bucket": "safety",
+      "expectedKind": "clarification",
+      "requiredCapabilities": [],
+      "forbiddenCapabilities": [
+        "playback.seek_to_time",
+        "playback.seek_relative",
+        "chart.get_current_candle",
+        "chart.get_candle_at_time",
+        "session.switch_symbol",
+        "session.resolve_symbol",
+        "session.resolve_trading_date",
+        "chart.set_timeframe",
+        "playback.play_until"
+      ],
+      "expectedSymbol": null,
+      "expectedDate": null,
+      "expectedTimeframe": null,
+      "expectedSeekTime": null,
+      "expectedMarketTime": "25:00",
+      "expectedPlayback": null,
+      "expectedAnalysisRequests": [],
+      "expectedAnalysisKinds": [],
+      "expectedWindow": null,
+      "expectedContextReference": null,
+      "notes": "Safety prompt: 25:00 is not a valid HH:MM clock time.",
+      "acceptableAlternatives": [],
+      "reasonForChangeFromLegacy": "No change.",
+      "contextProfile": "empty",
+      "certificationCritical": false,
+      "diagnosticOnly": false
+    },
+    {
+      "id": 22,
+      "text": "Check the price of Bitcoin.",
+      "bucket": "safety",
+      "expectedKind": "unsupported",
+      "requiredCapabilities": [],
+      "forbiddenCapabilities": [
+        "session.switch_symbol",
+        "session.resolve_symbol",
+        "session.resolve_trading_date",
+        "chart.set_timeframe",
+        "playback.seek_to_time",
+        "playback.seek_relative",
+        "playback.play_until",
+        "chart.get_current_candle",
+        "chart.get_candle_at_time",
+        "analysis.compare_candles",
+        "analysis.window_ohlc",
+        "analysis.window_change",
+        "analysis.window_volume",
+        "analysis.window_compare",
+        "analysis.candle_shape",
+        "analysis.window_summary"
+      ],
+      "expectedSymbol": "BTC",
+      "expectedDate": null,
+      "expectedTimeframe": null,
+      "expectedSeekTime": null,
+      "expectedMarketTime": null,
+      "expectedPlayback": null,
+      "expectedAnalysisRequests": [],
+      "expectedAnalysisKinds": [],
+      "expectedWindow": null,
+      "expectedContextReference": null,
+      "notes": "Safety prompt: Bitcoin is not in the available-ticker list (AAPL/MSFT/NVDA) and the capability set does not support price lookups for unsupported symbols.",
+      "acceptableAlternatives": [],
+      "reasonForChangeFromLegacy": "No change.",
+      "contextProfile": "empty",
+      "certificationCritical": false,
+      "diagnosticOnly": false
+    }
+  ]
+}

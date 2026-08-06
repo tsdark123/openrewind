@@ -10,8 +10,8 @@ A model is **certified** only for a specific set of versioned artifacts:
 
 | Field | Meaning | Where it is recorded |
 |-------|---------|----------------------|
-| `certificationContractVersion` | The semantic contract the model is being tested against (e.g. `v2.0.0-semantic`). | V2 report metadata |
-| `promptSuiteVersion` | The exact set of 22 prompts and their V2 golds (e.g. `v2.0.0-22-prompts`). | V2 report metadata |
+| `certificationContractVersion` | The semantic contract the model is being tested against (e.g. `v2.1.0-semantic`). | V2 report metadata |
+| `promptSuiteVersion` | The exact set of 22 prompts and their V2 golds (e.g. `v2.1.0-22-prompts`). | V2 report metadata |
 | `scorerVersion` | The `bakeoff-scorer-v2.ts` version (e.g. `v2.0.0`). | V2 report metadata |
 | `schemaVersion` | The `ChartActionIntent` / `AgentPlan` schema version (e.g. `v2.0.0`). | V2 report metadata |
 | `modelTag` | The Ollama model tag, including quant/instruct suffix (e.g. `qwen3:8b`). | V2 report metadata |
@@ -221,3 +221,9 @@ has been generated and committed to
 * **v2.0.0-semantic** — Initial V2 semantic contract. Introduced after the
   `qwen3:4b-instruct` certification conflict showed that the V1 bake-off was too
   sensitive to raw-JSON shape and not robust to production contract evolution.
+
+* **v2.1.0-semantic** — Corrected the V2 #5/#11 navigation-only contract defect
+  (no unsolicited candle reports) and added the narrow semantically-equivalent
+  direct-`session.switch_symbol` alternative for exact validated in-list tickers.
+  The prompt suite, certification contract and design plan are now
+  `v2.1.0-22-prompts` / `v2.1.0-semantic`; reports under v2.0.0 are incompatible.

@@ -349,8 +349,8 @@ describe('Orion Chapter 2A V2 certification contract', () => {
       ollamaVersion: '0.32.6',
     });
 
-    expect(scorecard.certificationContractVersion).toBe('v2.0.0-semantic');
-    expect(scorecard.promptSuiteVersion).toBe('v2.0.0-22-prompts');
+    expect(scorecard.certificationContractVersion).toBe('v2.1.0-semantic');
+    expect(scorecard.promptSuiteVersion).toBe('v2.1.0-22-prompts');
     expect(scorecard.scorerVersion).toBe('v2.0.0');
     expect(scorecard.schemaVersion).toBe('v2.0.0');
     expect(scorecard.modelTag).toBe('qwen3:8b');
@@ -362,8 +362,8 @@ describe('Orion Chapter 2A V2 certification contract', () => {
   it('refuses to compare reports with incompatible certification contract versions', () => {
     const base = (id: string): V2Report => ({
       metadata: {
-        certificationContractVersion: 'v2.0.0-semantic',
-        promptSuiteVersion: 'v2.0.0-22-prompts',
+        certificationContractVersion: 'v2.1.0-semantic',
+        promptSuiteVersion: 'v2.1.0-22-prompts',
         productionHead: 'abc123',
         modelTag: 'qwen3:8b',
         modelDigest: 'sha256:abc',
@@ -377,8 +377,8 @@ describe('Orion Chapter 2A V2 certification contract', () => {
       results: [],
       promptScores: [],
       scorecard: {
-        certificationContractVersion: 'v2.0.0-semantic',
-        promptSuiteVersion: 'v2.0.0-22-prompts',
+        certificationContractVersion: 'v2.1.0-semantic',
+        promptSuiteVersion: 'v2.1.0-22-prompts',
         productionHead: 'abc123',
         modelTag: 'qwen3:8b',
         modelDigest: 'sha256:abc',
@@ -417,6 +417,15 @@ describe('Orion Chapter 2A V2 certification contract', () => {
     differentModel.metadata.modelTag = 'qwen3:4b';
     differentModel.metadata.productionHead = 'def456';
     expect(compareV2Reports(a, differentModel).compatible).toBe(true);
+
+    // A report produced under the previous v2.0.0 contract is incompatible with
+    // the corrected v2.1.0 contract and prompt suite.
+    const oldV2 = base('e');
+    oldV2.metadata.certificationContractVersion = 'v2.0.0-semantic';
+    oldV2.metadata.promptSuiteVersion = 'v2.0.0-22-prompts';
+    oldV2.scorecard.certificationContractVersion = 'v2.0.0-semantic';
+    oldV2.scorecard.promptSuiteVersion = 'v2.0.0-22-prompts';
+    expect(compareV2Reports(a, oldV2).compatible).toBe(false);
   });
 
   it('writes a V2 report with all required metadata fields', () => {
@@ -437,8 +446,8 @@ describe('Orion Chapter 2A V2 certification contract', () => {
     const json = writeV2ResultsJson('test.json', report);
     const parsed = JSON.parse(json);
 
-    expect(parsed.metadata.certificationContractVersion).toBe('v2.0.0-semantic');
-    expect(parsed.metadata.promptSuiteVersion).toBe('v2.0.0-22-prompts');
+    expect(parsed.metadata.certificationContractVersion).toBe('v2.1.0-semantic');
+    expect(parsed.metadata.promptSuiteVersion).toBe('v2.1.0-22-prompts');
     expect(parsed.metadata.productionHead).toBe('abc123');
     expect(parsed.metadata.modelTag).toBe('qwen3:8b');
     expect(parsed.metadata.modelDigest).toBe('sha256:abc');
@@ -449,7 +458,7 @@ describe('Orion Chapter 2A V2 certification contract', () => {
 
     const md = formatV2Scorecard(scorecard);
     expect(md).toContain('Orion Chapter 2A V2 Certification Scorecard');
-    expect(md).toContain('v2.0.0-semantic');
+    expect(md).toContain('v2.1.0-semantic');
     expect(md).toContain('qwen3:8b');
     expect(md).toContain('sha256:abc');
     expect(md).toContain('0.32.6');

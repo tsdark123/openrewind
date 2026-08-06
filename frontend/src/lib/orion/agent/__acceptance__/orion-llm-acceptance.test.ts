@@ -128,19 +128,34 @@ describe('LLM runtime acceptance', () => {
       expect(r).toBeDefined();
       expect(r.route).toBe('llm-plan');
       expect(r.wasChat).toBe(false);
-      if (r.ok) {
-        expect(r.plan!.steps.length).toBeGreaterThanOrEqual(3);
-        expect(r.plan!.steps.some((s) => s.capability === 'session.resolve_symbol')).toBe(true);
-        expect(r.result?.receipts.some((rc) => rc.capability === 'session.switch_symbol')).toBe(true);
-      } else {
-        expect(r.route).not.toBe('error');
-      }
+      expect(r.ok).toBe(true);
+      expect(r.plan).toBeDefined();
+      expect(r.plan!.steps.length).toBeGreaterThanOrEqual(3);
+
+      // Safe switch to NVDA, resolved date, set timeframe, seek to 11:15 and report current candle.
+      expect(r.plan!.steps.some((s) => s.capability === 'session.switch_symbol')).toBe(true);
+      expect(r.plan!.steps.some((s) => s.capability === 'chart.set_timeframe' && s.args.timeframe === 15)).toBe(true);
+      expect(r.plan!.steps.some((s) => s.capability === 'playback.seek_to_time' && s.args.time === '11:15')).toBe(true);
+      expect(r.plan!.steps.some((s) => s.capability === 'chart.get_current_candle')).toBe(true);
+
+      const switchReceipt = r.result?.receipts.find(
+        (rc) => rc.capability === 'session.switch_symbol' && rc.success
+      );
+      expect(switchReceipt).toBeDefined();
+      expect(switchReceipt!.message).toMatch(/NVDA/);
+      expect(ctx.getState().symbol).toBe('NVDA');
+      expect(ctx.getState().timeframe).toBe(15);
+      expect(ctx.getState().sessionActive).toBe(true);
+      expect(ctx.getState().replayDate).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+
+      expect(r.result?.receipts.some((rc) => rc.capability === 'playback.seek_to_time' && rc.success)).toBe(true);
+      expect(r.result?.receipts.some((rc) => rc.capability === 'chart.get_current_candle' && rc.success)).toBe(true);
     },
     TEST_TIMEOUT
   );
 
   it(
-    'B: "move the replay half an hour earlier and give me the bar" routes through llm-plan',
+    'B: "move the replay half an hour earlier and give me the bar" routes through the deterministic path',
     async () => {
       const ctx = makeCtx();
       ctx.getState().symbol = 'AAPL';
@@ -151,8 +166,26 @@ describe('LLM runtime acceptance', () => {
         setupReady: true,
       });
       expect(r).toBeDefined();
-      expect(r.route).toMatch(/llm-plan|clarification/);
-      expect(r.wasChat).toBe(r.route === 'clarification');
+      expect(r.route).toBe('deterministic');
+      expect(r.wasChat).toBe(false);
+      expect(r.ok).toBe(true);
+      expect(r.plan).toBeDefined();
+
+      const seekStep = r.plan!.steps.find((s) => s.capability === 'playback.seek_relative');
+      expect(seekStep).toBeDefined();
+      expect(seekStep!.args.minutes).toBe(-30);
+
+      const seekReceipt = r.result?.receipts.find(
+        (rc) => rc.capability === 'playback.seek_relative' && rc.success
+      );
+      expect(seekReceipt).toBeDefined();
+      expect(seekReceipt!.data?.target).toBe(1755036600 - 30 * 60);
+
+      const candleReceipt = r.result?.receipts.find(
+        (rc) => rc.capability === 'chart.get_current_candle' && rc.success
+      );
+      expect(candleReceipt).toBeDefined();
+      expect(candleReceipt!.data?.timestamp).toBe(1755036600 - 30 * 60);
     },
     TEST_TIMEOUT
   );

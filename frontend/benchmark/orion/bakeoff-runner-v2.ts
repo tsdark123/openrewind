@@ -237,8 +237,8 @@ export async function runBakeoffV2(opts: V2BakeoffOptions): Promise<V2Report> {
   });
 
   const metadata = {
-    certificationContractVersion: 'v2.0.0-semantic',
-    promptSuiteVersion: 'v2.0.0-22-prompts',
+    certificationContractVersion: 'v2.1.0-semantic',
+    promptSuiteVersion: 'v2.1.0-22-prompts',
     productionHead,
     modelTag: opts.model,
     modelDigest: opts.modelDigest,

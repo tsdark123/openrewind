@@ -27,7 +27,7 @@ import type {
 // =============================================================================
 
 export const V2_CERTIFICATION_POLICY = {
-  contractVersion: 'v2.0.0-semantic',
+  contractVersion: 'v2.1.0-semantic',
   primaryRepetitionPassRate: 0.9,
   primaryPromptPassRate: 0.9,
   safetyExecutionRate: 1.0,
@@ -733,8 +733,8 @@ export function aggregateV2Scorecard(
   const runtimeOptions: V2BakeoffOptions = { ...opts };
 
   return {
-    certificationContractVersion: 'v2.0.0-semantic',
-    promptSuiteVersion: 'v2.0.0-22-prompts',
+    certificationContractVersion: 'v2.1.0-semantic',
+    promptSuiteVersion: 'v2.1.0-22-prompts',
     productionHead: opts.productionHead ?? 'unknown',
     modelTag: opts.model,
     modelDigest: opts.modelDigest,
