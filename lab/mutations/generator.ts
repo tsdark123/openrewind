@@ -129,7 +129,7 @@ function generateCandidatesForSeed(seed: Scenario, ctx: MutationContext, operato
   candidates.push(seedResult(seed, sourceHash, cfgSeed));
 
   const baseNames = operatorNames.filter((n) => n !== 'stateVariants' && n !== 'negativeControl');
-  candidates.push(...applySingleOperators(seed, ctx, baseNames, 3));
+  candidates.push(...applySingleOperators(seed, ctx, baseNames, 20));
   candidates.push(...applyPairwiseCombinations(seed, ctx, baseNames, 2));
 
   // State variants for the seed and a sample of already generated base variants.
@@ -214,6 +214,17 @@ function selectDiverse(results: MutationResult[], maxValid: number, maxNegative:
 
   const selected: MutationResult[] = [];
   const used = new Set<string>();
+
+  // Reserve one slot each for important state/context configurations.
+  const priorityTags = ['switch-required', 'context-present', 'context-absent'];
+  for (const tag of priorityTags) {
+    if (selected.length >= maxValid) break;
+    const candidates = shuffle(valid.filter((r) => r.spec.tags.includes(tag) && !used.has(scenarioKey(r.scenario))), ctx.rng);
+    if (candidates.length > 0) {
+      used.add(scenarioKey(candidates[0].scenario));
+      selected.push(candidates[0]);
+    }
+  }
 
   // Take up to 3 from each operator group, capped at maxValid.
   for (const key of orderedKeys) {
