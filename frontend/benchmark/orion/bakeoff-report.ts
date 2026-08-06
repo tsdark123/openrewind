@@ -58,12 +58,25 @@ export function formatScorecard(scorecard: ModelScorecard): string {
 export function writeResultsJson(
   path: string,
   results: RepetitionResult[],
-  options?: Record<string, unknown>
+  options?: Record<string, unknown>,
+  scorecard?: ModelScorecard
 ): string {
-  const payload: Record<string, unknown> = {
+  const metadata: Record<string, unknown> = {
     generatedAt: new Date().toISOString(),
+    path,
     count: results.length,
     options: options ?? {},
+  };
+
+  if (scorecard) {
+    metadata.certificationContractVersion = scorecard.certificationContractVersion;
+    metadata.promptSuiteVersion = scorecard.promptSuiteVersion;
+    metadata.scorerVersion = scorecard.scorerVersion;
+    metadata.schemaVersion = scorecard.schemaVersion;
+  }
+
+  const payload: Record<string, unknown> = {
+    ...metadata,
     results: results.map((r) => ({
       promptId: r.promptId,
       model: r.model,
@@ -78,7 +91,7 @@ export function writeResultsJson(
   return JSON.stringify(payload, null, 2);
 }
 
-export function writePromptScoresJson(path: string, scores: Map<number, PromptScore>): string {
+export function writePromptScoresJson(_path: string, scores: Map<number, PromptScore>): string {
   const obj: Record<number, PromptScore> = {};
   for (const [k, v] of scores) {
     obj[k] = v;

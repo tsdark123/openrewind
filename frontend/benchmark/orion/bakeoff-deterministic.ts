@@ -31,6 +31,7 @@ export function runDeterministicCheck(
     preSanitizeValid: false,
     finalValid: false,
     resolvedResult: { ok: true, intent: { kind: 'chart_action' } as any },
+    compiledPlan: plan ?? undefined,
     planValidation,
     pipelineMissingFields: 0,
     pipelineExtraFields: 0,

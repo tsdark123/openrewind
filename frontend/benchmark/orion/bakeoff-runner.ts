@@ -209,6 +209,10 @@ export async function runBakeoff(opts: BakeoffOptions): Promise<{
     repairAttempts,
     postRepairJsonValid,
     postSanitizationValid,
+    certificationContractVersion: 'legacy-v1',
+    promptSuiteVersion: 'v1.0.0-22-prompts',
+    scorerVersion: 'v1.0.0',
+    schemaVersion: 'v1.0.0',
   };
 
   return { results, promptScores, scorecard };

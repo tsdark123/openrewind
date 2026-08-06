@@ -131,4 +131,9 @@ export interface ModelScorecard {
     finalIntent: string;
     compiledPlan: string;
   };
+  // Contract versioning for legacy-v1 reports.
+  certificationContractVersion?: string;
+  promptSuiteVersion?: string;
+  scorerVersion?: string;
+  schemaVersion?: string;
 }
