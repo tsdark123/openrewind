@@ -26,6 +26,7 @@ import type {
   AgentPlan,
   AgentStep,
   AgentExecutionResult,
+  AgentErrorCode,
   AnalysisRequest,
   CancellationToken,
   ChartActionIntent,
@@ -701,6 +702,16 @@ export function sanitizeIntentGrounding(
   ctx: AgentContext
 ): IntentSanitizationResult {
   const cmd = parseChartCommand(text, ctx.availableTickers, SYMBOL_ALIASES, ctx.getState().replayDate);
+
+  // Reject explicitly invalid or unresolvable fields before any model intent is merged.
+  if (cmd.issues && cmd.issues.length > 0) {
+    return {
+      ok: false,
+      reason: cmd.issues[0].message,
+      trace: { kept: [], stripped: [], defaults: [] },
+    };
+  }
+
   const baseDate = ctx.getState().replayDate;
   const requested = getRequestedDimensions(text, cmd, baseDate);
   const anaphoric = originalContextReference !== undefined;
@@ -1170,6 +1181,38 @@ async function routeMessage(
   // deterministic chart parser because it has no access to execution context.
   const anaphoric = looksLikeContextReference(text, ctx);
 
+  // 3c. Parse the chart command once, early, so malformed/unresolvable explicit
+  // fields are rejected before any chat heuristic or model call can mask them.
+  const baseDate = ctx.getState().replayDate;
+  const cmd = parseChartCommand(text, ctx.availableTickers, SYMBOL_ALIASES, baseDate);
+  agentTrace('parsed chart command', cmd);
+
+  // 3d. Preflight: an explicitly supplied but invalid or unresolvable field must
+  // be rejected before any model call, grounding, compilation or execution.
+  if (cmd.issues && cmd.issues.length > 0) {
+    const issue = cmd.issues[0];
+    const errorCode: AgentErrorCode =
+      issue.kind === 'invalid_time'
+        ? 'INVALID_ARGUMENTS'
+        : issue.kind === 'ambiguous_symbol'
+          ? 'SYMBOL_AMBIGUOUS'
+          : 'SYMBOL_UNAVAILABLE';
+    agentTrace('route', 'clarification', { reason: issue.kind, raw: issue.raw });
+    return {
+      ok: false,
+      message: issue.message,
+      wasChat: true,
+      route: 'clarification',
+      result: {
+        planId: makePlanId(),
+        ok: false,
+        receipts: [],
+        errorCode,
+        errorMessage: issue.message,
+      },
+    };
+  }
+
   // Capability-inquiry follow-ups ("What can we do with that?") are not
   // concrete analysis requests and should not produce an unsolicited chart action.
   if (textRequestsCapabilityInquiry(text)) {
@@ -1221,11 +1264,6 @@ async function routeMessage(
     const message = await runChat(text, ctx, setupReady, now());
     return { ok: true, message, wasChat: true, route: 'chat' };
   }
-
-  // 4. Deterministic chart parser.
-  const baseDate = ctx.getState().replayDate;
-  const cmd = parseChartCommand(text, ctx.availableTickers, SYMBOL_ALIASES, baseDate);
-  agentTrace('parsed chart command', cmd);
 
   // Reject explicit timeframe requests with malformed or unsupported values
   // before any plan runs.  This keeps zero-minute, 7m, etc. from partially

@@ -161,31 +161,30 @@ describe('OrionTerminal-style submission through the orchestrator', () => {
 });
 
 describe('Switch-like raw ticker extraction and failure preservation', () => {
-  it('Switch to ZZZZ. extracts ZZZZ and returns SYMBOL_UNAVAILABLE', async () => {
+  it('Switch to ZZZZ. is clarified before any resolve/model call', async () => {
     const ctx = makeCtx();
     ctx.getState().symbol = 'AAPL';
     ctx.getState().sessionActive = true;
     const r = await handleOrionMessage({ text: 'Switch to ZZZZ.', ctx, setupReady: true });
-    expect(r.route).toBe('resolve');
+    expect(r.route).toBe('clarification');
     expect(r.ok).toBe(false);
-    expect(r.wasChat).toBe(false);
-    expect(r.result?.receipts[0].capability).toBe('session.resolve_symbol');
-    const rc = r.result?.receipts[0];
-    if (rc && !rc.success) expect(rc.errorCode).toBe('SYMBOL_UNAVAILABLE');
-    expect(r.message).toMatch(/ZZZZ.*isn't available/);
+    expect(r.wasChat).toBe(true);
+    expect(r.result?.errorCode).toBe('SYMBOL_UNAVAILABLE');
+    expect(r.message).toMatch(/ZZZZ/);
     expect(ctx.getState().symbol).toBe('AAPL');
   });
 
-  it('go to ABCD extracts ABCD and returns SYMBOL_UNAVAILABLE', async () => {
+  it('go to ABCD is clarified before any resolve/model call', async () => {
     const ctx = makeCtx();
     const r = await handleOrionMessage({ text: 'go to ABCD', ctx, setupReady: true });
-    expect(r.route).toBe('resolve');
-    const rc = r.result?.receipts[0];
-    if (rc && !rc.success) expect(rc.errorCode).toBe('SYMBOL_UNAVAILABLE');
-    expect(r.message).toMatch(/ABCD.*isn't available/);
+    expect(r.route).toBe('clarification');
+    expect(r.ok).toBe(false);
+    expect(r.wasChat).toBe(true);
+    expect(r.result?.errorCode).toBe('SYMBOL_UNAVAILABLE');
+    expect(r.message).toMatch(/ABCD/);
   });
 
-  it('show me QQQQ extracts QQQQ', async () => {
+  it('show me QQQQ extracts QQQQ through resolve_symbol', async () => {
     const ctx = makeCtx();
     const r = await handleOrionMessage({ text: 'show me QQQQ', ctx, setupReady: true });
     expect(r.result?.receipts[0].capability).toBe('session.resolve_symbol');
@@ -194,13 +193,14 @@ describe('Switch-like raw ticker extraction and failure preservation', () => {
     expect(r.message).toMatch(/QQQQ.*isn't available/);
   });
 
-  it('pull up WXYZ stock extracts WXYZ', async () => {
+  it('pull up WXYZ stock is clarified before any resolve/model call', async () => {
     const ctx = makeCtx();
     const r = await handleOrionMessage({ text: 'pull up WXYZ stock', ctx, setupReady: true });
-    expect(r.result?.receipts[0].capability).toBe('session.resolve_symbol');
-    const rc = r.result?.receipts[0];
-    if (rc && !rc.success) expect(rc.errorCode).toBe('SYMBOL_UNAVAILABLE');
-    expect(r.message).toMatch(/WXYZ.*isn't available/);
+    expect(r.route).toBe('clarification');
+    expect(r.ok).toBe(false);
+    expect(r.wasChat).toBe(true);
+    expect(r.result?.errorCode).toBe('SYMBOL_UNAVAILABLE');
+    expect(r.message).toMatch(/WXYZ/);
   });
 
   it('regression: Switch to AAPL. stays deterministic with zero model calls', async () => {

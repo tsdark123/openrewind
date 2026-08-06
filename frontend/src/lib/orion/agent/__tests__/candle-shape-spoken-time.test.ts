@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { AppState } from '../../../../types';
 import type { AgentContext } from '../types';
 import { handleOrionMessage } from '../orchestrator';
@@ -96,6 +96,10 @@ function findCandleShapeStep(plan: { steps: { capability: string; args: Record<s
   return plan?.steps.find((s) => s.capability === 'analysis.candle_shape');
 }
 
+beforeEach(() => {
+  vi.mocked(orionChat).mockReset();
+});
+
 describe('candle-shape spoken-time pipeline', () => {
   it('resolves "Describe the candle at eleven thirty." to market_time 11:30', async () => {
     vi.mocked(orionChat).mockResolvedValueOnce(candleShapeCurrent());
@@ -181,9 +185,7 @@ describe('candle-shape spoken-time pipeline', () => {
     expect(step?.args.marketTime).toBe('11:30');
   });
 
-  it('clarifies for invalid "describe the candle at eleven seventy"', async () => {
-    vi.mocked(orionChat).mockResolvedValueOnce(candleShapeCurrent());
-
+  it('rejects invalid "describe the candle at eleven seventy" before the model', async () => {
     const ctx = makeCtx();
     ctx.getState().sessionActive = true;
     ctx.getState().symbol = 'AAPL';
@@ -194,9 +196,12 @@ describe('candle-shape spoken-time pipeline', () => {
       setupReady: true,
     });
 
+    expect(r.ok).toBe(false);
     expect(r.wasChat).toBe(true);
     expect(r.route).toBe('clarification');
     expect(r.plan).toBeUndefined();
+    expect(r.result?.receipts ?? []).toHaveLength(0);
+    expect(vi.mocked(orionChat)).not.toHaveBeenCalled();
   });
 
   it('resolves spoken time through the deterministic fallback when the model clarifies', async () => {

@@ -127,32 +127,28 @@ describe('handleOrionMessage routing', () => {
 });
 
 describe('handleOrionMessage symbol resolution', () => {
-  it('routes unresolved switch text through session.resolve_symbol', async () => {
+  it('clarifies an explicit unknown symbol before any resolution or model call', async () => {
     const ctx = makeCtx();
     const r = await handleOrionMessage({ text: 'Switch to ZOOM.', ctx, setupReady: false });
-    expect(r.wasChat).toBe(false);
-    expect(r.route).toBe('resolve');
+    expect(r.wasChat).toBe(true);
+    expect(r.route).toBe('clarification');
     expect(r.ok).toBe(false);
-    expect(r.plan?.steps[0].capability).toBe('session.resolve_symbol');
-    expect(r.result?.receipts[0].capability).toBe('session.resolve_symbol');
-    const rc1 = r.result?.receipts[0];
-    if (rc1 && !rc1.success) expect(rc1.errorCode).toBe('SYMBOL_UNAVAILABLE');
+    expect(r.message).toMatch(/ZOOM/);
+    expect(r.result?.errorCode).toBe('SYMBOL_UNAVAILABLE');
     expect(ctx.getState().symbol).toBe('');
   });
 
-  it('produces SYMBOL_UNAVAILABLE for an unavailable raw ticker and keeps the prior session', async () => {
+  it('clarifies an unavailable raw ticker and keeps the prior session', async () => {
     const ctx = makeCtx();
     ctx.getState().symbol = 'AAPL';
     ctx.getState().sessionActive = true;
     const r = await handleOrionMessage({ text: 'Switch to ZZZZ.', ctx, setupReady: false });
-    expect(r.wasChat).toBe(false);
-    expect(r.route).toBe('resolve');
+    expect(r.wasChat).toBe(true);
+    expect(r.route).toBe('clarification');
     expect(r.ok).toBe(false);
-    const rc2 = r.result?.receipts[0];
-    if (rc2 && !rc2.success) expect(rc2.errorCode).toBe('SYMBOL_UNAVAILABLE');
+    expect(r.message).toMatch(/ZZZZ/);
+    expect(r.result?.errorCode).toBe('SYMBOL_UNAVAILABLE');
     expect(ctx.getState().symbol).toBe('AAPL');
-    const world = r.result?.finalWorldState as { session: { symbol: string } };
-    expect(world.session.symbol).toBe('AAPL');
   });
 
   it('does not optimistically switch after a failed bridge', async () => {
@@ -401,19 +397,19 @@ describe('sanitizeIntentGrounding stale date/timeframe stripping', () => {
 
     const resolved: any = {
       kind: 'chart_action',
-      symbol: 'NVDA',
+      symbol: 'ADBE',
       date: { kind: 'absolute', value: '2026-07-10' },
       timeframeMinutes: 1,
     };
     const r = sanitizeIntentGrounding(
       resolved,
-      'switch to NVDA',
+      'switch to ADBE',
       { source: 'latest_successful_action', mode: 'inherit', inherit: ['date', 'timeframe'] },
       ctx
     );
     expect(r.ok).toBe(true);
     if (!r.ok) return;
-    expect(r.intent!.symbol).toBe('NVDA');
+    expect(r.intent!.symbol).toBe('ADBE');
     expect(r.intent!.date).toEqual({ kind: 'absolute', value: '2026-07-10' });
     expect(r.intent!.timeframeMinutes).toBe(1);
   });
@@ -427,19 +423,19 @@ describe('sanitizeIntentGrounding stale date/timeframe stripping', () => {
 
     const resolved: any = {
       kind: 'chart_action',
-      symbol: 'NVDA',
+      symbol: 'ADBE',
       date: { kind: 'absolute', value: '2026-07-09' },
       timeframeMinutes: 1,
     };
     const r = sanitizeIntentGrounding(
       resolved,
-      'switch to NVDA',
+      'switch to ADBE',
       { source: 'latest_successful_action', mode: 'inherit', inherit: ['date', 'timeframe'] },
       ctx
     );
     expect(r.ok).toBe(true);
     if (!r.ok) return;
-    expect(r.intent!.symbol).toBe('NVDA');
+    expect(r.intent!.symbol).toBe('ADBE');
     expect(r.intent!.date).toEqual({ kind: 'absolute', value: '2026-07-09' });
     expect(r.intent!.timeframeMinutes).toBe(1);
   });

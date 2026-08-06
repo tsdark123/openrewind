@@ -169,13 +169,17 @@ describe('bounded context logging', () => {
     expect(latest?.ok).toBe(true);
   });
 
-  it('records a failed resolve in the execution log', async () => {
+  it('rejects an unresolved explicit symbol before the resolve capability', async () => {
     const ctx = makeCtx();
     const r = await handleOrionMessage({ text: 'Switch to ZZZZ.', ctx, setupReady: true });
-    expect(r.route).toBe('resolve');
+    expect(r.ok).toBe(false);
+    expect(r.route).toBe('clarification');
+    expect(r.result?.receipts ?? []).toHaveLength(0);
+    expect(mockedOrionChat).not.toHaveBeenCalled();
+    expect(ctx.send).not.toHaveBeenCalled();
     const latest = ctx.executionLog.latest();
     expect(latest?.ok).toBe(false);
-    expect(latest?.template?.symbol).toBe('ZZZZ');
+    expect(latest?.route).toBe('clarification');
   });
 });
 
@@ -199,16 +203,15 @@ describe('contextReference resolution', () => {
     expect(mockedOrionChat).not.toHaveBeenCalled();
   });
 
-  it('does not mutate chart state when semantic extraction ends in clarification', async () => {
+  it('rejects an unresolved explicit symbol before the model can clarify', async () => {
     const ctx = makeCtx();
-    mockedOrionChat.mockResolvedValueOnce(
-      mockCompactIntent({ kind: 'clarification', message: 'Which action should I repeat?' })
-    );
     const r = await handleOrionMessage({ text: 'Do that again on Mars.', ctx, setupReady: true });
+    expect(r.ok).toBe(false);
     expect(r.wasChat).toBe(true);
     expect(r.route).toBe('clarification');
     expect(ctx.getState().symbol).toBe('');
     expect(ctx.send).not.toHaveBeenCalled();
+    expect(mockedOrionChat).not.toHaveBeenCalled();
     expect(ctx.executionLog.getEntries()).toHaveLength(1);
   });
 

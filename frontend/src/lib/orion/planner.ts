@@ -16,6 +16,7 @@ import { buildWorldState, type WorldState } from './worldState';
 import { fetchCandles } from './tools';
 import { orionChat } from './client';
 import { SYMBOL_ALIASES as ALIASES } from './symbolAliases';
+import { resolveSymbol } from './agent/resolveSymbol';
 
 export type ChartIntent =
   | 'switch'
@@ -53,6 +54,12 @@ export interface DateInputSpec {
   date?: string;
 }
 
+export interface CommandIssue {
+  kind: 'invalid_time' | 'unknown_symbol' | 'unavailable_symbol' | 'ambiguous_symbol';
+  message: string;
+  raw?: string;
+}
+
 export interface ChartCommand {
   intent: ChartIntent;
   symbol?: string;
@@ -65,6 +72,8 @@ export interface ChartCommand {
   direction?: 'forward' | 'backward';
   relativeMinutes?: number;
   timeframe?: number;
+  /** Deterministic preflight problems discovered while parsing. */
+  issues?: CommandIssue[];
 }
 
 export interface PlannerContext {
@@ -358,17 +367,44 @@ function parseHourToken(token: string): number | undefined {
   return numberWord(token);
 }
 
-export function extractTimes(text: string): ParsedTime[] {
-  const matches: { time: ParsedTime; index: number }[] = [];
+export interface TimeAttempt {
+  index: number;
+  raw: string;
+  time?: ParsedTime;
+  error?: 'invalid_hour' | 'invalid_minute' | 'out_of_range';
+}
+
+export function extractTimeAttempts(text: string): TimeAttempt[] {
+  const attempts: TimeAttempt[] = [];
   const seen = new Set<string>();
 
-  const add = (h: number, m: number, index: number, meridian?: string) => {
-    const t = parse24hTime(h, m, meridian);
-    if (!t) return;
-    const key = `${t.hour}:${t.minute}`;
+  const recordValid = (time: ParsedTime, index: number, raw: string) => {
+    const key = `${time.hour}:${time.minute}`;
     if (seen.has(key)) return;
     seen.add(key);
-    matches.push({ time: t, index });
+    attempts.push({ index, raw, time });
+  };
+
+  const recordInvalid = (index: number, raw: string, error: TimeAttempt['error']) => {
+    attempts.push({ index, raw, error });
+  };
+
+  const try24h = (
+    h: number,
+    m: number,
+    meridian: string | undefined,
+    index: number,
+    raw: string
+  ): ParsedTime | undefined => {
+    const t = parse24hTime(h, m, meridian);
+    if (t) {
+      recordValid(t, index, raw);
+      return t;
+    }
+    // Callers always pass parseable hour/minute values; a failure here means
+    // the resulting 24-hour time is out of range.
+    recordInvalid(index, raw, 'out_of_range');
+    return undefined;
   };
 
   function parseRangeToken(token: string, minuteStr?: string): ParsedTime | null {
@@ -384,10 +420,7 @@ export function extractTimes(text: string): ParsedTime[] {
     return parse24hTime(h, m);
   }
 
-  // Compound time ranges with bare numeric hours and named boundaries:
-  // "from 10 to noon", "between 10 and 12", "10-to-noon", "10 through 12".
-  // These are not caught by the colon or am/pm matchers above, so we extract
-  // both start and end explicitly to make "from X to Y" a first-class window.
+  // Compound time ranges with bare numeric hours and named boundaries.
   const connector = `(?:to|and|through|thru|till|\\'?til|until)`;
   const boundary = `noon|midnight|market\\s+(?:open|close)`;
   const rangeRe = new RegExp(
@@ -395,6 +428,7 @@ export function extractTimes(text: string): ParsedTime[] {
     'gi'
   );
   for (const m of text.matchAll(rangeRe)) {
+    const raw = m[0];
     const startTok = m[1];
     const startMin = m[2];
     const endTok = m[3];
@@ -404,20 +438,22 @@ export function extractTimes(text: string): ParsedTime[] {
     if (start && end) {
       const startIndex = (m.index ?? 0) + (m[0].indexOf(startTok) ?? 0);
       const endIndex = (m.index ?? 0) + (m[0].lastIndexOf(endTok) ?? 0);
-      add(start.hour, start.minute, startIndex);
-      add(end.hour, end.minute, endIndex);
+      recordValid(start, startIndex, startTok);
+      recordValid(end, endIndex, endTok);
+    } else {
+      recordInvalid(m.index ?? 0, raw, 'out_of_range');
     }
   }
 
   // "2:30pm", "2:30 p.m.", "14:00", etc.
   for (const m of text.matchAll(/\b(\d{1,2}):(\d{2})(?::\d{2})?\s*(a\.?m\.?|p\.?m\.?)?\b/gi)) {
-    add(parseInt(m[1], 10), parseInt(m[2], 10), m.index ?? 0, normalizeMeridian(m[3]));
+    try24h(parseInt(m[1], 10), parseInt(m[2], 10), normalizeMeridian(m[3]), m.index ?? 0, m[0]);
   }
 
   // "2pm", "2 p.m." — speed markers like "10x" are ignored because they lack am/pm.
   // (?<!:) prevents matching the minutes of a colon time (e.g. "20" in "10:20am").
   for (const m of text.matchAll(/\b(?<!:)(\d{1,2})\s*(a\.?m\.?|p\.?m\.?)\b/gi)) {
-    add(parseInt(m[1], 10), 0, m.index ?? 0, normalizeMeridian(m[2]));
+    try24h(parseInt(m[1], 10), 0, normalizeMeridian(m[2]), m.index ?? 0, m[0]);
   }
 
   // Spelled-out hours with a meridian or time-of-day phrase: "three p.m.", "two in the afternoon".
@@ -431,14 +467,14 @@ export function extractTimes(text: string): ParsedTime[] {
   for (const m of text.matchAll(wordHourRe)) {
     const hour = parseHourToken(m[1]);
     if (hour !== undefined) {
-      add(hour, 0, m.index ?? 0, normalizeMeridian(m[2]));
+      try24h(hour, 0, normalizeMeridian(m[2]), m.index ?? 0, m[0]);
     }
   }
 
   // Spelled-out hour + minute: "eleven thirty", "eleven thirty-one", "eleven oh five",
   // "eleven fifteen in the afternoon". Must come after the whole-hour and colloquial
   // matchers so it does not steal the hour from "quarter past eleven".
-  const minuteWords = "oclock|o'clock|oh|o|zero|fifteen|twenty|twenty[- ]?five|thirty|forty|forty[- ]?five|fifty";
+  const minuteWords = "oclock|o'clock|oh|o|zero|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|twenty[- ]?five|thirty|forty|forty[- ]?five|fifty|fifty[- ]?nine|sixty|sixty[- ]?five|seventy|eighty|ninety|hundred";
   const spokenMinuteRe = new RegExp(
     `\\b(${hourWords})\\s+(\\d{1,2}|${minuteWords})(?:\\s+(a\\.?m\\.?|p\\.?m\\.?|in\\s+the\\s+(morning|afternoon|evening|night)))?\\b`,
     'gi'
@@ -448,25 +484,27 @@ export function extractTimes(text: string): ParsedTime[] {
     const minute = parseMinuteToken(m[2]);
     if (hour !== undefined && minute !== undefined) {
       const meridian = normalizeMeridian(m[3]) || defaultMeridianForHour(hour, m[1]);
-      add(hour, minute, m.index ?? 0, meridian);
+      try24h(hour, minute, meridian, m.index ?? 0, m[0]);
+    } else if (hour !== undefined) {
+      recordInvalid(m.index ?? 0, m[0], 'invalid_minute');
     }
   }
 
   const marketOpen = /\bmarket\s+open\b/i.exec(text);
   if (marketOpen && marketOpen.index !== undefined) {
-    add(US_EQUITY_MARKET_OPEN.hour, US_EQUITY_MARKET_OPEN.minute, marketOpen.index, undefined);
+    recordValid(US_EQUITY_MARKET_OPEN, marketOpen.index, 'market open');
   }
 
   const marketClose = /\bmarket\s+close\b/i.exec(text);
   if (marketClose && marketClose.index !== undefined) {
-    add(US_EQUITY_MARKET_CLOSE.hour, US_EQUITY_MARKET_CLOSE.minute, marketClose.index, undefined);
+    recordValid(US_EQUITY_MARKET_CLOSE, marketClose.index, 'market close');
   }
 
   const noon = /(?<!\b(?:quarter|half)\s+(?:past|to)\s+)\b(noon|midday)\b/i.exec(text);
-  if (noon && noon.index !== undefined) add(12, 0, noon.index, undefined);
+  if (noon && noon.index !== undefined) recordValid({ hour: 12, minute: 0 }, noon.index, noon[0]);
 
   const midnight = /(?<!\b(?:quarter|half)\s+(?:past|to)\s+)\bmidnight\b/i.exec(text);
-  if (midnight && midnight.index !== undefined) add(0, 0, midnight.index, undefined);
+  if (midnight && midnight.index !== undefined) recordValid({ hour: 0, minute: 0 }, midnight.index, midnight[0]);
 
   // Colloquial times: "quarter to three p.m.", "half past eleven in the morning", etc.
   for (const m of text.matchAll(/(?:^|\b)(quarter|half)\s+(past|to)\s+(\d{1,2}|(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|noon|midnight))(?:\s+(a\.?m\.?|p\.?m\.?|in\s+the\s+(morning|afternoon|evening|night)))?/gi)) {
@@ -474,7 +512,10 @@ export function extractTimes(text: string): ParsedTime[] {
     const relation = m[2].toLowerCase();
     const token = m[3];
     const hour = parseHourToken(token);
-    if (hour === undefined) continue;
+    if (hour === undefined) {
+      recordInvalid(m.index ?? 0, m[0], 'invalid_hour');
+      continue;
+    }
 
     let h: number;
     let min: number;
@@ -492,13 +533,178 @@ export function extractTimes(text: string): ParsedTime[] {
     }
 
     const meridian = normalizeMeridian(m[4]) || defaultMeridianForHour(hour, token);
-    add(h, min, m.index ?? 0, meridian);
+    try24h(h, min, meridian, m.index ?? 0, m[0]);
   }
 
   // Sort by the position the expression appeared in the original text so that
   // "from X to Y" yields X as startTime and Y as endTime.
-  matches.sort((a, b) => a.index - b.index);
-  return matches.map((m) => m.time);
+  attempts.sort((a, b) => a.index - b.index);
+  return attempts;
+}
+
+export function extractTimes(text: string): ParsedTime[] {
+  return extractTimeAttempts(text)
+    .filter((a) => a.time !== undefined)
+    .map((a) => a.time!);
+}
+
+// ---------------------------------------------------------------------------
+// Explicit unresolved-symbol detection
+// ---------------------------------------------------------------------------
+
+const SYMBOL_ATTEMPT_STOP_WORDS = new Set([
+  // articles, common prepositions, determiners
+  'the', 'a', 'an', 'and', 'or', 'but', 'for', 'on', 'at', 'to', 'in', 'of', 'with', 'from', 'by', 'as',
+  'is', 'are', 'was', 'were', 'be', 'been', 'being', 'do', 'does', 'did', 'has', 'have', 'had',
+  // pronouns
+  'it', 'this', 'that', 'these', 'those', 'they', 'them', 'their', 'there', 'here', 'me', 'my', 'your',
+  'his', 'her', 'its', 'our', 'us', 'i', 'you', 'he', 'she', 'we',
+  // generic chart/session words
+  'market', 'today', 'yesterday', 'tomorrow', 'session', 'day', 'trading', 'open', 'opening', 'close',
+  'closing', 'high', 'higher', 'highest', 'highs', 'low', 'lower', 'lowest', 'lows', 'volume', 'vol',
+  'volumes', 'range', 'ranges', 'change', 'changes', 'move', 'moves', 'moved', 'moving', 'candle', 'candles',
+  'bar', 'bars', 'price', 'prices', 'chart', 'charts', 'graph', 'graphs', 'data', 'info',
+  'replay', 'history', 'playback',
+  // time words
+  'time', 'times', 'hour', 'hours', 'hr', 'hrs', 'minute', 'minutes', 'min', 'mins', 'second', 'seconds',
+  'sec', 'now', 'noon', 'midnight', 'morning', 'afternoon', 'evening', 'night',
+  // ordering/market-window words
+  'first', 'last', 'final', 'next', 'prior', 'previous', 'following', 'all', 'whole', 'entire', 'full',
+  // company-name suffix noise
+  'stock', 'shares', 'ticker', 'symbol', 'company', 'corporation', 'corp', 'incorporated', 'inc', 'ltd',
+  'limited', 'plc', 'holdings', 'group', 'co', 'nv', 'sa', 'ag',
+  // verbs/nouns that are not symbols
+  'switch', 'change', 'load', 'go', 'pull', 'show', 'describe', 'summarize', 'explain', 'tell', 'what', 'how',
+  'why', 'when', 'where', 'which', 'who',
+  // days/months and abbreviations
+  'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday',
+  'january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october',
+  'november', 'december',
+  'mon', 'tue', 'tues', 'wed', 'thu', 'thur', 'thurs', 'fri', 'sat', 'sun',
+  'jan', 'feb', 'mar', 'apr', 'jun', 'jul', 'aug', 'sep', 'sept', 'oct', 'nov', 'dec',
+]);
+
+const STRONG_CUE_RE =
+  /(?:\b|^)(?:switch(?:\s+to)?|change(?:\s+to)?|load|open|go(?:\s+to)?|pull(?:\s+up)?|ticker|symbol)\s+([^\s,;:.?!]+(?:\s+[^\s,;:.?!]+){0,2})/gi;
+
+const WEAK_CUE_RE =
+  /(?:\b|^)(?:for|on|with|of)\s+([^\s,;:.?!]+(?:\s+[^\s,;:.?!]+){0,2})/gi;
+
+function isAllCapsSymbolToken(s: string): boolean {
+  return /^[A-Z0-9.-]+$/.test(s);
+}
+
+function isTitleCaseSymbolToken(s: string): boolean {
+  return /^[A-Z][a-z0-9.-]+$/.test(s);
+}
+
+const NUMBER_WORDS = new Set([
+  'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve',
+  'fifteen', 'twenty', 'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty', 'ninety', 'hundred',
+]);
+
+function tokenizeSymbolCandidate(captured: string): { raw: string; filtered: string[] } | undefined {
+  const rawWords = captured.split(/[^a-zA-Z0-9-]+/).filter(Boolean);
+  const lowered = captured.toLowerCase().split(/[^a-z0-9-]+/).filter(Boolean);
+  if (rawWords.length === 0 || lowered.length === 0) return undefined;
+
+  const filtered: string[] = [];
+  const includedRaw: string[] = [];
+
+  for (let i = 0; i < lowered.length; i++) {
+    const w = lowered[i];
+    const rw = rawWords[i];
+    if (SYMBOL_ATTEMPT_STOP_WORDS.has(w)) break;
+
+    // Skip pure numbers and quantity/time-unit tokens like 15m, 1h, 5d, 30min.
+    if (/^\d+$/.test(w)) continue;
+    if (/^\d+\s*[mhd](?:in(?:utes?)?|our(?:s?)?|r|ay(?:s?)?)?$/i.test(w)) continue;
+
+    // Skip single-letter unit (m/h/d) that immediately follows a number.
+    if (
+      i > 0 &&
+      /^\d+$/.test(rawWords[i - 1]) &&
+      /^[mhd]$/i.test(w) &&
+      !isAllCapsSymbolToken(rw)
+    ) {
+      continue;
+    }
+
+    // Skip spoken number words unless they are all-caps (plausible tickers like ONE, TEN).
+    if (NUMBER_WORDS.has(w) && !isAllCapsSymbolToken(rw)) continue;
+
+    filtered.push(w);
+    includedRaw.push(rw);
+  }
+
+  if (filtered.length === 0) return undefined;
+
+  const raw = includedRaw.join(' ');
+  return { raw, filtered };
+}
+
+function resolveSymbolAttempt(
+  candidate: { raw: string; filtered: string[] },
+  availableTickers: string[],
+  symbolAliases: Record<string, string>
+): CommandIssue | undefined {
+  const res = resolveSymbol(candidate.filtered.join(' '), { availableTickers, extraAliases: symbolAliases });
+  if (res.ok) return undefined;
+
+  if (res.matchKind === 'unavailable_alias') {
+    return { kind: 'unavailable_symbol', message: res.message, raw: candidate.raw };
+  }
+  if (res.matchKind === 'ambiguous') {
+    return { kind: 'ambiguous_symbol', message: res.message, raw: candidate.raw };
+  }
+
+  const tickerSet = new Set(availableTickers.map((t) => t.toUpperCase()));
+  const knownSet = new Set<string>([...tickerSet, ...Object.values(symbolAliases)]);
+  const upper = candidate.raw.toUpperCase();
+  if (knownSet.has(upper)) {
+    return {
+      kind: 'unavailable_symbol',
+      message: `${upper} is not in the current session.`,
+      raw: candidate.raw,
+    };
+  }
+
+  return {
+    kind: 'unknown_symbol',
+    message: `I don't recognize "${candidate.raw}" as a valid ticker or company name.`,
+    raw: candidate.raw,
+  };
+}
+
+function extractSymbolIssue(
+  text: string,
+  availableTickers: string[],
+  symbolAliases: Record<string, string>,
+  baseDate?: string
+): CommandIssue | undefined {
+  // A validated, available symbol takes precedence and clears the issue path.
+  const { symbol } = extractSymbolAndDate(text, availableTickers, symbolAliases, baseDate);
+  if (symbol) return undefined;
+
+  // Strong symbol cues: explicit switch, ticker/symbol declarations and direct-object "for".
+  for (const m of text.matchAll(STRONG_CUE_RE)) {
+    const candidate = tokenizeSymbolCandidate(m[1]);
+    if (!candidate) continue;
+    const issue = resolveSymbolAttempt(candidate, availableTickers, symbolAliases);
+    if (issue) return issue;
+  }
+
+  // Weak location cues: only trigger when the candidate has credible symbol casing/syntax.
+  for (const m of text.matchAll(WEAK_CUE_RE)) {
+    const candidate = tokenizeSymbolCandidate(m[1]);
+    if (!candidate) continue;
+    const first = candidate.raw.split(/[^a-zA-Z0-9-]+/).filter(Boolean)[0] ?? '';
+    if (!isAllCapsSymbolToken(first) && !isTitleCaseSymbolToken(first)) continue;
+    const issue = resolveSymbolAttempt(candidate, availableTickers, symbolAliases);
+    if (issue) return issue;
+  }
+
+  return undefined;
 }
 
 /**
@@ -824,12 +1030,41 @@ export function parseChartCommand(
 ): ChartCommand {
   const { symbol, date } = extractSymbolAndDate(text, availableTickers, symbolAliases, baseDate);
   const dateInput = extractDateInput(text, baseDate);
-  const times = extractTimes(text);
+  const timeAttempts = extractTimeAttempts(text);
+  const times = timeAttempts.filter((a) => a.time !== undefined).map((a) => a.time!);
   const speed = extractSpeed(text);
   const relative = extractRelativeMinutes(text);
   const direction = detectDirection(text, relative);
   const timeframe = extractTimeframe(text);
   const intent = detectIntent(text, { symbol, date: date || undefined, dateInput, times, speed, relative, direction, timeframe });
+
+  const issues: CommandIssue[] = [];
+  for (const a of timeAttempts) {
+    if (a.error) {
+      const what = a.raw ?? 'that time';
+      let message: string;
+      switch (a.error) {
+        case 'invalid_hour':
+          message = `"${what}" has an invalid hour.`;
+          break;
+        case 'invalid_minute':
+          message = `"${what}" has an invalid minute.`;
+          break;
+        case 'out_of_range':
+        default:
+          message = `"${what}" is outside the valid 24-hour range.`;
+          break;
+      }
+      issues.push({
+        kind: 'invalid_time',
+        raw: a.raw,
+        message,
+      });
+    }
+  }
+
+  const symbolIssue = extractSymbolIssue(text, availableTickers, symbolAliases, baseDate);
+  if (symbolIssue) issues.push(symbolIssue);
 
   return {
     intent,
@@ -842,6 +1077,7 @@ export function parseChartCommand(
     direction,
     relativeMinutes: relative,
     timeframe,
+    issues: issues.length > 0 ? issues : undefined,
   };
 }
 

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { AppState } from '../../../../types';
 import type { AgentContext } from '../types';
 import { handleOrionMessage } from '../orchestrator';
@@ -11,6 +11,55 @@ vi.mock('../../client', () => ({
 }));
 
 import { orionChat } from '../../client';
+
+// The regression tests exercise full agent plans that read candles from the
+// engine. Provide a deterministic candle backend so the window/date analysis
+// steps can complete and the tests can assert on the final messages/plans.
+const ORIGINAL_FETCH = globalThis.fetch;
+
+function makeCandles(symbol: string, date: string, count = 390) {
+  const [y, m, d] = date.split('-').map((n) => parseInt(n, 10));
+  // Market open is 09:30 ET; in July ET is UTC-4, so the UTC base is 13:30.
+  const baseUtc = Math.floor(Date.UTC(y, m - 1, d, 13, 30, 0) / 1000);
+  const candles = [];
+  for (let i = 0; i < count; i++) {
+    const open = 100 + i;
+    candles.push({
+      timestamp: baseUtc + i * 60,
+      open,
+      high: open + 2,
+      low: open - 1,
+      close: open + 1,
+      volume: 1000 + i * 10,
+    });
+  }
+  return candles;
+}
+
+async function mockFetch(
+  input: RequestInfo | URL,
+  _init?: RequestInit
+): Promise<Response> {
+  const url = typeof input === 'string' ? new URL(input) : input instanceof URL ? input : new URL(input.url);
+  if (!url.pathname.endsWith('/api/candles')) {
+    return new Response('not found', { status: 404 });
+  }
+  const symbol = url.searchParams.get('symbol') ?? 'AAPL';
+  const date = url.searchParams.get('date') ?? '2026-07-10';
+  const timeframe = parseInt(url.searchParams.get('timeframe') ?? '1', 10);
+  const candles = makeCandles(symbol, date);
+  const body = {
+    symbol,
+    date,
+    timeframe,
+    candles,
+    missing: false,
+  };
+  return new Response(JSON.stringify(body), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  });
+}
 
 function baseAppState(): AppState {
   return {
@@ -129,6 +178,11 @@ function hasSwitchCausedByDescribe(plan: { steps: { capability: string; args: Re
 describe('verb-grounding regression', () => {
   beforeEach(() => {
     vi.mocked(orionChat).mockReset();
+    globalThis.fetch = vi.fn(mockFetch) as typeof fetch;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = ORIGINAL_FETCH;
   });
 
   it('"Describe what happened today." with active session routes to window_summary', async () => {
