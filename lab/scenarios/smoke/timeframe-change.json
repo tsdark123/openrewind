@@ -1,0 +1,50 @@
+{
+  "id": "timeframe-change",
+  "name": "Timeframe change",
+  "description": "User asks to switch the chart timeframe. The agent must only change timeframe and preserve symbol/date.",
+  "version": "2.0.0",
+  "familyId": "session",
+  "seedId": "timeframe-change",
+  "tags": ["smoke", "session", "timeframe"],
+  "dataSet": { "symbol": "SYNTH", "date": "2026-08-05", "timeframe": 1 },
+  "initialWorldState": {
+    "session": {
+      "symbol": "SYNTH",
+      "date": "2026-08-05",
+      "timeframe": 1,
+      "cursor": 389,
+      "totalCandles": 390,
+      "isPlaying": false,
+      "speed": 1,
+      "direction": "forward",
+      "currentPrice": 103.89,
+      "sessionActive": true
+    },
+    "availableTickers": ["SYNTH"],
+    "recentCandles": [],
+    "groundTruth": { "source": "fixture", "fixture": "synthetic-session-1m" }
+  },
+  "exactInvariants": { "symbol": "SYNTH", "date": "2026-08-05", "timeframe": 5 },
+  "permittedActions": ["session.*"],
+  "forbiddenActions": ["analysis.*", "playback.*", "symbol.*"],
+  "latencyLimits": { "maxMsPerTurn": 5000 },
+  "turns": [
+    {
+      "id": "t1",
+      "utterance": "Switch to 5 minute candles.",
+      "expectedRoute": "deterministic",
+      "assertExactRoute": false,
+      "expectedCapabilities": ["session.set_timeframe"],
+      "exactInvariants": { "symbol": "SYNTH", "date": "2026-08-05", "timeframe": 5 },
+      "expectedContextAfter": {
+        "kind": "chart_action",
+        "symbol": "SYNTH",
+        "date": { "kind": "absolute", "value": "2026-08-05" },
+        "timeframeMinutes": 5
+      },
+      "consumerResponseExpectations": {
+        "mustContain": ["5"]
+      }
+    }
+  ]
+}

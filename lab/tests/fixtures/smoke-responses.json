@@ -1,0 +1,191 @@
+{
+  "absolute-seek:t1": {
+    "ok": true,
+    "route": "deterministic",
+    "message": "Jumped to 11:30.",
+    "capabilities": [
+      "playback.seek_absolute"
+    ],
+    "receipts": [],
+    "template": {
+      "kind": "chart_action",
+      "symbol": "SYNTH",
+      "date": {
+        "kind": "absolute",
+        "value": "2026-08-05"
+      },
+      "timeframeMinutes": 1,
+      "seekTime": "11:30"
+    },
+    "finalWorldState": {
+      "symbol": "SYNTH",
+      "date": "2026-08-05",
+      "timeframe": 1,
+      "cursor": 0,
+      "totalCandles": 390,
+      "isPlaying": false,
+      "speed": 1,
+      "direction": "forward",
+      "currentPrice": 100,
+      "sessionActive": true
+    }
+  },
+  "relative-seek:t1": {
+    "ok": true,
+    "route": "deterministic",
+    "message": "Moved forward 15 minutes.",
+    "capabilities": [
+      "playback.seek_relative"
+    ],
+    "receipts": [],
+    "template": {
+      "kind": "chart_action",
+      "symbol": "SYNTH",
+      "date": {
+        "kind": "absolute",
+        "value": "2026-08-05"
+      },
+      "timeframeMinutes": 1,
+      "relativeSeekMinutes": 15
+    },
+    "finalWorldState": {
+      "symbol": "SYNTH",
+      "date": "2026-08-05",
+      "timeframe": 1,
+      "cursor": 0,
+      "totalCandles": 390,
+      "isPlaying": false,
+      "speed": 1,
+      "direction": "forward",
+      "currentPrice": 100,
+      "sessionActive": true
+    }
+  },
+  "symbol-switch:t1": {
+    "ok": true,
+    "route": "deterministic",
+    "message": "Loaded SYNTH for 2026-08-05.",
+    "capabilities": [
+      "session.switch_symbol"
+    ],
+    "receipts": [],
+    "template": {
+      "kind": "chart_action",
+      "symbol": "SYNTH",
+      "date": {
+        "kind": "absolute",
+        "value": "2026-08-05"
+      },
+      "timeframeMinutes": 1
+    },
+    "finalWorldState": {
+      "symbol": "SYNTH",
+      "date": "2026-08-05",
+      "timeframe": 1,
+      "cursor": 0,
+      "totalCandles": 0,
+      "isPlaying": false,
+      "speed": 1,
+      "direction": "forward",
+      "currentPrice": 0,
+      "sessionActive": false
+    }
+  },
+  "timeframe-change:t1": {
+    "ok": true,
+    "route": "deterministic",
+    "message": "Switched to 5 minute candles.",
+    "capabilities": [
+      "session.set_timeframe"
+    ],
+    "receipts": [],
+    "template": {
+      "kind": "chart_action",
+      "symbol": "SYNTH",
+      "date": {
+        "kind": "absolute",
+        "value": "2026-08-05"
+      },
+      "timeframeMinutes": 5
+    },
+    "finalWorldState": {
+      "symbol": "SYNTH",
+      "date": "2026-08-05",
+      "timeframe": 5,
+      "cursor": 389,
+      "totalCandles": 78,
+      "isPlaying": false,
+      "speed": 1,
+      "direction": "forward",
+      "currentPrice": 103.89,
+      "sessionActive": true
+    }
+  },
+  "whole-session-summary:t1": {
+    "ok": true,
+    "route": "deterministic",
+    "message": "SYNTH session summary: open 100.00 close 103.89.",
+    "capabilities": [
+      "analysis.window_summary"
+    ],
+    "receipts": [
+      {
+        "stepId": "t1-summary",
+        "capability": "analysis.window_summary",
+        "success": true,
+        "planId": "whole-session-summary-t1",
+        "message": "Fixture summary generated.",
+        "data": {
+          "open": 100,
+          "high": 103.94,
+          "low": 99.94,
+          "close": 103.89,
+          "candleCount": 390,
+          "firstMarketTime": "09:30",
+          "lastMarketTime": "15:59",
+          "highAt": "15:57",
+          "lowAt": "09:31",
+          "absoluteChange": 3.8900000000000006,
+          "percentChange": 3.8900000000000006,
+          "direction": "up",
+          "totalVolume": 1148550,
+          "averageVolume": 2945,
+          "largestVolume": 4890,
+          "largestVolumeAt": "15:59",
+          "averageBody": 0.03333333333333333,
+          "averageUpperWick": 0.019999999999999993,
+          "averageLowerWick": 0.01999999999999992
+        }
+      }
+    ],
+    "template": {
+      "kind": "chart_action",
+      "symbol": "SYNTH",
+      "date": {
+        "kind": "absolute",
+        "value": "2026-08-05"
+      },
+      "timeframeMinutes": 1,
+      "analysisRequests": [
+        {
+          "kind": "window_summary",
+          "window": {
+            "kind": "whole_session"
+          }
+        }
+      ]
+    },
+    "finalWorldState": {
+      "symbol": "SYNTH",
+      "date": "2026-08-05",
+      "timeframe": 1,
+      "cursor": 389,
+      "totalCandles": 390,
+      "isPlaying": false,
+      "speed": 1,
+      "direction": "forward",
+      "currentPrice": 103.89,
+      "sessionActive": true
+    }
+  }
+}

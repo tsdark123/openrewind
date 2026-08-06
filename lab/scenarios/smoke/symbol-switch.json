@@ -1,0 +1,50 @@
+{
+  "id": "symbol-switch",
+  "name": "Symbol switch",
+  "description": "User requests a specific symbol and date. The agent must build a chart-action template with the correct symbol and date and activate the session.",
+  "version": "2.0.0",
+  "familyId": "session",
+  "seedId": "symbol-switch",
+  "tags": ["smoke", "session", "switch"],
+  "dataSet": { "symbol": "SYNTH", "date": "2026-08-05", "timeframe": 1 },
+  "initialWorldState": {
+    "session": {
+      "symbol": "",
+      "date": "2026-08-05",
+      "timeframe": 1,
+      "cursor": 0,
+      "totalCandles": 0,
+      "isPlaying": false,
+      "speed": 1,
+      "direction": "forward",
+      "currentPrice": 0,
+      "sessionActive": false
+    },
+    "availableTickers": ["SYNTH"],
+    "recentCandles": [],
+    "groundTruth": { "source": "fixture", "fixture": "synthetic-session-1m" }
+  },
+  "exactInvariants": { "symbol": "SYNTH", "date": "2026-08-05", "timeframe": 1 },
+  "permittedActions": ["session.*"],
+  "forbiddenActions": ["analysis.*", "playback.*"],
+  "latencyLimits": { "maxMsPerTurn": 5000 },
+  "turns": [
+    {
+      "id": "t1",
+      "utterance": "Load SYNTH for 2026-08-05.",
+      "expectedRoute": "deterministic",
+      "assertExactRoute": false,
+      "expectedCapabilities": ["session.switch_symbol"],
+      "exactInvariants": { "symbol": "SYNTH", "date": "2026-08-05", "timeframe": 1 },
+      "expectedContextAfter": {
+        "kind": "chart_action",
+        "symbol": "SYNTH",
+        "date": { "kind": "absolute", "value": "2026-08-05" },
+        "timeframeMinutes": 1
+      },
+      "consumerResponseExpectations": {
+        "mustContain": ["SYNTH", "2026-08-05"]
+      }
+    }
+  ]
+}

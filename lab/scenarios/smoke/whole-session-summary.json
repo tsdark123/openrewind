@@ -1,0 +1,69 @@
+{
+  "id": "whole-session-summary",
+  "name": "Whole session summary",
+  "description": "User asks for a summary of the current session. The agent must run analysis.window_summary over the whole session without switching symbols.",
+  "version": "2.0.0",
+  "familyId": "window-summary",
+  "seedId": "whole-session-summary",
+  "tags": ["smoke", "window-summary", "whole-session"],
+  "dataSet": { "symbol": "SYNTH", "date": "2026-08-05", "timeframe": 1 },
+  "initialWorldState": {
+    "session": {
+      "symbol": "SYNTH",
+      "date": "2026-08-05",
+      "timeframe": 1,
+      "cursor": 389,
+      "totalCandles": 390,
+      "isPlaying": false,
+      "speed": 1,
+      "direction": "forward",
+      "currentPrice": 103.89,
+      "sessionActive": true
+    },
+    "availableTickers": ["SYNTH"],
+    "recentCandles": [],
+    "groundTruth": { "source": "fixture", "fixture": "synthetic-session-1m" }
+  },
+  "exactInvariants": { "symbol": "SYNTH", "date": "2026-08-05", "timeframe": 1 },
+  "permittedActions": ["analysis.*"],
+  "forbiddenActions": ["session.*", "playback.*"],
+  "latencyLimits": { "maxMsPerTurn": 5000 },
+  "turns": [
+    {
+      "id": "t1",
+      "utterance": "Summarize the session.",
+      "expectedRoute": "deterministic",
+      "assertExactRoute": false,
+      "expectedCapabilities": ["analysis.window_summary"],
+      "exactInvariants": {
+        "symbol": "SYNTH",
+        "date": "2026-08-05",
+        "timeframe": 1,
+        "window": { "kind": "whole_session" }
+      },
+      "expectedContextAfter": {
+        "kind": "chart_action",
+        "symbol": "SYNTH",
+        "date": { "kind": "absolute", "value": "2026-08-05" },
+        "timeframeMinutes": 1,
+        "analysisRequests": [
+          { "kind": "window_summary", "window": { "kind": "whole_session" } }
+        ]
+      },
+      "numericalTruthChecks": [
+        {
+          "receiptCapability": "analysis.window_summary",
+          "computed": {
+            "capability": "analysis.window_summary",
+            "window": { "kind": "whole_session" }
+          },
+          "tolerance": { "absolute": 0.01, "relative": 0.001 }
+        }
+      ],
+      "consumerResponseExpectations": {
+        "mustContain": ["SYNTH"],
+        "mustMatch": ["open.*close"]
+      }
+    }
+  ]
+}

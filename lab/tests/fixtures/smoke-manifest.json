@@ -1,0 +1,9 @@
+{
+  "scenarios": [
+    "/home/ubuntu/repos/openrewind/lab/scenarios/smoke/absolute-seek.json",
+    "/home/ubuntu/repos/openrewind/lab/scenarios/smoke/relative-seek.json",
+    "/home/ubuntu/repos/openrewind/lab/scenarios/smoke/symbol-switch.json",
+    "/home/ubuntu/repos/openrewind/lab/scenarios/smoke/timeframe-change.json",
+    "/home/ubuntu/repos/openrewind/lab/scenarios/smoke/whole-session-summary.json"
+  ]
+}
