@@ -1,8 +1,8 @@
 {
-  "contractVersion": "v2.1.0-semantic",
+  "contractVersion": "v2.1.1-semantic",
   "basedOn": {
-    "branch": "orion-model-selection",
-    "head": "259dada796569b99d542e19c1eb378955c145251"
+    "branch": "orion-v2-closure",
+    "head": "3cf3eadd397e9bcbcc9dd99d948b13545b9a40f6"
   },
   "sourceFiles": [
     "frontend/benchmark/orion/bakeoff-suite.ts",
@@ -649,7 +649,6 @@
       "bucket": "primary",
       "expectedKind": "chart_action",
       "requiredCapabilities": [
-        "session.resolve_symbol",
         "session.resolve_trading_date",
         "session.switch_symbol",
         "chart.set_timeframe",
@@ -716,7 +715,6 @@
       "bucket": "primary",
       "expectedKind": "chart_action",
       "requiredCapabilities": [
-        "session.resolve_symbol",
         "session.resolve_trading_date",
         "session.switch_symbol",
         "chart.set_timeframe"
@@ -740,18 +738,9 @@
           "timeframe"
         ]
       },
-      "notes": "Context reference: inherit the timeframe (15m) from the latest successful action and apply it to the prior trading session.",
-      "acceptableAlternatives": [
-        {
-          "description": "Canonical route (direct switch to validated in-list ticker)",
-          "requiredCapabilities": [
-            "session.resolve_trading_date",
-            "session.switch_symbol",
-            "chart.set_timeframe"
-          ]
-        }
-      ],
-      "reasonForChangeFromLegacy": "qwen3:8b incorrectly emitted previousSymbol:true together with a date, which is invalid. V2 separates the inherit-context reference from the new relative date.",
+      "notes": "Context reference: inherit the timeframe (15m) from the latest successful action and apply it to the prior trading session. The active symbol (NVDA) is already validated, so the plan does not re-resolve it.",
+      "acceptableAlternatives": [],
+      "reasonForChangeFromLegacy": "qwen3:8b incorrectly emitted previousSymbol:true together with a date, which is invalid. V2 separates the inherit-context reference from the new relative date. The compiler now keeps the timeframe step when the date changes so the inherited 15m stays represented in the plan.",
       "expectedAnalysisKinds": [],
       "expectedWindow": null,
       "contextProfile": "active",

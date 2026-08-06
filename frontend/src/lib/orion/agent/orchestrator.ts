@@ -1191,6 +1191,20 @@ async function routeMessage(
   // be rejected before any model call, grounding, compilation or execution.
   if (cmd.issues && cmd.issues.length > 0) {
     const issue = cmd.issues[0];
+
+    // Unknown or unavailable symbols are not recoverable in this product domain;
+    // classify them as unsupported.  Recoverable problems (ambiguous symbols,
+    // malformed times) remain clarification so the user can fix them.
+    if (issue.kind === 'unknown_symbol' || issue.kind === 'unavailable_symbol') {
+      agentTrace('route', 'unsupported', { reason: issue.kind, raw: issue.raw });
+      return {
+        ok: false,
+        message: issue.message,
+        wasChat: false,
+        route: 'unsupported',
+      };
+    }
+
     const errorCode: AgentErrorCode =
       issue.kind === 'invalid_time'
         ? 'INVALID_ARGUMENTS'

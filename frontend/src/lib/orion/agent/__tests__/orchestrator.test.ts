@@ -127,27 +127,27 @@ describe('handleOrionMessage routing', () => {
 });
 
 describe('handleOrionMessage symbol resolution', () => {
-  it('clarifies an explicit unknown symbol before any resolution or model call', async () => {
+  it('rejects an explicit unknown symbol as unsupported before any resolution or model call', async () => {
     const ctx = makeCtx();
     const r = await handleOrionMessage({ text: 'Switch to ZOOM.', ctx, setupReady: false });
-    expect(r.wasChat).toBe(true);
-    expect(r.route).toBe('clarification');
+    expect(r.wasChat).toBe(false);
+    expect(r.route).toBe('unsupported');
     expect(r.ok).toBe(false);
     expect(r.message).toMatch(/ZOOM/);
-    expect(r.result?.errorCode).toBe('SYMBOL_UNAVAILABLE');
+    expect(r.plan).toBeUndefined();
     expect(ctx.getState().symbol).toBe('');
   });
 
-  it('clarifies an unavailable raw ticker and keeps the prior session', async () => {
+  it('rejects an unavailable raw ticker as unsupported and keeps the prior session', async () => {
     const ctx = makeCtx();
     ctx.getState().symbol = 'AAPL';
     ctx.getState().sessionActive = true;
     const r = await handleOrionMessage({ text: 'Switch to ZZZZ.', ctx, setupReady: false });
-    expect(r.wasChat).toBe(true);
-    expect(r.route).toBe('clarification');
+    expect(r.wasChat).toBe(false);
+    expect(r.route).toBe('unsupported');
     expect(r.ok).toBe(false);
     expect(r.message).toMatch(/ZZZZ/);
-    expect(r.result?.errorCode).toBe('SYMBOL_UNAVAILABLE');
+    expect(r.plan).toBeUndefined();
     expect(ctx.getState().symbol).toBe('AAPL');
   });
 

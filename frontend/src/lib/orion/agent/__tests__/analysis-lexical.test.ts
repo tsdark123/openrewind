@@ -124,4 +124,41 @@ describe('candle-shape versus candle-query routing', () => {
       expect(hasAnalysis && hasQuery, `both flags set for "${text}"`).toBe(false);
     }
   });
+
+  it('treats "show me the candle" as a candle query, not candle-shape analysis', () => {
+    const text = 'show me the candle at 11:30';
+    expect(textRequestsCandleShape(text)).toBe(false);
+    expect(textRequestsCandleQuery(text)).toBe(true);
+    expect(dims(text).has('candleQuery')).toBe(true);
+    expect(dims(text).has('analysisRequest')).toBe(false);
+  });
+
+  it('treats "pull up the candle" as a candle query, not candle-shape analysis', () => {
+    const text = 'pull up the candle at 11:30';
+    expect(textRequestsCandleShape(text)).toBe(false);
+    expect(textRequestsCandleQuery(text)).toBe(true);
+    expect(dims(text).has('candleQuery')).toBe(true);
+  });
+
+  it('treats "display the candle" as a candle query, not candle-shape analysis', () => {
+    const text = 'display the candle at 11:30';
+    expect(textRequestsCandleShape(text)).toBe(false);
+    expect(textRequestsCandleQuery(text)).toBe(true);
+    expect(dims(text).has('candleQuery')).toBe(true);
+  });
+
+  it('treats "retrieve the candle" as a candle query, not candle-shape analysis', () => {
+    const text = 'retrieve the candle at 11:30';
+    expect(textRequestsCandleShape(text)).toBe(false);
+    expect(textRequestsCandleQuery(text)).toBe(true);
+    expect(dims(text).has('candleQuery')).toBe(true);
+  });
+
+  it('keeps "describe the candle" as candle-shape analysis', () => {
+    const text = 'describe the candle at 11:30';
+    expect(textRequestsCandleShape(text)).toBe(true);
+    expect(textRequestsCandleQuery(text)).toBe(false);
+    expect(dims(text).has('candleQuery')).toBe(false);
+    expect(dims(text).has('analysisRequest')).toBe(true);
+  });
 });

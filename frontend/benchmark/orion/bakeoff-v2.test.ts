@@ -112,6 +112,10 @@ describe('Orion Chapter 2A V2 certification contract', () => {
     for (const prompt of ALL_PROMPTS_V2) {
       if (prompt.expected !== 'chart_action') continue;
       const result = makeV2ResultFromGold(prompt);
+      if (prompt.id === 14 && !result.v2Score.pass) {
+        // eslint-disable-next-line no-console
+        console.log('prompt 14 diagnostics', JSON.stringify(result.v2Score.diagnostics, null, 2));
+      }
       expect(result.v2Score.pass, `prompt #${prompt.id} should pass on its own gold`).toBe(true);
       expect(result.v2Score.diagnostics.capabilitySetMatch, `prompt #${prompt.id} capability set`).toBe(true);
     }
@@ -349,9 +353,9 @@ describe('Orion Chapter 2A V2 certification contract', () => {
       ollamaVersion: '0.32.6',
     });
 
-    expect(scorecard.certificationContractVersion).toBe('v2.1.0-semantic');
+    expect(scorecard.certificationContractVersion).toBe('v2.1.1-semantic');
     expect(scorecard.promptSuiteVersion).toBe('v2.1.0-22-prompts');
-    expect(scorecard.scorerVersion).toBe('v2.0.0');
+    expect(scorecard.scorerVersion).toBe('v2.0.1');
     expect(scorecard.schemaVersion).toBe('v2.0.0');
     expect(scorecard.modelTag).toBe('qwen3:8b');
     expect(scorecard.ollamaVersion).toBe('0.32.6');
@@ -362,14 +366,14 @@ describe('Orion Chapter 2A V2 certification contract', () => {
   it('refuses to compare reports with incompatible certification contract versions', () => {
     const base = (id: string): V2Report => ({
       metadata: {
-        certificationContractVersion: 'v2.1.0-semantic',
+        certificationContractVersion: 'v2.1.1-semantic',
         promptSuiteVersion: 'v2.1.0-22-prompts',
         productionHead: 'abc123',
         modelTag: 'qwen3:8b',
         modelDigest: 'sha256:abc',
         ollamaVersion: '0.32.6',
         runtimeOptions: { model: 'qwen3:8b' },
-        scorerVersion: 'v2.0.0',
+        scorerVersion: 'v2.0.1',
         schemaVersion: 'v2.0.0',
         timestamp: new Date().toISOString(),
         repetitionCount: 10,
@@ -377,14 +381,14 @@ describe('Orion Chapter 2A V2 certification contract', () => {
       results: [],
       promptScores: [],
       scorecard: {
-        certificationContractVersion: 'v2.1.0-semantic',
+        certificationContractVersion: 'v2.1.1-semantic',
         promptSuiteVersion: 'v2.1.0-22-prompts',
         productionHead: 'abc123',
         modelTag: 'qwen3:8b',
         modelDigest: 'sha256:abc',
         ollamaVersion: '0.32.6',
         runtimeOptions: { model: 'qwen3:8b' },
-        scorerVersion: 'v2.0.0',
+        scorerVersion: 'v2.0.1',
         schemaVersion: 'v2.0.0',
         timestamp: new Date().toISOString(),
         repetitionCount: 10,
@@ -418,13 +422,15 @@ describe('Orion Chapter 2A V2 certification contract', () => {
     differentModel.metadata.productionHead = 'def456';
     expect(compareV2Reports(a, differentModel).compatible).toBe(true);
 
-    // A report produced under the previous v2.0.0 contract is incompatible with
-    // the corrected v2.1.0 contract and prompt suite.
+    // A report produced under the previous v2.1.0 contract is incompatible with
+    // the corrected v2.1.1 contract and scorer.
     const oldV2 = base('e');
-    oldV2.metadata.certificationContractVersion = 'v2.0.0-semantic';
-    oldV2.metadata.promptSuiteVersion = 'v2.0.0-22-prompts';
-    oldV2.scorecard.certificationContractVersion = 'v2.0.0-semantic';
-    oldV2.scorecard.promptSuiteVersion = 'v2.0.0-22-prompts';
+    oldV2.metadata.certificationContractVersion = 'v2.1.0-semantic';
+    oldV2.metadata.promptSuiteVersion = 'v2.1.0-22-prompts';
+    oldV2.metadata.scorerVersion = 'v2.0.0';
+    oldV2.scorecard.certificationContractVersion = 'v2.1.0-semantic';
+    oldV2.scorecard.promptSuiteVersion = 'v2.1.0-22-prompts';
+    oldV2.scorecard.scorerVersion = 'v2.0.0';
     expect(compareV2Reports(a, oldV2).compatible).toBe(false);
   });
 
@@ -446,19 +452,19 @@ describe('Orion Chapter 2A V2 certification contract', () => {
     const json = writeV2ResultsJson('test.json', report);
     const parsed = JSON.parse(json);
 
-    expect(parsed.metadata.certificationContractVersion).toBe('v2.1.0-semantic');
+    expect(parsed.metadata.certificationContractVersion).toBe('v2.1.1-semantic');
     expect(parsed.metadata.promptSuiteVersion).toBe('v2.1.0-22-prompts');
     expect(parsed.metadata.productionHead).toBe('abc123');
     expect(parsed.metadata.modelTag).toBe('qwen3:8b');
     expect(parsed.metadata.modelDigest).toBe('sha256:abc');
     expect(parsed.metadata.ollamaVersion).toBe('0.32.6');
-    expect(parsed.metadata.scorerVersion).toBe('v2.0.0');
+    expect(parsed.metadata.scorerVersion).toBe('v2.0.1');
     expect(parsed.metadata.schemaVersion).toBe('v2.0.0');
     expect(parsed.metadata.repetitionCount).toBe(0);
 
     const md = formatV2Scorecard(scorecard);
     expect(md).toContain('Orion Chapter 2A V2 Certification Scorecard');
-    expect(md).toContain('v2.1.0-semantic');
+    expect(md).toContain('v2.1.1-semantic');
     expect(md).toContain('qwen3:8b');
     expect(md).toContain('sha256:abc');
     expect(md).toContain('0.32.6');
@@ -593,5 +599,106 @@ describe('Orion Chapter 2A V2 certification contract', () => {
     expect(run(true, true)).toBe('proceed');
     expect(run(false, true)).toBe('reject');
     expect(run(true, false)).toBe('reject');
+  });
+
+  describe('compare_candles scorer rejects non-matching concrete snapshots', () => {
+    const prompt = getPromptByIdV2(17)!;
+    const goldPlan = prompt.resolvedGoldPlan;
+
+    function buildResultWithComparePlan(comparePlan: typeof goldPlan) {
+      const base = makeResultFromGold(prompt, {
+        pipeline: {
+          ...makeResultFromGold(prompt).pipeline,
+          compiledPlan: comparePlan,
+        },
+      });
+      return scoreRepetitionV2(prompt, base);
+    }
+
+    it('passes when the compiled compare plan matches the resolved gold snapshots', () => {
+      const score = buildResultWithComparePlan(goldPlan);
+      expect(score.pass).toBe(true);
+      expect(score.diagnostics.analysisRequestsCorrect).toBe(true);
+    });
+
+    it('rejects swapped left/right snapshots', () => {
+      if (!goldPlan) throw new Error('goldPlan missing');
+      const compareStep = goldPlan.steps.find((s) => s.capability === 'analysis.compare_candles')!;
+      const swapped = {
+        ...goldPlan,
+        steps: [
+          {
+            ...compareStep,
+            args: {
+              left: compareStep.args.right,
+              right: compareStep.args.left,
+            },
+          },
+        ],
+      };
+      const score = buildResultWithComparePlan(swapped as any);
+      expect(score.pass).toBe(false);
+      expect(score.diagnostics.analysisRequestsCorrect).toBe(false);
+    });
+
+    it('rejects duplicate snapshots on both sides', () => {
+      if (!goldPlan) throw new Error('goldPlan missing');
+      const compareStep = goldPlan.steps.find((s) => s.capability === 'analysis.compare_candles')!;
+      const duplicate = {
+        ...goldPlan,
+        steps: [
+          {
+            ...compareStep,
+            args: {
+              left: compareStep.args.left,
+              right: compareStep.args.left,
+            },
+          },
+        ],
+      };
+      const score = buildResultWithComparePlan(duplicate as any);
+      expect(score.pass).toBe(false);
+      expect(score.diagnostics.analysisRequestsCorrect).toBe(false);
+    });
+
+    it('rejects a compare side with a wrong snapshot id', () => {
+      if (!goldPlan) throw new Error('goldPlan missing');
+      const compareStep = goldPlan.steps.find((s) => s.capability === 'analysis.compare_candles')!;
+      const wrong = {
+        ...goldPlan,
+        steps: [
+          {
+            ...compareStep,
+            args: {
+              left: { ...(compareStep.args.left as any), snapshotId: 999 },
+              right: compareStep.args.right,
+            },
+          },
+        ],
+      };
+      const score = buildResultWithComparePlan(wrong as any);
+      expect(score.pass).toBe(false);
+      expect(score.diagnostics.analysisRequestsCorrect).toBe(false);
+    });
+
+    it('rejects a compare side that references the live chart instead of a snapshot', () => {
+      if (!goldPlan) throw new Error('goldPlan missing');
+      const compareStep = goldPlan.steps.find((s) => s.capability === 'analysis.compare_candles')!;
+      const live = {
+        ...goldPlan,
+        steps: [
+          {
+            ...compareStep,
+            args: {
+              left: { source: 'chart' },
+              right: compareStep.args.right,
+            },
+          },
+        ],
+      };
+      const score = buildResultWithComparePlan(live as any);
+      expect(score.pass).toBe(false);
+      expect(score.diagnostics.analysisRequestsCorrect).toBe(false);
+    });
   });
 });

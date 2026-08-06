@@ -132,7 +132,7 @@ const ANALYSIS_CONCEPTS: Record<string, ConceptDef> = {
   wick: { kind: 'shape', terms: ['wick', 'wicks'] },
   shadow: { kind: 'shape', terms: ['shadow', 'shadows'] },
   anatomy: { kind: 'shape', terms: ['anatomy'] },
-  shape: { kind: 'shape', terms: ['shape', 'shapes', 'shaped', 'kind', 'kinds', 'type', 'types', 'sort', 'sorts', 'structure', 'structures', 'describe', 'describes', 'described', 'describing', 'show', 'shows', 'showing', 'shown', 'look', 'looks', 'looked', 'looking'] },
+  shape: { kind: 'shape', terms: ['shape', 'shapes', 'shaped', 'kind', 'kinds', 'type', 'types', 'sort', 'sorts', 'structure', 'structures', 'describe', 'describes', 'described', 'describing'] },
   compare: { kind: 'compare', terms: ['compare', 'compared', 'comparing', 'comparison', 'vs', 'versus', 'against', 'contrast', 'contrasted', 'contrasting'] },
   summary: { kind: 'summary', terms: ['summary', 'overview', 'recap', 'did', 'do', 'does', 'done', 'doing', 'breakdown', 'summarize', 'summarized'] },
   session: { kind: 'time', terms: ['session', 'sessions', 'today', 'day', 'days'] },
@@ -192,6 +192,10 @@ const CANDLE_QUERY_CUES: ReadonlySet<string> = new Set([
   'tell',
   'show',
   'give',
+  'pull',
+  'display',
+  'retrieve',
+  'fetch',
   'where',
   'when',
   'this',
@@ -286,7 +290,7 @@ function isFuzzyConceptMatch(token: string, term: string): boolean {
 }
 
 // Phrasal-verb "up"/"down" should not be treated as price direction.
-const PHRASAL_HEADS: ReadonlySet<string> = new Set(['set', 'get', 'make', 'look', 'turn', 'shut', 'pick', 'take', 'give', 'fill', 'wake', 'clean', 'put']);
+const PHRASAL_HEADS: ReadonlySet<string> = new Set(['set', 'get', 'make', 'look', 'turn', 'shut', 'pick', 'take', 'give', 'fill', 'wake', 'clean', 'put', 'pull']);
 
 export function hasNonPhrasalDirection(d: DetectedConcepts): boolean {
   if (!d.concepts.has('direction')) return false;

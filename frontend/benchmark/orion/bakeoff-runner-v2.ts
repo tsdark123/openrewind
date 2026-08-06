@@ -237,14 +237,14 @@ export async function runBakeoffV2(opts: V2BakeoffOptions): Promise<V2Report> {
   });
 
   const metadata = {
-    certificationContractVersion: 'v2.1.0-semantic',
+    certificationContractVersion: 'v2.1.1-semantic',
     promptSuiteVersion: 'v2.1.0-22-prompts',
     productionHead,
     modelTag: opts.model,
     modelDigest: opts.modelDigest,
     ollamaVersion: opts.ollamaVersion,
     runtimeOptions: { ...opts, productionHead },
-    scorerVersion: 'v2.0.0',
+    scorerVersion: 'v2.0.1',
     schemaVersion: 'v2.0.0',
     timestamp: new Date().toISOString(),
     repetitionCount: results.length,

@@ -170,6 +170,9 @@ function computeV2ResolvedGold(
     const resolvedGoldPlan = compileChartActionIntent(resolvedGold, {
       anchorDate: resolved.anchorDate || state.replayDate || undefined,
       stateSymbol: state.symbol || stateSymbol,
+      stateDate: state.replayDate,
+      stateTimeframe: state.timeframe,
+      availableTickers: tickers,
       resolvedCandle: resolved.resolvedCandle,
       resolvedCompare: resolved.resolvedCompare,
     });

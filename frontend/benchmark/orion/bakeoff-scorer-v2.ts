@@ -27,7 +27,7 @@ import type {
 // =============================================================================
 
 export const V2_CERTIFICATION_POLICY = {
-  contractVersion: 'v2.1.0-semantic',
+  contractVersion: 'v2.1.1-semantic',
   primaryRepetitionPassRate: 0.9,
   primaryPromptPassRate: 0.9,
   safetyExecutionRate: 1.0,
@@ -242,9 +242,10 @@ export function planToChartActionIntent(plan: AgentPlan | undefined): ChartActio
 
     if (cap === 'analysis.compare_candles') {
       intent.finalQuery = 'compare_candles';
-      if (!isArgRef(args.left) && args.left !== undefined) {
-        intent.compare = { left: args.left as any, right: args.right as any };
-      }
+      // Do not reverse concrete snapshot objects back into the abstract source
+      // form. The scorer compares the compiled plan directly (see
+      // scoreRepetitionV2 below).  Concrete snapshots are intentionally resolved
+      // away from the intent during compilation.
       hasChartAction = true;
     }
   }
@@ -377,6 +378,87 @@ function deriveAnalysisKinds(actual: ChartActionIntent | undefined, plan: AgentP
 function compareAnalysisRequests(gold: AnalysisRequest[], actual: AnalysisRequest[] | undefined): boolean {
   if (!actual || actual.length !== gold.length) return false;
   return gold.every((g, i) => deepEqual(g, actual[i]));
+}
+
+function findCompareStep(plan: AgentPlan | undefined): AgentStep | undefined {
+  return plan?.steps.find((s) => s.capability === 'analysis.compare_candles');
+}
+
+function isSnapshotSide(side: unknown): side is Record<string, unknown> & { source: 'snapshot'; snapshotId: number } {
+  return (
+    typeof side === 'object' &&
+    side !== null &&
+    (side as Record<string, unknown>).source === 'snapshot' &&
+    typeof (side as Record<string, unknown>).snapshotId === 'number'
+  );
+}
+
+function compareSnapshotIdentity(a: Record<string, unknown>, b: Record<string, unknown>): boolean {
+  return (
+    a.source === b.source &&
+    a.snapshotId === b.snapshotId &&
+    a.symbol === b.symbol &&
+    a.date === b.date &&
+    a.timeframe === b.timeframe &&
+    a.marketTime === b.marketTime
+  );
+}
+
+function normalizeSnapshot(side: Record<string, unknown>): Record<string, unknown> {
+  return {
+    source: side.source,
+    snapshotId: side.snapshotId,
+    symbol: side.symbol,
+    date: side.date,
+    timeframe: side.timeframe,
+    marketTime: side.marketTime,
+  };
+}
+
+function scoreCompareCandles(
+  prompt: V2BakeoffPrompt,
+  actualPlan: AgentPlan | undefined,
+  goldPlan: AgentPlan | undefined
+): { ok: boolean; note?: string } {
+  const actualStep = findCompareStep(actualPlan);
+  if (!actualStep) {
+    return { ok: false, note: 'compiled plan is missing analysis.compare_candles' };
+  }
+
+  const goldStep = findCompareStep(goldPlan);
+  if (!goldStep) {
+    return { ok: false, note: 'resolved gold plan is missing analysis.compare_candles' };
+  }
+
+  const actualLeft = actualStep.args.left as Record<string, unknown> | undefined;
+  const actualRight = actualStep.args.right as Record<string, unknown> | undefined;
+  const goldLeft = goldStep.args.left as Record<string, unknown> | undefined;
+  const goldRight = goldStep.args.right as Record<string, unknown> | undefined;
+
+  if (!isSnapshotSide(actualLeft) || !isSnapshotSide(actualRight)) {
+    return { ok: false, note: 'compare sides must be concrete snapshot references' };
+  }
+
+  if (!isSnapshotSide(goldLeft) || !isSnapshotSide(goldRight)) {
+    return { ok: false, note: 'resolved gold compare sides are not concrete snapshots' };
+  }
+
+  if (actualLeft.snapshotId === actualRight.snapshotId) {
+    return { ok: false, note: 'compare sides must be distinct snapshots' };
+  }
+
+  if (!compareSnapshotIdentity(actualLeft, goldLeft) || !compareSnapshotIdentity(actualRight, goldRight)) {
+    const left = normalizeSnapshot(actualLeft);
+    const right = normalizeSnapshot(actualRight);
+    const expectedLeft = normalizeSnapshot(goldLeft);
+    const expectedRight = normalizeSnapshot(goldRight);
+    return {
+      ok: false,
+      note: `compare_candles snapshot mismatch: expected left=${JSON.stringify(expectedLeft)} right=${JSON.stringify(expectedRight)}, got left=${JSON.stringify(left)} right=${JSON.stringify(right)}`,
+    };
+  }
+
+  return { ok: true };
 }
 
 export function scoreRepetitionV2(
@@ -542,10 +624,10 @@ export function scoreRepetitionV2(
   }
 
   // Analysis requests / compare candles
-  if (gold?.finalQuery === 'compare_candles' && gold.compare) {
-    diagnostics.analysisRequestsCorrect =
-      actualIntent?.finalQuery === 'compare_candles' && deepEqual(gold.compare, actualIntent?.compare);
-    if (!diagnostics.analysisRequestsCorrect) notes.push(`compare_candles mismatch`);
+  if (gold?.finalQuery === 'compare_candles') {
+    const compareResult = scoreCompareCandles(prompt, compiledPlan, prompt.resolvedGoldPlan);
+    diagnostics.analysisRequestsCorrect = compareResult.ok;
+    if (!compareResult.ok) notes.push(compareResult.note ?? 'compare_candles mismatch');
   } else if (gold?.analysisRequests && gold.analysisRequests.length > 0) {
     diagnostics.analysisRequestsCorrect = compareAnalysisRequests(gold.analysisRequests, actualIntent?.analysisRequests);
     if (!diagnostics.analysisRequestsCorrect) notes.push(`analysisRequests mismatch`);
@@ -733,14 +815,14 @@ export function aggregateV2Scorecard(
   const runtimeOptions: V2BakeoffOptions = { ...opts };
 
   return {
-    certificationContractVersion: 'v2.1.0-semantic',
+    certificationContractVersion: 'v2.1.1-semantic',
     promptSuiteVersion: 'v2.1.0-22-prompts',
     productionHead: opts.productionHead ?? 'unknown',
     modelTag: opts.model,
     modelDigest: opts.modelDigest,
     ollamaVersion: opts.ollamaVersion,
     runtimeOptions,
-    scorerVersion: 'v2.0.0',
+    scorerVersion: 'v2.0.1',
     schemaVersion: 'v2.0.0',
     timestamp: new Date().toISOString(),
     repetitionCount: results.length,

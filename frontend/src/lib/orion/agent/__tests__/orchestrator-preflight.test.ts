@@ -101,32 +101,43 @@ describe('orchestrator preflight rejects invalid input before the model', () => 
     expect(orionChat).not.toHaveBeenCalled();
   });
 
-  it('rejects an explicit unknown symbol after "for"', async () => {
+  it('rejects an explicit unknown symbol after "for" as unsupported', async () => {
     const ctx = makeCtx();
     const r = await handleOrionMessage({ text: 'What is the candle for UNKNOWN?', ctx, setupReady: true });
     expect(r.ok).toBe(false);
-    expect(r.wasChat).toBe(true);
-    expect(r.route).toBe('clarification');
+    expect(r.wasChat).toBe(false);
+    expect(r.route).toBe('unsupported');
     expect(orionChat).not.toHaveBeenCalled();
     expect(ctx.send).not.toHaveBeenCalled();
   });
 
-  it('rejects a weak-cue unknown symbol ("on Mars")', async () => {
+  it('rejects a weak-cue unknown symbol ("on Mars") as unsupported', async () => {
     const ctx = makeCtx();
     const r = await handleOrionMessage({ text: 'Do that again on Mars.', ctx, setupReady: true });
     expect(r.ok).toBe(false);
-    expect(r.wasChat).toBe(true);
-    expect(r.route).toBe('clarification');
+    expect(r.wasChat).toBe(false);
+    expect(r.route).toBe('unsupported');
     expect(orionChat).not.toHaveBeenCalled();
     expect(ctx.send).not.toHaveBeenCalled();
   });
 
-  it('rejects an unresolvable company name after "switch to"', async () => {
+  it('rejects an unresolvable company name after "switch to" as unsupported', async () => {
     const ctx = makeCtx();
     const r = await handleOrionMessage({ text: 'Switch to Zorblatt.', ctx, setupReady: true });
     expect(r.ok).toBe(false);
+    expect(r.wasChat).toBe(false);
+    expect(r.route).toBe('unsupported');
+    expect(orionChat).not.toHaveBeenCalled();
+    expect(ctx.send).not.toHaveBeenCalled();
+  });
+
+  it('keeps an ambiguous company-name candidate as a clarification', async () => {
+    const ctx = makeCtx();
+    const r = await handleOrionMessage({ text: 'Switch to Tesla Netflix.', ctx, setupReady: true });
+    expect(r.ok).toBe(false);
     expect(r.wasChat).toBe(true);
     expect(r.route).toBe('clarification');
+    expect(r.message).toMatch(/Tesla|Netflix|TSLA|NFLX/);
     expect(orionChat).not.toHaveBeenCalled();
     expect(ctx.send).not.toHaveBeenCalled();
   });

@@ -971,9 +971,14 @@ export function compileChartActionIntent(
     }
   }
 
+  const willChangeSymbol =
+    switchSymbolValue !== undefined &&
+    (typeof switchSymbolValue !== 'string' || switchSymbolValue !== options.stateSymbol);
+
   // 3. Resolve trading date when present, unless the date is an explicit
-  // absolute date that matches the active session (resolve would be redundant).
+  // absolute date that matches the active session *and* the target symbol.
   let resolveDateId: string | undefined;
+  let willChangeDate = false;
   if (intent.date) {
     if (intent.previousSymbol) {
       throw new Error('compileChartActionIntent: date cannot be combined with previousSymbol.');
@@ -984,7 +989,8 @@ export function compileChartActionIntent(
     let symbolForDate = switchSymbolValue ?? options.stateSymbol;
     const isKnownDate =
       intent.date.kind === 'absolute' &&
-      intent.date.value === options.stateDate;
+      intent.date.value === options.stateDate &&
+      !willChangeSymbol;
 
     // A date-only request with no new symbol should switch the active symbol
     // to the resolved date, so long as an active symbol exists.
@@ -992,6 +998,8 @@ export function compileChartActionIntent(
       switchSymbolValue = options.stateSymbol;
       symbolForDate = switchSymbolValue;
     }
+
+    willChangeDate = !isKnownDate;
 
     if (!isKnownDate) {
       resolveDateId = 'step-resolve-date';
@@ -1075,9 +1083,10 @@ export function compileChartActionIntent(
     });
   }
 
-  // 5. Set timeframe only when it changes or this is a pure timeframe request
-  // (e.g. "Use the same timeframe.").  In compound actions a redundant
-  // timeframe step is omitted so context references do not replay it.
+  // 5. Set timeframe when it changes, when this is a pure timeframe request
+  // (e.g. "Use the same timeframe."), or when the plan is crossing a
+  // symbol/session boundary (so an inherited/repeated timeframe stays
+  // represented in the compiled plan even if its value matches the state).
   const hasNonTimeframeWork =
     intent.previousSymbol ||
     intent.symbol ||
@@ -1087,10 +1096,13 @@ export function compileChartActionIntent(
     intent.seekTime !== undefined ||
     intent.relativeSeekMinutes !== undefined ||
     intent.playback;
-  if (
+  const shouldSetTimeframe =
     intent.timeframeMinutes !== undefined &&
-    (intent.timeframeMinutes !== options.stateTimeframe || !hasNonTimeframeWork)
-  ) {
+    (intent.timeframeMinutes !== options.stateTimeframe ||
+      !hasNonTimeframeWork ||
+      willChangeSymbol ||
+      willChangeDate);
+  if (shouldSetTimeframe) {
     pushStep({
       id: 'step-timeframe',
       capability: 'chart.set_timeframe',

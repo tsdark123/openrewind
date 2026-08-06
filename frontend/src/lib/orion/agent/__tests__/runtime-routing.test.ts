@@ -161,51 +161,142 @@ describe('OrionTerminal-style submission through the orchestrator', () => {
 });
 
 describe('Switch-like raw ticker extraction and failure preservation', () => {
-  it('Switch to ZZZZ. is clarified before any resolve/model call', async () => {
+  it('Switch to ZZZZ. is unsupported before any resolve/model call', async () => {
     const ctx = makeCtx();
     ctx.getState().symbol = 'AAPL';
     ctx.getState().sessionActive = true;
     const r = await handleOrionMessage({ text: 'Switch to ZZZZ.', ctx, setupReady: true });
-    expect(r.route).toBe('clarification');
+    expect(r.route).toBe('unsupported');
     expect(r.ok).toBe(false);
-    expect(r.wasChat).toBe(true);
-    expect(r.result?.errorCode).toBe('SYMBOL_UNAVAILABLE');
+    expect(r.wasChat).toBe(false);
+    expect(r.plan).toBeUndefined();
+    expect(r.result).toBeUndefined();
     expect(r.message).toMatch(/ZZZZ/);
     expect(ctx.getState().symbol).toBe('AAPL');
   });
 
-  it('go to ABCD is clarified before any resolve/model call', async () => {
+  it('go to ABCD is unsupported before any resolve/model call', async () => {
     const ctx = makeCtx();
     const r = await handleOrionMessage({ text: 'go to ABCD', ctx, setupReady: true });
-    expect(r.route).toBe('clarification');
+    expect(r.route).toBe('unsupported');
     expect(r.ok).toBe(false);
-    expect(r.wasChat).toBe(true);
-    expect(r.result?.errorCode).toBe('SYMBOL_UNAVAILABLE');
+    expect(r.wasChat).toBe(false);
+    expect(r.result).toBeUndefined();
     expect(r.message).toMatch(/ABCD/);
   });
 
-  it('show me QQQQ is clarified before any resolve/model call', async () => {
+  it('show me QQQQ is unsupported before any resolve/model call', async () => {
     const ctx = makeCtx();
     const r = await handleOrionMessage({ text: 'show me QQQQ', ctx, setupReady: true });
-    expect(r.route).toBe('clarification');
+    expect(r.route).toBe('unsupported');
     expect(r.ok).toBe(false);
-    expect(r.wasChat).toBe(true);
-    expect(r.result?.receipts ?? []).toHaveLength(0);
+    expect(r.wasChat).toBe(false);
+    expect(r.result).toBeUndefined();
     expect(r.plan).toBeUndefined();
     expect(ctx.getState().symbol).toBe('');
     expect(orionChat).not.toHaveBeenCalled();
   });
 
-  it('pull up WXYZ stock is clarified before any resolve/model call', async () => {
+  it('pull up WXYZ stock is unsupported before any resolve/model call', async () => {
     const ctx = makeCtx();
     const r = await handleOrionMessage({ text: 'pull up WXYZ stock', ctx, setupReady: true });
-    expect(r.route).toBe('clarification');
+    expect(r.route).toBe('unsupported');
     expect(r.ok).toBe(false);
-    expect(r.wasChat).toBe(true);
-    expect(r.result?.errorCode).toBe('SYMBOL_UNAVAILABLE');
+    expect(r.wasChat).toBe(false);
+    expect(r.result).toBeUndefined();
     expect(r.message).toMatch(/WXYZ/);
   });
+});
 
+describe('Candle retrieval paraphrases route to a candle query plan, not candle-shape analysis', () => {
+  function modelIntent(content: Record<string, unknown>) {
+    return { content: JSON.stringify({ kind: 'chart_action', ...content }) };
+  }
+
+  beforeEach(() => {
+    vi.mocked(orionChat).mockReset();
+  });
+
+  it('"show the candle at 11:30" compiles to chart.get_candle_at_time', async () => {
+    const ctx = makeCtx();
+    ctx.getState().symbol = 'AAPL';
+    ctx.getState().replayDate = '2026-07-31';
+    ctx.getState().timeframe = 15;
+    ctx.getState().sessionActive = true;
+
+    vi.mocked(orionChat).mockResolvedValue(
+      modelIntent({ finalQuery: 'candle_at_time', queryTime: '11:30' })
+    );
+
+    const r = await handleOrionMessage({ text: 'show the candle at 11:30', ctx, setupReady: true });
+    expect(r.wasChat).toBe(false);
+    expect(r.plan).toBeDefined();
+    const caps = r.plan!.steps.map((s) => s.capability);
+    expect(caps).toContain('chart.get_candle_at_time');
+    expect(caps).not.toContain('analysis.candle_shape');
+  });
+
+  it('"pull up the candle at 11:30" compiles to chart.get_candle_at_time', async () => {
+    const ctx = makeCtx();
+    ctx.getState().symbol = 'AAPL';
+    ctx.getState().replayDate = '2026-07-31';
+    ctx.getState().timeframe = 15;
+    ctx.getState().sessionActive = true;
+
+    vi.mocked(orionChat).mockResolvedValue(
+      modelIntent({ finalQuery: 'candle_at_time', queryTime: '11:30' })
+    );
+
+    const r = await handleOrionMessage({ text: 'pull up the candle at 11:30', ctx, setupReady: true });
+    expect(r.wasChat).toBe(false);
+    expect(r.plan).toBeDefined();
+    const caps = r.plan!.steps.map((s) => s.capability);
+    expect(caps).toContain('chart.get_candle_at_time');
+    expect(caps).not.toContain('analysis.candle_shape');
+  });
+
+  it('"give me the candle" compiles to chart.get_current_candle', async () => {
+    const ctx = makeCtx();
+    ctx.getState().symbol = 'AAPL';
+    ctx.getState().replayDate = '2026-07-31';
+    ctx.getState().timeframe = 15;
+    ctx.getState().sessionActive = true;
+
+    vi.mocked(orionChat).mockResolvedValue(modelIntent({ finalQuery: 'current_candle' }));
+
+    const r = await handleOrionMessage({ text: 'give me the candle', ctx, setupReady: true });
+    expect(r.wasChat).toBe(false);
+    expect(r.plan).toBeDefined();
+    const caps = r.plan!.steps.map((s) => s.capability);
+    expect(caps).toContain('chart.get_current_candle');
+    expect(caps).not.toContain('analysis.candle_shape');
+  });
+
+  it('"describe the candle at 11:30" compiles to analysis.candle_shape', async () => {
+    const ctx = makeCtx();
+    ctx.getState().symbol = 'AAPL';
+    ctx.getState().replayDate = '2026-07-31';
+    ctx.getState().timeframe = 15;
+    ctx.getState().sessionActive = true;
+
+    vi.mocked(orionChat).mockResolvedValue(
+      modelIntent({
+        finalQuery: 'candle_at_time',
+        queryTime: '11:30',
+        analysisRequests: [{ kind: 'candle_shape', source: 'market_time', marketTime: '11:30' }],
+      })
+    );
+
+    const r = await handleOrionMessage({ text: 'describe the candle at 11:30', ctx, setupReady: true });
+    expect(r.wasChat).toBe(false);
+    expect(r.plan).toBeDefined();
+    const caps = r.plan!.steps.map((s) => s.capability);
+    expect(caps).toContain('analysis.candle_shape');
+    expect(caps).not.toContain('chart.get_current_candle');
+  });
+});
+
+describe('Deterministic fast paths', () => {
   it('regression: Switch to AAPL. stays deterministic with zero model calls', async () => {
     const ctx = makeCtx();
     const r = await handleOrionMessage({ text: 'Switch to AAPL.', ctx, setupReady: true });

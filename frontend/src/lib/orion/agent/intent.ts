@@ -453,7 +453,7 @@ function buildCompactSchema(selectedFields?: Set<string>, analysisKinds?: string
 }
 
 function textAsksForCandleAtTime(text: string): boolean {
-  return /(?:what|which)\s+(?:candle|bar)|tell\s+me(?:\s+what)?\s+(?:candle|bar)|give\s+me\s+(?:the\s+)?(?:bar|candle)|what\s+bar\s+is\s+that/i.test(text);
+  return /(?:what|which)\s+(?:candle|bar)|tell\s+me(?:\s+what)?\s+(?:candle|bar)|(?:give|show|pull|display|retrieve|fetch)\s+(?:me\s+)?(?:up\s+)?(?:the\s+)?(?:bar|candle)|what\s+bar\s+is\s+that/i.test(text);
 }
 
 function textContainsSymbol(text: string, requestContext?: RequestContext): boolean {

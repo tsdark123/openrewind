@@ -111,18 +111,48 @@ describe('compileChartActionIntent', () => {
     expect(plan.steps[1].args.symbol).toBe('AAPL');
   });
 
-  it('skips a redundant timeframe step in a compound context but keeps it for a pure timeframe request', () => {
-    const compound = compileChartActionIntent(
+  it('keeps an inherited/repeated timeframe across a symbol or date boundary', () => {
+    // Switching symbol while carrying an inherited timeframe must keep
+    // chart.set_timeframe so the new session is set up correctly.
+    const crossSymbol = compileChartActionIntent(
       {
         kind: 'chart_action',
         symbol: 'AAPL',
+        date: { kind: 'absolute', value: '2026-07-31' },
+        timeframeMinutes: 15,
+      },
+      { stateSymbol: 'MSFT', stateDate: '2026-07-31', stateTimeframe: 15, availableTickers: ['AAPL'] }
+    );
+    expect(crossSymbol.steps.some((s) => s.capability === 'chart.set_timeframe')).toBe(true);
+
+    // Changing date while carrying an inherited timeframe must also keep it.
+    const dateOnly = compileChartActionIntent(
+      {
+        kind: 'chart_action',
         date: { kind: 'relative_trading', count: 1, direction: 'backward' },
         timeframeMinutes: 15,
       },
       { stateSymbol: 'AAPL', stateDate: '2026-07-31', stateTimeframe: 15, availableTickers: ['AAPL'] }
     );
-    expect(compound.steps.some((s) => s.capability === 'chart.set_timeframe')).toBe(false);
+    expect(dateOnly.steps.some((s) => s.capability === 'chart.set_timeframe')).toBe(true);
+  });
 
+  it('skips a redundant timeframe step when the session context is unchanged', () => {
+    const replay = compileChartActionIntent(
+      {
+        kind: 'chart_action',
+        symbol: 'AAPL',
+        date: { kind: 'absolute', value: '2026-07-31' },
+        seekTime: '11:15',
+        finalQuery: 'current_candle',
+        timeframeMinutes: 15,
+      },
+      { stateSymbol: 'AAPL', stateDate: '2026-07-31', stateTimeframe: 15, availableTickers: ['AAPL'] }
+    );
+    expect(replay.steps.some((s) => s.capability === 'chart.set_timeframe')).toBe(false);
+  });
+
+  it('keeps a pure timeframe request even when the value matches the current state', () => {
     const pure = compileChartActionIntent(
       { kind: 'chart_action', timeframeMinutes: 15 },
       { stateSymbol: 'AAPL', stateDate: '2026-07-31', stateTimeframe: 15 }
@@ -137,5 +167,45 @@ describe('compileChartActionIntent', () => {
         { stateDate: '2026-07-31' }
       )
     ).toThrow('compileChartActionIntent: date requires a symbol.');
+  });
+
+  it('keeps resolve_trading_date and set_timeframe for a same-symbol date change with inherited timeframe', () => {
+    const plan = compileChartActionIntent(
+      {
+        kind: 'chart_action',
+        symbol: 'NVDA',
+        date: { kind: 'relative_trading', count: 1, direction: 'backward' },
+        timeframeMinutes: 15,
+      },
+      { stateSymbol: 'NVDA', stateDate: '2026-07-31', stateTimeframe: 15, availableTickers: ['AAPL', 'MSFT', 'NVDA'] }
+    );
+    const caps = plan.steps.map((s) => s.capability);
+    expect(caps).toEqual([
+      'session.resolve_trading_date',
+      'session.switch_symbol',
+      'chart.set_timeframe',
+    ]);
+  });
+
+  it('keeps resolve_trading_date, switch_symbol and set_timeframe for a cross-symbol context repeat', () => {
+    const plan = compileChartActionIntent(
+      {
+        kind: 'chart_action',
+        symbol: 'AAPL',
+        date: { kind: 'absolute', value: '2026-07-31' },
+        seekTime: '11:15',
+        finalQuery: 'current_candle',
+        timeframeMinutes: 15,
+      },
+      { stateSymbol: 'NVDA', stateDate: '2026-07-31', stateTimeframe: 15, availableTickers: ['AAPL', 'MSFT', 'NVDA'] }
+    );
+    const caps = plan.steps.map((s) => s.capability);
+    expect(caps).toEqual([
+      'session.resolve_trading_date',
+      'session.switch_symbol',
+      'chart.set_timeframe',
+      'playback.seek_to_time',
+      'chart.get_current_candle',
+    ]);
   });
 });

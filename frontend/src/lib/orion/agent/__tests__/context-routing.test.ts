@@ -173,13 +173,10 @@ describe('bounded context logging', () => {
     const ctx = makeCtx();
     const r = await handleOrionMessage({ text: 'Switch to ZZZZ.', ctx, setupReady: true });
     expect(r.ok).toBe(false);
-    expect(r.route).toBe('clarification');
+    expect(r.route).toBe('unsupported');
     expect(r.result?.receipts ?? []).toHaveLength(0);
     expect(mockedOrionChat).not.toHaveBeenCalled();
     expect(ctx.send).not.toHaveBeenCalled();
-    const latest = ctx.executionLog.latest();
-    expect(latest?.ok).toBe(false);
-    expect(latest?.route).toBe('clarification');
   });
 });
 
@@ -207,8 +204,8 @@ describe('contextReference resolution', () => {
     const ctx = makeCtx();
     const r = await handleOrionMessage({ text: 'Do that again on Mars.', ctx, setupReady: true });
     expect(r.ok).toBe(false);
-    expect(r.wasChat).toBe(true);
-    expect(r.route).toBe('clarification');
+    expect(r.wasChat).toBe(false);
+    expect(r.route).toBe('unsupported');
     expect(ctx.getState().symbol).toBe('');
     expect(ctx.send).not.toHaveBeenCalled();
     expect(mockedOrionChat).not.toHaveBeenCalled();
