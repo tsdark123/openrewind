@@ -310,7 +310,7 @@ export function extractDateInput(text: string, baseDate?: string): DateInputSpec
   return undefined;
 }
 
-function extractSymbolAndDate(
+export function extractSymbolAndDate(
   text: string,
   availableTickers: string[],
   symbolAliases: Record<string, string> = ALIASES,
@@ -576,6 +576,8 @@ const SYMBOL_ATTEMPT_STOP_WORDS = new Set([
   // verbs/nouns that are not symbols
   'switch', 'change', 'load', 'go', 'pull', 'show', 'describe', 'summarize', 'explain', 'tell', 'what', 'how',
   'why', 'when', 'where', 'which', 'who',
+  // playback / direction words
+  'back', 'forward', 'rewind', 'seek', 'jump', 'ahead',
   // days/months and abbreviations
   'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday',
   'january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october',
@@ -584,8 +586,10 @@ const SYMBOL_ATTEMPT_STOP_WORDS = new Set([
   'jan', 'feb', 'mar', 'apr', 'jun', 'jul', 'aug', 'sep', 'sept', 'oct', 'nov', 'dec',
 ]);
 
+// Strong switch cues.  Bare "go" is not a switch; only "go to" is.  "show" requires
+// an object ("show me ...", "show the ...") to avoid matching analysis-only phrases.
 const STRONG_CUE_RE =
-  /(?:\b|^)(?:switch(?:\s+to)?|change(?:\s+to)?|load|open|go(?:\s+to)?|pull(?:\s+up)?|ticker|symbol)\s+([^\s,;:.?!]+(?:\s+[^\s,;:.?!]+){0,2})/gi;
+  /(?:\b|^)(?:switch(?:\s+to)?|change(?:\s+to)?|load|open|go\s+to|pull(?:\s+up)?|ticker|symbol|show(?:\s+me)?(?:\s+the)?)\s+([^\s,;:.?!]+(?:\s+[^\s,;:.?!]+){0,2})/gi;
 
 const WEAK_CUE_RE =
   /(?:\b|^)(?:for|on|with|of)\s+([^\s,;:.?!]+(?:\s+[^\s,;:.?!]+){0,2})/gi;
@@ -676,10 +680,10 @@ function resolveSymbolAttempt(
   };
 }
 
-function extractSymbolIssue(
+export function extractSymbolIssue(
   text: string,
   availableTickers: string[],
-  symbolAliases: Record<string, string>,
+  symbolAliases: Record<string, string> = ALIASES,
   baseDate?: string
 ): CommandIssue | undefined {
   // A validated, available symbol takes precedence and clears the issue path.

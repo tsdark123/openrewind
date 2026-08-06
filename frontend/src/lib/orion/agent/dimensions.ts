@@ -10,7 +10,7 @@
 // matching. It does not rely on exact full-sentence regexes.
 // =============================================================================
 
-import { extractDateInput, extractTimeframe, extractTimes, type ChartCommand } from '../planner';
+import { extractDateInput, extractTimeframe, extractTimes, extractSymbolAndDate, extractSymbolIssue, type ChartCommand } from '../planner';
 
 export type ActionDimension =
   | 'symbol'
@@ -45,9 +45,13 @@ export const INHERIT_FIELD_TO_DIMENSION: Record<string, ActionDimension | undefi
   analysisRequests: 'analysisRequest',
 };
 
-export function looksLikeSwitch(text: string): boolean {
-  const t = text.toLowerCase();
-  return /\b(switch|go to|load|open|change to|show|pull)\b/.test(t);
+export function looksLikeSwitch(
+  text: string,
+  availableTickers: string[] = [],
+  symbolAliases: Record<string, string> = {}
+): boolean {
+  if (extractSymbolAndDate(text, availableTickers, symbolAliases).symbol) return true;
+  return extractSymbolIssue(text, availableTickers, symbolAliases) !== undefined;
 }
 
 export function textRequestsTimeframe(t: string): boolean {
@@ -761,7 +765,17 @@ export function getRequestedDimensions(
   const isAnalysis = textRequestsAnalysis(t);
   const isCandleQuery = textRequestsCandleQuery(t) || (cmd.intent === 'candle_query' && !isAnalysis);
 
-  const switchHint = (cmd.intent === 'switch' || (cmd.intent === 'unknown' && looksLikeSwitch(text))) && !isAnalysis;
+  // Context references that change the date ("go to the prior trading session")
+  // need the symbol requested so the model keeps the active one instead of
+  // falling back to previousSymbol, which cannot be combined with a date.
+  const anaphoricDateContext =
+    cmd.intent === 'unknown' &&
+    (cmd.dateInput || cmd.date) &&
+    textRequestsContextReference(text, true);
+
+  const switchHint =
+    (cmd.intent === 'switch' || (cmd.intent === 'unknown' && (looksLikeSwitch(text) || anaphoricDateContext))) &&
+    !isAnalysis;
   if (cmd.symbol || switchHint) {
     dims.add('symbol');
   }

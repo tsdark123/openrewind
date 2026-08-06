@@ -184,13 +184,16 @@ describe('Switch-like raw ticker extraction and failure preservation', () => {
     expect(r.message).toMatch(/ABCD/);
   });
 
-  it('show me QQQQ extracts QQQQ through resolve_symbol', async () => {
+  it('show me QQQQ is clarified before any resolve/model call', async () => {
     const ctx = makeCtx();
     const r = await handleOrionMessage({ text: 'show me QQQQ', ctx, setupReady: true });
-    expect(r.result?.receipts[0].capability).toBe('session.resolve_symbol');
-    const rc = r.result?.receipts[0];
-    if (rc && !rc.success) expect(rc.errorCode).toBe('SYMBOL_UNAVAILABLE');
-    expect(r.message).toMatch(/QQQQ.*isn't available/);
+    expect(r.route).toBe('clarification');
+    expect(r.ok).toBe(false);
+    expect(r.wasChat).toBe(true);
+    expect(r.result?.receipts ?? []).toHaveLength(0);
+    expect(r.plan).toBeUndefined();
+    expect(ctx.getState().symbol).toBe('');
+    expect(orionChat).not.toHaveBeenCalled();
   });
 
   it('pull up WXYZ stock is clarified before any resolve/model call', async () => {

@@ -84,4 +84,23 @@ describe('planner preflight issues', () => {
     const cmd = parseChartCommand('Switch to Adobe.', AVAILABLE);
     expect(cmd.issues?.[0].kind).toBe('unavailable_symbol');
   });
+
+  it('rejects "show me QQQQ" as an unknown symbol', () => {
+    const cmd = parseChartCommand('show me QQQQ', AVAILABLE);
+    expect(cmd.issues).toBeDefined();
+    expect(cmd.issues?.[0].kind).toBe('unknown_symbol');
+    expect(cmd.issues?.[0].raw).toBe('QQQQ');
+  });
+
+  it('rejects "go to QQQQ" as an unknown symbol', () => {
+    const cmd = parseChartCommand('go to QQQQ', AVAILABLE);
+    expect(cmd.issues).toBeDefined();
+    expect(cmd.issues?.[0].kind).toBe('unknown_symbol');
+    expect(cmd.issues?.[0].raw).toBe('QQQQ');
+  });
+
+  it('does not flag "Go back to the candle we were discussing" as a symbol issue', () => {
+    const cmd = parseChartCommand('Go back to the candle we were discussing.', AVAILABLE);
+    expect(cmd.issues).toBeUndefined();
+  });
 });
