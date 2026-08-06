@@ -1,0 +1,2097 @@
+{
+  "$ref": "#/definitions/orion-scenario-v2",
+  "definitions": {
+    "orion-scenario-v2": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string",
+          "default": "2.0.0"
+        },
+        "familyId": {
+          "type": "string"
+        },
+        "seedId": {
+          "type": "string"
+        },
+        "variantOf": {
+          "type": "string"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "dataSet": {
+          "type": "object",
+          "properties": {
+            "symbol": {
+              "type": "string"
+            },
+            "date": {
+              "type": "string",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+            },
+            "timeframe": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "symbol",
+            "date",
+            "timeframe"
+          ],
+          "additionalProperties": false
+        },
+        "initialWorldState": {
+          "type": "object",
+          "properties": {
+            "session": {
+              "type": "object",
+              "properties": {
+                "symbol": {
+                  "type": "string"
+                },
+                "date": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+                },
+                "timeframe": {
+                  "type": "integer"
+                },
+                "cursor": {
+                  "type": "integer"
+                },
+                "totalCandles": {
+                  "type": "integer"
+                },
+                "isPlaying": {
+                  "type": "boolean"
+                },
+                "speed": {
+                  "type": "integer"
+                },
+                "direction": {
+                  "type": "string",
+                  "enum": [
+                    "forward",
+                    "backward"
+                  ]
+                },
+                "currentPrice": {
+                  "type": "number"
+                },
+                "sessionActive": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "symbol",
+                "date",
+                "timeframe",
+                "cursor",
+                "totalCandles",
+                "isPlaying",
+                "speed",
+                "direction",
+                "currentPrice",
+                "sessionActive"
+              ],
+              "additionalProperties": false
+            },
+            "availableTickers": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "recentCandles": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "timestamp": {
+                    "type": "integer"
+                  },
+                  "marketTime": {
+                    "type": "string"
+                  },
+                  "open": {
+                    "type": "number"
+                  },
+                  "high": {
+                    "type": "number"
+                  },
+                  "low": {
+                    "type": "number"
+                  },
+                  "close": {
+                    "type": "number"
+                  },
+                  "volume": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "timestamp",
+                  "marketTime",
+                  "open",
+                  "high",
+                  "low",
+                  "close",
+                  "volume"
+                ],
+                "additionalProperties": false
+              },
+              "default": []
+            },
+            "groundTruth": {
+              "type": "object",
+              "properties": {
+                "source": {
+                  "type": "string",
+                  "enum": [
+                    "engine",
+                    "fixture"
+                  ]
+                },
+                "fixture": {
+                  "type": "string"
+                },
+                "note": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "source"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "session"
+          ],
+          "additionalProperties": false
+        },
+        "exactInvariants": {
+          "type": "object",
+          "properties": {
+            "symbol": {
+              "type": "string"
+            },
+            "date": {
+              "type": "string",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+            },
+            "timeframe": {
+              "type": "integer"
+            },
+            "marketOpen": {
+              "type": "string",
+              "pattern": "^\\d{2}:\\d{2}$"
+            },
+            "marketClose": {
+              "type": "string",
+              "pattern": "^\\d{2}:\\d{2}$"
+            },
+            "timezoneOffsetHours": {
+              "type": "integer"
+            },
+            "window": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "const": "whole_session"
+                    }
+                  },
+                  "required": [
+                    "kind"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "const": "up_to_cursor"
+                    }
+                  },
+                  "required": [
+                    "kind"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "const": "time_range"
+                    },
+                    "fromTime": {
+                      "type": "string",
+                      "pattern": "^\\d{2}:\\d{2}$"
+                    },
+                    "toTime": {
+                      "type": "string",
+                      "pattern": "^\\d{2}:\\d{2}$"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "fromTime",
+                    "toTime"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
+            },
+            "seekTime": {
+              "type": "string",
+              "pattern": "^\\d{2}:\\d{2}$"
+            },
+            "marketTime": {
+              "type": "string",
+              "pattern": "^\\d{2}:\\d{2}$"
+            }
+          },
+          "additionalProperties": false,
+          "default": {}
+        },
+        "expectedCapabilities": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "permittedActions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "forbiddenActions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "expectedContextInheritance": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "fromTurn": {
+                "type": "string"
+              },
+              "toTurn": {
+                "type": "string"
+              },
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "repeat",
+                  "inherit",
+                  "use_as_target",
+                  "anchor_relative_date"
+                ]
+              },
+              "fields": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              },
+              "expectedAnalysisRequests": {
+                "type": "array",
+                "items": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "const": "window_ohlc"
+                        },
+                        "window": {
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "kind": {
+                                  "type": "string",
+                                  "const": "whole_session"
+                                }
+                              },
+                              "required": [
+                                "kind"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "kind": {
+                                  "type": "string",
+                                  "const": "up_to_cursor"
+                                }
+                              },
+                              "required": [
+                                "kind"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "kind": {
+                                  "type": "string",
+                                  "const": "time_range"
+                                },
+                                "fromTime": {
+                                  "type": "string",
+                                  "pattern": "^\\d{2}:\\d{2}$"
+                                },
+                                "toTime": {
+                                  "type": "string",
+                                  "pattern": "^\\d{2}:\\d{2}$"
+                                }
+                              },
+                              "required": [
+                                "kind",
+                                "fromTime",
+                                "toTime"
+                              ],
+                              "additionalProperties": false
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "kind"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "const": "window_change"
+                        },
+                        "window": {
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "kind": {
+                                  "type": "string",
+                                  "const": "whole_session"
+                                }
+                              },
+                              "required": [
+                                "kind"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "kind": {
+                                  "type": "string",
+                                  "const": "up_to_cursor"
+                                }
+                              },
+                              "required": [
+                                "kind"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "kind": {
+                                  "type": "string",
+                                  "const": "time_range"
+                                },
+                                "fromTime": {
+                                  "type": "string",
+                                  "pattern": "^\\d{2}:\\d{2}$"
+                                },
+                                "toTime": {
+                                  "type": "string",
+                                  "pattern": "^\\d{2}:\\d{2}$"
+                                }
+                              },
+                              "required": [
+                                "kind",
+                                "fromTime",
+                                "toTime"
+                              ],
+                              "additionalProperties": false
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "kind"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "const": "window_volume"
+                        },
+                        "window": {
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "kind": {
+                                  "type": "string",
+                                  "const": "whole_session"
+                                }
+                              },
+                              "required": [
+                                "kind"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "kind": {
+                                  "type": "string",
+                                  "const": "up_to_cursor"
+                                }
+                              },
+                              "required": [
+                                "kind"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "kind": {
+                                  "type": "string",
+                                  "const": "time_range"
+                                },
+                                "fromTime": {
+                                  "type": "string",
+                                  "pattern": "^\\d{2}:\\d{2}$"
+                                },
+                                "toTime": {
+                                  "type": "string",
+                                  "pattern": "^\\d{2}:\\d{2}$"
+                                }
+                              },
+                              "required": [
+                                "kind",
+                                "fromTime",
+                                "toTime"
+                              ],
+                              "additionalProperties": false
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "kind"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "const": "window_compare"
+                        },
+                        "left": {
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "kind": {
+                                  "type": "string",
+                                  "const": "whole_session"
+                                }
+                              },
+                              "required": [
+                                "kind"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "kind": {
+                                  "type": "string",
+                                  "const": "up_to_cursor"
+                                }
+                              },
+                              "required": [
+                                "kind"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "kind": {
+                                  "type": "string",
+                                  "const": "time_range"
+                                },
+                                "fromTime": {
+                                  "type": "string",
+                                  "pattern": "^\\d{2}:\\d{2}$"
+                                },
+                                "toTime": {
+                                  "type": "string",
+                                  "pattern": "^\\d{2}:\\d{2}$"
+                                }
+                              },
+                              "required": [
+                                "kind",
+                                "fromTime",
+                                "toTime"
+                              ],
+                              "additionalProperties": false
+                            }
+                          ]
+                        },
+                        "right": {
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "kind": {
+                                  "type": "string",
+                                  "const": "whole_session"
+                                }
+                              },
+                              "required": [
+                                "kind"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "kind": {
+                                  "type": "string",
+                                  "const": "up_to_cursor"
+                                }
+                              },
+                              "required": [
+                                "kind"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "kind": {
+                                  "type": "string",
+                                  "const": "time_range"
+                                },
+                                "fromTime": {
+                                  "type": "string",
+                                  "pattern": "^\\d{2}:\\d{2}$"
+                                },
+                                "toTime": {
+                                  "type": "string",
+                                  "pattern": "^\\d{2}:\\d{2}$"
+                                }
+                              },
+                              "required": [
+                                "kind",
+                                "fromTime",
+                                "toTime"
+                              ],
+                              "additionalProperties": false
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "kind"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "const": "candle_shape"
+                        },
+                        "source": {
+                          "type": "string",
+                          "enum": [
+                            "current_chart_candle",
+                            "market_time"
+                          ]
+                        },
+                        "marketTime": {
+                          "type": "string",
+                          "pattern": "^\\d{2}:\\d{2}$"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "source"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "const": "window_summary"
+                        },
+                        "window": {
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "kind": {
+                                  "type": "string",
+                                  "const": "whole_session"
+                                }
+                              },
+                              "required": [
+                                "kind"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "kind": {
+                                  "type": "string",
+                                  "const": "up_to_cursor"
+                                }
+                              },
+                              "required": [
+                                "kind"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "kind": {
+                                  "type": "string",
+                                  "const": "time_range"
+                                },
+                                "fromTime": {
+                                  "type": "string",
+                                  "pattern": "^\\d{2}:\\d{2}$"
+                                },
+                                "toTime": {
+                                  "type": "string",
+                                  "pattern": "^\\d{2}:\\d{2}$"
+                                }
+                              },
+                              "required": [
+                                "kind",
+                                "fromTime",
+                                "toTime"
+                              ],
+                              "additionalProperties": false
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "kind"
+                      ],
+                      "additionalProperties": false
+                    }
+                  ]
+                }
+              }
+            },
+            "required": [
+              "fromTurn",
+              "toTurn",
+              "mode"
+            ],
+            "additionalProperties": false
+          },
+          "default": []
+        },
+        "consumerResponseExpectations": {
+          "type": "object",
+          "properties": {
+            "mustContain": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "mustNotContain": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "mustMatch": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "forbiddenTopics": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "maxLength": {
+              "type": "integer"
+            },
+            "numericEquivalence": {
+              "type": "object",
+              "properties": {
+                "priceAbsolute": {
+                  "type": "number",
+                  "default": 0.005
+                },
+                "priceRelative": {
+                  "type": "number",
+                  "default": 0.001
+                },
+                "volumeAbsolute": {
+                  "type": "number",
+                  "default": 1
+                },
+                "volumeRelative": {
+                  "type": "number",
+                  "default": 0.001
+                },
+                "percentAbsolute": {
+                  "type": "number",
+                  "default": 0.05
+                },
+                "percentRelative": {
+                  "type": "number",
+                  "default": 0.001
+                },
+                "approximateRelative": {
+                  "type": "number",
+                  "default": 0.02
+                },
+                "approximateWords": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": [
+                    "about",
+                    "around",
+                    "approximately",
+                    "~",
+                    "roughly",
+                    "nearly"
+                  ]
+                },
+                "compactSuffixes": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "number"
+                  },
+                  "default": {
+                    "K": 1000,
+                    "M": 1000000,
+                    "B": 1000000000,
+                    "k": 1000,
+                    "m": 1000000,
+                    "b": 1000000000
+                  }
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        "knownUnsupportedBehavior": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "utterance": {
+                "type": "string"
+              },
+              "expectedRoute": {
+                "type": "string",
+                "enum": [
+                  "unsupported",
+                  "clarification"
+                ],
+                "default": "unsupported"
+              },
+              "expectedMessageRegex": {
+                "type": "string"
+              },
+              "mustNotExecuteCapabilities": {
+                "type": "boolean",
+                "default": true
+              }
+            },
+            "required": [
+              "utterance"
+            ],
+            "additionalProperties": false
+          },
+          "default": []
+        },
+        "latencyLimits": {
+          "type": "object",
+          "properties": {
+            "maxMsPerTurn": {
+              "type": "integer"
+            },
+            "maxMsPlanCompile": {
+              "type": "integer"
+            },
+            "maxMsExecution": {
+              "type": "integer"
+            },
+            "maxMsTTFT": {
+              "type": "integer"
+            },
+            "maxMsTotal": {
+              "type": "integer"
+            }
+          },
+          "additionalProperties": false,
+          "default": {}
+        },
+        "turns": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "utterance": {
+                "type": "string"
+              },
+              "expectedOk": {
+                "type": "boolean",
+                "default": true
+              },
+              "expectedRoute": {
+                "type": "string",
+                "enum": [
+                  "llm-plan",
+                  "deterministic",
+                  "clarification",
+                  "unsupported",
+                  "chat",
+                  "error",
+                  "resolve",
+                  "recent-action-summary",
+                  "unrecognized",
+                  "aborted",
+                  "ui-action"
+                ]
+              },
+              "assertExactRoute": {
+                "type": "boolean",
+                "default": false
+              },
+              "expectedPlan": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "chat",
+                      "query",
+                      "action",
+                      "mixed"
+                    ]
+                  },
+                  "summary": {
+                    "type": "string"
+                  },
+                  "steps": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "capability": {
+                          "type": "string"
+                        },
+                        "args": {
+                          "type": "object",
+                          "additionalProperties": {},
+                          "default": {}
+                        },
+                        "required": {
+                          "type": "boolean"
+                        },
+                        "dependsOn": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "rationale": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "capability"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "default": []
+                  },
+                  "chat": {
+                    "type": "string"
+                  },
+                  "meta": {
+                    "type": "object",
+                    "additionalProperties": {}
+                  }
+                },
+                "required": [
+                  "id",
+                  "kind",
+                  "summary"
+                ],
+                "additionalProperties": false
+              },
+              "assertExactPlan": {
+                "type": "boolean",
+                "default": false
+              },
+              "expectedCapabilities": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              },
+              "permittedActions": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "forbiddenActions": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "exactInvariants": {
+                "type": "object",
+                "properties": {
+                  "symbol": {
+                    "type": "string"
+                  },
+                  "date": {
+                    "type": "string",
+                    "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+                  },
+                  "timeframe": {
+                    "type": "integer"
+                  },
+                  "marketOpen": {
+                    "type": "string",
+                    "pattern": "^\\d{2}:\\d{2}$"
+                  },
+                  "marketClose": {
+                    "type": "string",
+                    "pattern": "^\\d{2}:\\d{2}$"
+                  },
+                  "timezoneOffsetHours": {
+                    "type": "integer"
+                  },
+                  "window": {
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "const": "whole_session"
+                          }
+                        },
+                        "required": [
+                          "kind"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "const": "up_to_cursor"
+                          }
+                        },
+                        "required": [
+                          "kind"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "const": "time_range"
+                          },
+                          "fromTime": {
+                            "type": "string",
+                            "pattern": "^\\d{2}:\\d{2}$"
+                          },
+                          "toTime": {
+                            "type": "string",
+                            "pattern": "^\\d{2}:\\d{2}$"
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "fromTime",
+                          "toTime"
+                        ],
+                        "additionalProperties": false
+                      }
+                    ]
+                  },
+                  "seekTime": {
+                    "type": "string",
+                    "pattern": "^\\d{2}:\\d{2}$"
+                  },
+                  "marketTime": {
+                    "type": "string",
+                    "pattern": "^\\d{2}:\\d{2}$"
+                  }
+                },
+                "additionalProperties": false
+              },
+              "expectedContextAfter": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "chart_action",
+                    "default": "chart_action"
+                  },
+                  "symbol": {
+                    "type": "string"
+                  },
+                  "date": {
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "type": "string",
+                        "enum": [
+                          "absolute",
+                          "relative_trading",
+                          "relative_calendar"
+                        ]
+                      },
+                      "value": {
+                        "type": "string"
+                      },
+                      "count": {
+                        "type": "integer"
+                      },
+                      "direction": {
+                        "type": "string",
+                        "enum": [
+                          "backward",
+                          "forward"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "kind"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "timeframeMinutes": {
+                    "type": "integer"
+                  },
+                  "seekTime": {
+                    "type": "string"
+                  },
+                  "relativeSeekMinutes": {
+                    "type": "integer"
+                  },
+                  "playback": {
+                    "type": "object",
+                    "properties": {
+                      "action": {
+                        "type": "string",
+                        "enum": [
+                          "play",
+                          "pause",
+                          "play_until"
+                        ]
+                      },
+                      "speed": {
+                        "type": "integer"
+                      },
+                      "untilTime": {
+                        "type": "string"
+                      },
+                      "direction": {
+                        "type": "string",
+                        "enum": [
+                          "forward",
+                          "backward"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "action"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "finalQuery": {
+                    "type": "string",
+                    "enum": [
+                      "current_candle",
+                      "candle_at_time",
+                      "compare_candles"
+                    ]
+                  },
+                  "queryTime": {
+                    "type": "string"
+                  },
+                  "previousSymbol": {
+                    "type": "boolean"
+                  },
+                  "contextReference": {
+                    "type": "object",
+                    "properties": {
+                      "source": {
+                        "type": "string",
+                        "enum": [
+                          "latest_successful_action",
+                          "latest_failed_action",
+                          "latest_returned_candle"
+                        ]
+                      },
+                      "mode": {
+                        "type": "string",
+                        "enum": [
+                          "repeat",
+                          "inherit",
+                          "use_as_target",
+                          "anchor_relative_date"
+                        ]
+                      },
+                      "inherit": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "required": [
+                      "source"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "compare": {
+                    "type": "object",
+                    "properties": {
+                      "left": {
+                        "type": "object",
+                        "properties": {
+                          "source": {
+                            "type": "string",
+                            "enum": [
+                              "latest_returned_candle",
+                              "previous_returned_candle",
+                              "current_chart_candle",
+                              "market_time"
+                            ]
+                          },
+                          "marketTime": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "source"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "right": {
+                        "type": "object",
+                        "properties": {
+                          "source": {
+                            "type": "string",
+                            "enum": [
+                              "latest_returned_candle",
+                              "previous_returned_candle",
+                              "current_chart_candle",
+                              "market_time"
+                            ]
+                          },
+                          "marketTime": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "source"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "required": [
+                      "left",
+                      "right"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "analysisRequests": {
+                    "type": "array",
+                    "items": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "window_ohlc"
+                            },
+                            "window": {
+                              "anyOf": [
+                                {
+                                  "type": "object",
+                                  "properties": {
+                                    "kind": {
+                                      "type": "string",
+                                      "const": "whole_session"
+                                    }
+                                  },
+                                  "required": [
+                                    "kind"
+                                  ],
+                                  "additionalProperties": false
+                                },
+                                {
+                                  "type": "object",
+                                  "properties": {
+                                    "kind": {
+                                      "type": "string",
+                                      "const": "up_to_cursor"
+                                    }
+                                  },
+                                  "required": [
+                                    "kind"
+                                  ],
+                                  "additionalProperties": false
+                                },
+                                {
+                                  "type": "object",
+                                  "properties": {
+                                    "kind": {
+                                      "type": "string",
+                                      "const": "time_range"
+                                    },
+                                    "fromTime": {
+                                      "type": "string",
+                                      "pattern": "^\\d{2}:\\d{2}$"
+                                    },
+                                    "toTime": {
+                                      "type": "string",
+                                      "pattern": "^\\d{2}:\\d{2}$"
+                                    }
+                                  },
+                                  "required": [
+                                    "kind",
+                                    "fromTime",
+                                    "toTime"
+                                  ],
+                                  "additionalProperties": false
+                                }
+                              ]
+                            }
+                          },
+                          "required": [
+                            "kind"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "window_change"
+                            },
+                            "window": {
+                              "anyOf": [
+                                {
+                                  "type": "object",
+                                  "properties": {
+                                    "kind": {
+                                      "type": "string",
+                                      "const": "whole_session"
+                                    }
+                                  },
+                                  "required": [
+                                    "kind"
+                                  ],
+                                  "additionalProperties": false
+                                },
+                                {
+                                  "type": "object",
+                                  "properties": {
+                                    "kind": {
+                                      "type": "string",
+                                      "const": "up_to_cursor"
+                                    }
+                                  },
+                                  "required": [
+                                    "kind"
+                                  ],
+                                  "additionalProperties": false
+                                },
+                                {
+                                  "type": "object",
+                                  "properties": {
+                                    "kind": {
+                                      "type": "string",
+                                      "const": "time_range"
+                                    },
+                                    "fromTime": {
+                                      "type": "string",
+                                      "pattern": "^\\d{2}:\\d{2}$"
+                                    },
+                                    "toTime": {
+                                      "type": "string",
+                                      "pattern": "^\\d{2}:\\d{2}$"
+                                    }
+                                  },
+                                  "required": [
+                                    "kind",
+                                    "fromTime",
+                                    "toTime"
+                                  ],
+                                  "additionalProperties": false
+                                }
+                              ]
+                            }
+                          },
+                          "required": [
+                            "kind"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "window_volume"
+                            },
+                            "window": {
+                              "anyOf": [
+                                {
+                                  "type": "object",
+                                  "properties": {
+                                    "kind": {
+                                      "type": "string",
+                                      "const": "whole_session"
+                                    }
+                                  },
+                                  "required": [
+                                    "kind"
+                                  ],
+                                  "additionalProperties": false
+                                },
+                                {
+                                  "type": "object",
+                                  "properties": {
+                                    "kind": {
+                                      "type": "string",
+                                      "const": "up_to_cursor"
+                                    }
+                                  },
+                                  "required": [
+                                    "kind"
+                                  ],
+                                  "additionalProperties": false
+                                },
+                                {
+                                  "type": "object",
+                                  "properties": {
+                                    "kind": {
+                                      "type": "string",
+                                      "const": "time_range"
+                                    },
+                                    "fromTime": {
+                                      "type": "string",
+                                      "pattern": "^\\d{2}:\\d{2}$"
+                                    },
+                                    "toTime": {
+                                      "type": "string",
+                                      "pattern": "^\\d{2}:\\d{2}$"
+                                    }
+                                  },
+                                  "required": [
+                                    "kind",
+                                    "fromTime",
+                                    "toTime"
+                                  ],
+                                  "additionalProperties": false
+                                }
+                              ]
+                            }
+                          },
+                          "required": [
+                            "kind"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "window_compare"
+                            },
+                            "left": {
+                              "anyOf": [
+                                {
+                                  "type": "object",
+                                  "properties": {
+                                    "kind": {
+                                      "type": "string",
+                                      "const": "whole_session"
+                                    }
+                                  },
+                                  "required": [
+                                    "kind"
+                                  ],
+                                  "additionalProperties": false
+                                },
+                                {
+                                  "type": "object",
+                                  "properties": {
+                                    "kind": {
+                                      "type": "string",
+                                      "const": "up_to_cursor"
+                                    }
+                                  },
+                                  "required": [
+                                    "kind"
+                                  ],
+                                  "additionalProperties": false
+                                },
+                                {
+                                  "type": "object",
+                                  "properties": {
+                                    "kind": {
+                                      "type": "string",
+                                      "const": "time_range"
+                                    },
+                                    "fromTime": {
+                                      "type": "string",
+                                      "pattern": "^\\d{2}:\\d{2}$"
+                                    },
+                                    "toTime": {
+                                      "type": "string",
+                                      "pattern": "^\\d{2}:\\d{2}$"
+                                    }
+                                  },
+                                  "required": [
+                                    "kind",
+                                    "fromTime",
+                                    "toTime"
+                                  ],
+                                  "additionalProperties": false
+                                }
+                              ]
+                            },
+                            "right": {
+                              "anyOf": [
+                                {
+                                  "type": "object",
+                                  "properties": {
+                                    "kind": {
+                                      "type": "string",
+                                      "const": "whole_session"
+                                    }
+                                  },
+                                  "required": [
+                                    "kind"
+                                  ],
+                                  "additionalProperties": false
+                                },
+                                {
+                                  "type": "object",
+                                  "properties": {
+                                    "kind": {
+                                      "type": "string",
+                                      "const": "up_to_cursor"
+                                    }
+                                  },
+                                  "required": [
+                                    "kind"
+                                  ],
+                                  "additionalProperties": false
+                                },
+                                {
+                                  "type": "object",
+                                  "properties": {
+                                    "kind": {
+                                      "type": "string",
+                                      "const": "time_range"
+                                    },
+                                    "fromTime": {
+                                      "type": "string",
+                                      "pattern": "^\\d{2}:\\d{2}$"
+                                    },
+                                    "toTime": {
+                                      "type": "string",
+                                      "pattern": "^\\d{2}:\\d{2}$"
+                                    }
+                                  },
+                                  "required": [
+                                    "kind",
+                                    "fromTime",
+                                    "toTime"
+                                  ],
+                                  "additionalProperties": false
+                                }
+                              ]
+                            }
+                          },
+                          "required": [
+                            "kind"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "candle_shape"
+                            },
+                            "source": {
+                              "type": "string",
+                              "enum": [
+                                "current_chart_candle",
+                                "market_time"
+                              ]
+                            },
+                            "marketTime": {
+                              "type": "string",
+                              "pattern": "^\\d{2}:\\d{2}$"
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "source"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "window_summary"
+                            },
+                            "window": {
+                              "anyOf": [
+                                {
+                                  "type": "object",
+                                  "properties": {
+                                    "kind": {
+                                      "type": "string",
+                                      "const": "whole_session"
+                                    }
+                                  },
+                                  "required": [
+                                    "kind"
+                                  ],
+                                  "additionalProperties": false
+                                },
+                                {
+                                  "type": "object",
+                                  "properties": {
+                                    "kind": {
+                                      "type": "string",
+                                      "const": "up_to_cursor"
+                                    }
+                                  },
+                                  "required": [
+                                    "kind"
+                                  ],
+                                  "additionalProperties": false
+                                },
+                                {
+                                  "type": "object",
+                                  "properties": {
+                                    "kind": {
+                                      "type": "string",
+                                      "const": "time_range"
+                                    },
+                                    "fromTime": {
+                                      "type": "string",
+                                      "pattern": "^\\d{2}:\\d{2}$"
+                                    },
+                                    "toTime": {
+                                      "type": "string",
+                                      "pattern": "^\\d{2}:\\d{2}$"
+                                    }
+                                  },
+                                  "required": [
+                                    "kind",
+                                    "fromTime",
+                                    "toTime"
+                                  ],
+                                  "additionalProperties": false
+                                }
+                              ]
+                            }
+                          },
+                          "required": [
+                            "kind"
+                          ],
+                          "additionalProperties": false
+                        }
+                      ]
+                    }
+                  }
+                },
+                "additionalProperties": false
+              },
+              "expectedContextUnchanged": {
+                "type": "boolean",
+                "default": false
+              },
+              "expectedReceipts": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "turnId": {
+                      "type": "string"
+                    },
+                    "capability": {
+                      "type": "string"
+                    },
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "errorCode": {
+                      "type": "string"
+                    },
+                    "messageRegex": {
+                      "type": "string"
+                    },
+                    "dataShape": {
+                      "type": "object",
+                      "additionalProperties": {}
+                    }
+                  },
+                  "required": [
+                    "capability"
+                  ],
+                  "additionalProperties": false
+                },
+                "default": []
+              },
+              "numericalTruthChecks": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "turnId": {
+                      "type": "string"
+                    },
+                    "receiptCapability": {
+                      "type": "string"
+                    },
+                    "computed": {
+                      "type": "object",
+                      "properties": {
+                        "source": {
+                          "type": "string",
+                          "enum": [
+                            "engine",
+                            "fixture"
+                          ],
+                          "default": "fixture"
+                        },
+                        "capability": {
+                          "type": "string"
+                        },
+                        "symbol": {
+                          "type": "string"
+                        },
+                        "date": {
+                          "type": "string"
+                        },
+                        "timeframe": {
+                          "type": "integer"
+                        },
+                        "window": {
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "kind": {
+                                  "type": "string",
+                                  "const": "whole_session"
+                                }
+                              },
+                              "required": [
+                                "kind"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "kind": {
+                                  "type": "string",
+                                  "const": "up_to_cursor"
+                                }
+                              },
+                              "required": [
+                                "kind"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "kind": {
+                                  "type": "string",
+                                  "const": "time_range"
+                                },
+                                "fromTime": {
+                                  "type": "string",
+                                  "pattern": "^\\d{2}:\\d{2}$"
+                                },
+                                "toTime": {
+                                  "type": "string",
+                                  "pattern": "^\\d{2}:\\d{2}$"
+                                }
+                              },
+                              "required": [
+                                "kind",
+                                "fromTime",
+                                "toTime"
+                              ],
+                              "additionalProperties": false
+                            }
+                          ]
+                        },
+                        "left": {
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "kind": {
+                                  "type": "string",
+                                  "const": "whole_session"
+                                }
+                              },
+                              "required": [
+                                "kind"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "kind": {
+                                  "type": "string",
+                                  "const": "up_to_cursor"
+                                }
+                              },
+                              "required": [
+                                "kind"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "kind": {
+                                  "type": "string",
+                                  "const": "time_range"
+                                },
+                                "fromTime": {
+                                  "type": "string",
+                                  "pattern": "^\\d{2}:\\d{2}$"
+                                },
+                                "toTime": {
+                                  "type": "string",
+                                  "pattern": "^\\d{2}:\\d{2}$"
+                                }
+                              },
+                              "required": [
+                                "kind",
+                                "fromTime",
+                                "toTime"
+                              ],
+                              "additionalProperties": false
+                            }
+                          ]
+                        },
+                        "right": {
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "kind": {
+                                  "type": "string",
+                                  "const": "whole_session"
+                                }
+                              },
+                              "required": [
+                                "kind"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "kind": {
+                                  "type": "string",
+                                  "const": "up_to_cursor"
+                                }
+                              },
+                              "required": [
+                                "kind"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "kind": {
+                                  "type": "string",
+                                  "const": "time_range"
+                                },
+                                "fromTime": {
+                                  "type": "string",
+                                  "pattern": "^\\d{2}:\\d{2}$"
+                                },
+                                "toTime": {
+                                  "type": "string",
+                                  "pattern": "^\\d{2}:\\d{2}$"
+                                }
+                              },
+                              "required": [
+                                "kind",
+                                "fromTime",
+                                "toTime"
+                              ],
+                              "additionalProperties": false
+                            }
+                          ]
+                        },
+                        "marketTime": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "capability"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "tolerance": {
+                      "type": "object",
+                      "properties": {
+                        "absolute": {
+                          "type": "number"
+                        },
+                        "relative": {
+                          "type": "number"
+                        }
+                      },
+                      "additionalProperties": false,
+                      "default": {}
+                    }
+                  },
+                  "required": [
+                    "receiptCapability",
+                    "computed"
+                  ],
+                  "additionalProperties": false
+                },
+                "default": []
+              },
+              "consumerResponseExpectations": {
+                "type": "object",
+                "properties": {
+                  "mustContain": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "default": []
+                  },
+                  "mustNotContain": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "default": []
+                  },
+                  "mustMatch": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "default": []
+                  },
+                  "forbiddenTopics": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "default": []
+                  },
+                  "maxLength": {
+                    "type": "integer"
+                  },
+                  "numericEquivalence": {
+                    "type": "object",
+                    "properties": {
+                      "priceAbsolute": {
+                        "type": "number",
+                        "default": 0.005
+                      },
+                      "priceRelative": {
+                        "type": "number",
+                        "default": 0.001
+                      },
+                      "volumeAbsolute": {
+                        "type": "number",
+                        "default": 1
+                      },
+                      "volumeRelative": {
+                        "type": "number",
+                        "default": 0.001
+                      },
+                      "percentAbsolute": {
+                        "type": "number",
+                        "default": 0.05
+                      },
+                      "percentRelative": {
+                        "type": "number",
+                        "default": 0.001
+                      },
+                      "approximateRelative": {
+                        "type": "number",
+                        "default": 0.02
+                      },
+                      "approximateWords": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        },
+                        "default": [
+                          "about",
+                          "around",
+                          "approximately",
+                          "~",
+                          "roughly",
+                          "nearly"
+                        ]
+                      },
+                      "compactSuffixes": {
+                        "type": "object",
+                        "additionalProperties": {
+                          "type": "number"
+                        },
+                        "default": {
+                          "K": 1000,
+                          "M": 1000000,
+                          "B": 1000000000,
+                          "k": 1000,
+                          "m": 1000000,
+                          "b": 1000000000
+                        }
+                      }
+                    },
+                    "additionalProperties": false
+                  }
+                },
+                "additionalProperties": false
+              },
+              "latencyMs": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "id",
+              "utterance"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 1
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "dataSet",
+        "initialWorldState",
+        "turns"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

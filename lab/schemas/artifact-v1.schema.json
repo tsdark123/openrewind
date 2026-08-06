@@ -1,0 +1,283 @@
+{
+  "$ref": "#/definitions/artifact-v1",
+  "definitions": {
+    "artifact-v1": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "orion.scenario_result"
+            },
+            "version": {
+              "type": "string",
+              "const": "1.0.0"
+            },
+            "payload": {
+              "type": "object",
+              "properties": {
+                "runId": {
+                  "type": "string"
+                },
+                "timestamp": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "mode": {
+                  "type": "string",
+                  "enum": [
+                    "fixture",
+                    "production"
+                  ]
+                },
+                "scenarioId": {
+                  "type": "string"
+                },
+                "repetition": {
+                  "type": "integer",
+                  "default": 1
+                },
+                "model": {
+                  "type": "string"
+                },
+                "engineUrl": {
+                  "type": "string"
+                },
+                "dataSet": {
+                  "type": "object",
+                  "additionalProperties": {}
+                },
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "pass",
+                    "fail",
+                    "skip",
+                    "timeout",
+                    "error"
+                  ]
+                },
+                "durationMs": {
+                  "type": "integer"
+                },
+                "message": {
+                  "type": "string"
+                },
+                "turns": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "turnId": {
+                        "type": "string"
+                      },
+                      "utterance": {
+                        "type": "string"
+                      },
+                      "status": {
+                        "type": "string",
+                        "enum": [
+                          "pass",
+                          "fail",
+                          "skip",
+                          "timeout",
+                          "error"
+                        ]
+                      },
+                      "durationMs": {
+                        "type": "integer"
+                      },
+                      "route": {
+                        "type": "string",
+                        "enum": [
+                          "llm-plan",
+                          "deterministic",
+                          "clarification",
+                          "unsupported",
+                          "chat",
+                          "error",
+                          "resolve",
+                          "recent-action-summary",
+                          "unrecognized",
+                          "aborted",
+                          "ui-action"
+                        ]
+                      },
+                      "plan": {
+                        "type": "object",
+                        "additionalProperties": {}
+                      },
+                      "capabilities": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        },
+                        "default": []
+                      },
+                      "receipts": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "additionalProperties": {}
+                        },
+                        "default": []
+                      },
+                      "finalWorldState": {
+                        "type": "object",
+                        "additionalProperties": {}
+                      },
+                      "message": {
+                        "type": "string"
+                      },
+                      "violations": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "stage": {
+                              "type": "string"
+                            },
+                            "message": {
+                              "type": "string"
+                            },
+                            "expected": {},
+                            "actual": {}
+                          },
+                          "required": [
+                            "stage",
+                            "message"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "default": []
+                      }
+                    },
+                    "required": [
+                      "turnId",
+                      "utterance",
+                      "status"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "note": {
+                  "type": "string",
+                  "default": "fixture-mode lab validation; not real Orion certification"
+                }
+              },
+              "required": [
+                "runId",
+                "timestamp",
+                "mode",
+                "scenarioId",
+                "dataSet",
+                "status",
+                "durationMs",
+                "turns"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "type",
+            "version",
+            "payload"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "orion.run_summary"
+            },
+            "version": {
+              "type": "string",
+              "const": "1.0.0"
+            },
+            "payload": {
+              "type": "object",
+              "properties": {
+                "runId": {
+                  "type": "string"
+                },
+                "mode": {
+                  "type": "string",
+                  "enum": [
+                    "fixture",
+                    "production"
+                  ]
+                },
+                "timestamp": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "startTime": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "endTime": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "manifestSha": {
+                  "type": "string"
+                },
+                "scenarioCount": {
+                  "type": "integer"
+                },
+                "passCount": {
+                  "type": "integer"
+                },
+                "failCount": {
+                  "type": "integer"
+                },
+                "timeoutCount": {
+                  "type": "integer"
+                },
+                "skipCount": {
+                  "type": "integer",
+                  "default": 0
+                },
+                "model": {
+                  "type": "string"
+                },
+                "engineUrl": {
+                  "type": "string"
+                },
+                "ollamaUrl": {
+                  "type": "string"
+                },
+                "note": {
+                  "type": "string",
+                  "default": "fixture-mode lab validation; not real Orion certification"
+                }
+              },
+              "required": [
+                "runId",
+                "mode",
+                "timestamp",
+                "startTime",
+                "endTime",
+                "scenarioCount",
+                "passCount",
+                "failCount",
+                "timeoutCount"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "type",
+            "version",
+            "payload"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

@@ -1,0 +1,18 @@
+# --- Lab generated / local-only artifacts ---
+inbox/*
+!inbox/.gitignore
+outbox/*
+!outbox/.gitignore
+data/*
+!data/.gitignore
+tmp/
+logs/
+*.log
+*.trace.json
+*.screenshot.png
+
+# --- Node ---
+node_modules/
+package-lock.json
+dist/
+*.tsbuildinfo
