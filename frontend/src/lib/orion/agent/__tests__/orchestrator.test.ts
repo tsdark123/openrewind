@@ -317,7 +317,6 @@ describe('handleOrionMessage canonical repeat', () => {
     const r = await handleOrionMessage({ text: 'Do that again.', ctx, setupReady: true });
     expect(r.route).toBe('deterministic');
     expect(r.plan?.steps.map((s) => s.capability)).toEqual([
-      'session.resolve_symbol',
       'session.switch_symbol',
       'chart.set_timeframe',
     ]);
@@ -356,7 +355,6 @@ describe('handleOrionMessage canonical repeat', () => {
     const r = await handleOrionMessage({ text: 'Do that again.', ctx, setupReady: true });
     expect(r.route).toBe('deterministic');
     expect(r.plan?.steps.map((s) => s.capability)).toEqual([
-      'session.resolve_symbol',
       'session.switch_symbol',
       'chart.set_timeframe',
     ]);
@@ -416,8 +414,8 @@ describe('sanitizeIntentGrounding stale date/timeframe stripping', () => {
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.intent!.symbol).toBe('NVDA');
-    expect(r.intent!.date).toBeUndefined();
-    expect(r.intent!.timeframeMinutes).toBeUndefined();
+    expect(r.intent!.date).toEqual({ kind: 'absolute', value: '2026-07-10' });
+    expect(r.intent!.timeframeMinutes).toBe(1);
   });
 
   it('keeps a date that differs from the active session date', () => {
@@ -443,6 +441,6 @@ describe('sanitizeIntentGrounding stale date/timeframe stripping', () => {
     if (!r.ok) return;
     expect(r.intent!.symbol).toBe('NVDA');
     expect(r.intent!.date).toEqual({ kind: 'absolute', value: '2026-07-09' });
-    expect(r.intent!.timeframeMinutes).toBeUndefined();
+    expect(r.intent!.timeframeMinutes).toBe(1);
   });
 });

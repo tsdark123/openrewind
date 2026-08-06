@@ -128,7 +128,7 @@ const ANALYSIS_CONCEPTS: Record<string, ConceptDef> = {
   wick: { kind: 'shape', terms: ['wick', 'wicks'] },
   shadow: { kind: 'shape', terms: ['shadow', 'shadows'] },
   anatomy: { kind: 'shape', terms: ['anatomy'] },
-  shape: { kind: 'shape', terms: ['shape', 'shapes', 'shaped', 'kind', 'kinds', 'type', 'types', 'sort', 'sorts', 'structure', 'structures', 'describe', 'describes', 'described', 'describing'] },
+  shape: { kind: 'shape', terms: ['shape', 'shapes', 'shaped', 'kind', 'kinds', 'type', 'types', 'sort', 'sorts', 'structure', 'structures', 'describe', 'describes', 'described', 'describing', 'show', 'shows', 'showing', 'shown', 'look', 'looks', 'looked', 'looking'] },
   compare: { kind: 'compare', terms: ['compare', 'compared', 'comparing', 'comparison', 'vs', 'versus', 'against', 'contrast', 'contrasted', 'contrasting'] },
   summary: { kind: 'summary', terms: ['summary', 'overview', 'recap', 'did', 'do', 'does', 'done', 'doing', 'breakdown', 'summarize', 'summarized'] },
   session: { kind: 'time', terms: ['session', 'sessions', 'today', 'day', 'days'] },
@@ -524,6 +524,19 @@ const ANAPHORA_TOKENS: ReadonlySet<string> = new Set([
 
 const CONTEXT_ACTION_VERBS: ReadonlySet<string> = new Set(['do', 'run', 'perform']);
 
+// Past/meta references to a previously discussed chart object: "the candle we
+// were discussing", "the range you reported", "that period I mentioned".
+const CONTEXT_META_VERBS: ReadonlySet<string> = new Set([
+  'discuss', 'discussing', 'discussed',
+  'talking', 'talked', 'looking', 'looked', 'reported', 'reporting',
+  'mentioned', 'said', 'told',
+  'were', 'was', 'are',
+]);
+
+const CONTEXT_OBJECT_CONCEPTS: ReadonlySet<string> = new Set([
+  'candle', 'bar', 'ohlc', 'period', 'range', 'hour', 'minute', 'session', 'timeframe',
+]);
+
 const FOLLOW_UP_CUES: ReadonlySet<string> = new Set([
   'what',
   'how',
@@ -593,7 +606,27 @@ export function textRequestsContextReference(t: string, hasPriorAction = false):
     if (d.concepts.size > 0) return true;
     return false;
   }
+
+  // Typed context reference without an explicit anaphora token: a determiner
+  // ("the" / "this" / "that") followed by a chart object and a past/meta verb
+  // points back to a previously discussed or reported chart object.
+  if (
+    hasPriorAction &&
+    (d.tokens.includes('the') || d.tokens.includes('this') || d.tokens.includes('that')) &&
+    Array.from(d.concepts).some((c) => CONTEXT_OBJECT_CONCEPTS.has(c)) &&
+    d.tokens.some((tok) => CONTEXT_META_VERBS.has(tok))
+  ) {
+    return true;
+  }
+
   return isEllipticalFollowUp(t, d, hasPriorAction);
+}
+
+// Capability/meta-inquiry: "What can we do with that?", "What's possible with
+// this?" These are not analysis requests; they should route to unsupported.
+export function textRequestsCapabilityInquiry(t: string): boolean {
+  return /\b(?:what|which)\s+(?:can|could|would|is|are)\s+(?:we|i|you|it|there)\s+(?:do|be\s+done|possible|available|allowed|permitted|supported)\b/i.test(t) ||
+    /\bwhat\s+(?:can|could|would)\s+(?:we|i|you)\s+(?:do|use|perform|run)\s+(?:with|using|for)\b/i.test(t);
 }
 
 // Summary cue tokens are recognized by the words themselves, not by the

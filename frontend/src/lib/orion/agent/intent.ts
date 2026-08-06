@@ -893,8 +893,34 @@ export function selectedAnalysisKinds(text: string, hasContextReference = false)
   const metricClusters = [hasVolume, hasChange, hasOhlc, isCandleShape].filter(Boolean).length;
   const summaryPlusMetric = isSummary && (hasVolume || hasChange || hasOhlc || isCandleShape);
   const multipleMetrics = metricClusters >= 2 || summaryPlusMetric;
-  const comparePlusMetric = hasCompare && (hasVolume || hasChange || hasOhlc || isCandleShape || isSummary);
-  if (comparePlusMetric || multipleMetrics) return undefined;
+
+  // A comparison paired with only window/boundary nouns ("range", "hour",
+  // "first", "last", etc.) is a bare window comparison; concrete metrics like
+  // volume, change, or high/low/open/close make it compound.
+  const nonCompareWindowNouns = new Set([
+    'compare', 'range', 'hour', 'minute', 'period', 'first', 'last', 'final',
+    'opening', 'closing', 'morning', 'afternoon', 'session', 'day', 'today', 'now',
+  ]);
+  const compareHasConcreteMetric =
+    hasCompare &&
+    Array.from(d.concepts).some((c) => !nonCompareWindowNouns.has(c)) &&
+    !isCandleShape;
+  const comparePlusMetric =
+    hasCompare && (hasVolume || hasChange || hasOhlc || isCandleShape || isSummary);
+  if ((comparePlusMetric && !compareHasConcreteMetric) || multipleMetrics) {
+    // isSummary with an explicit clock time + shape word is still a
+    // candle-shape request, not a whole-session summary.
+    if (isCandleShape && extractTimes(text).length > 0) {
+      return ['candle_shape'];
+    }
+    // Whole-session summary + candle mention without a specific time is a
+    // session summary.
+    if (isSummary && isCandleShape && extractTimes(text).length === 0 &&
+        (d.concepts.has('session') || d.concepts.has('today') || d.concepts.has('day'))) {
+      return ['window_summary'];
+    }
+  }
+  if ((compareHasConcreteMetric && comparePlusMetric) || multipleMetrics) return undefined;
 
   // A bare comparison (no other metric) is still compound but only needs
   // window_compare; the compare capability can derive OHLC and volume.
@@ -1893,6 +1919,24 @@ export function preValidateSanitize(raw: Record<string, unknown>, text: string, 
       delete date.direction;
     } else if (date.kind === 'relative_trading') {
       delete date.value;
+    }
+  }
+
+  // Structural repair: some models place chart_action fields inside the
+  // contextReference object.  Lift those fields to the top level so the schema
+  // validates, while preserving the contextReference's valid source/mode/inherit.
+  const TOP_LEVEL_FIELDS = new Set([
+    'symbol', 'date', 'timeframeMinutes', 'seekTime', 'relativeSeekMinutes',
+    'playback', 'finalQuery', 'queryTime', 'analysisRequests', 'compare', 'previousSymbol',
+  ]);
+  const ctxRef = raw.contextReference as Record<string, unknown> | undefined;
+  if (ctxRef && typeof ctxRef === 'object' && !Array.isArray(ctxRef)) {
+    for (const [field, value] of Object.entries(ctxRef)) {
+      if (TOP_LEVEL_FIELDS.has(field) && !(field in raw)) {
+        agentTrace('llm intent sanitize', { reason: 'lift nested field from contextReference', field });
+        (raw as Record<string, unknown>)[field] = value;
+        delete ctxRef[field];
+      }
     }
   }
 

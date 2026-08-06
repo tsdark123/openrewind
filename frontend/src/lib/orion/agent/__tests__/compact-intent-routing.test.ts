@@ -169,7 +169,6 @@ describe('compact intent routing and execution', () => {
     expect(r.ok).toBe(true);
     expect(mockedOrionChat).toHaveBeenCalledTimes(1);
     expect(r.plan?.steps.map((s) => s.capability)).toEqual([
-      'session.resolve_symbol',
       'session.resolve_trading_date',
       'session.switch_symbol',
       'chart.set_timeframe',
@@ -205,7 +204,7 @@ describe('compact intent routing and execution', () => {
       setupReady: true,
     });
 
-    expect(r.route).toBe('llm-plan');
+    expect(r.route).toBe('deterministic');
     expect(r.result?.receipts.map((rc) => rc.capability)).toEqual(['playback.seek_relative', 'chart.get_current_candle']);
     expect(r.ok).toBe(true);
   });

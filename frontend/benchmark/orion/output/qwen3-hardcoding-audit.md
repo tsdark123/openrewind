@@ -23,7 +23,7 @@ count.
 | "Compare that with the last hour." | LLM |
 | "Do that analysis on NVDA." | LLM |
 | "Pause." | deterministic |
-| "Move the replay half an hour earlier." | LLM |
+| "Move the replay half an hour earlier." | deterministic |
 
 ## Detection rules
 

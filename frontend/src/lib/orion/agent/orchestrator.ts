@@ -24,6 +24,7 @@
 import type {
   AgentContext,
   AgentPlan,
+  AgentStep,
   AgentExecutionResult,
   AnalysisRequest,
   CancellationToken,
@@ -47,6 +48,7 @@ import {
   textRequestsContextReference,
   textRequestsSummary,
   textRequestsUnsupportedIndicator,
+  textRequestsCapabilityInquiry,
 } from './dimensions';
 import { SYMBOL_ALIASES } from '../symbolAliases';
 import { classifyOrionIntent } from '../router';
@@ -244,14 +246,18 @@ async function handleCanonicalRepeat(
     };
   }
 
+  const state = ctx.getState();
   const plan = compileChartActionIntent(resolution.intent, {
     anchorDate:
       resolution.anchorDate ||
-      ctx.getState().replayDate ||
+      state.replayDate ||
       new Date().toISOString().slice(0, 10),
     resolvedCandle: resolution.resolvedCandle,
     resolvedCompare: resolution.resolvedCompare,
-    stateSymbol: ctx.getState().symbol,
+    stateSymbol: state.symbol,
+    stateDate: state.replayDate,
+    stateTimeframe: state.timeframe,
+    availableTickers: ctx.availableTickers,
   });
 
   const validation = validateAgentPlan(plan);
@@ -729,12 +735,31 @@ export function sanitizeIntentGrounding(
     }
   }
 
-  if (resolved.finalQuery === 'compare_candles' && (anaphoric || textRequestsCandleQuery(text))) {
-    allowed.add('candleQuery');
-  }
-
   const extractedTimes = extractTimes(text).map(formatParsedTime);
   const trace: IntentSanitizationResult['trace'] = { kept: [], stripped: [], defaults: [] };
+
+  // Trust grounded model fields even when the compact dimension set did not
+  // request them.  This keeps correct candle/compare output from being stripped
+  // because separate lexical detectors disagree.
+  if (resolved.finalQuery === 'compare_candles' && resolved.compare) {
+    const sides = [resolved.compare.left, resolved.compare.right].filter(Boolean);
+    if (sides.every((s) => typeof s?.source === 'string')) {
+      allowed.add('candleQuery');
+    }
+  } else if (
+    resolved.finalQuery === 'candle_at_time' &&
+    resolved.queryTime !== undefined &&
+    extractedTimes.includes(resolved.queryTime) &&
+    /\b(?:candle|bar|price|value|worth|ohlc)\b/i.test(text)
+  ) {
+    allowed.add('candleQuery');
+    allowed.add('absoluteTime');
+  } else if (
+    resolved.finalQuery === 'current_candle' &&
+    /\b(?:candle|bar|price|value|worth|current|now|latest)\b/i.test(text)
+  ) {
+    allowed.add('candleQuery');
+  }
 
   // Work on a deep copy; contextReference is consumed by resolveContextReference.
   let sanitized = JSON.parse(JSON.stringify(resolved)) as ChartActionIntent;
@@ -786,11 +811,11 @@ export function sanitizeIntentGrounding(
     if (
       sanitized.date.kind === 'absolute' &&
       sanitized.date.value === state.replayDate &&
-      (willChangeSymbol || willRunNonSetup)
+      !willChangeSymbol &&
+      willRunNonSetup
     ) {
-      // The requested date already matches the active session and we are either
-      // switching to a different symbol or running a non-setup action; no resolve
-      // step is needed and keeping it would force a redundant switch.
+      // The requested date already matches the active session and the only
+      // remaining action is a non-setup analysis; no resolve/switch needed.
       delete sanitized.date;
       trace.defaults.push(`date:${state.replayDate}`);
     } else if (allowed.has('date')) {
@@ -799,14 +824,19 @@ export function sanitizeIntentGrounding(
       delete sanitized.date;
       trace.stripped.push(`date:${dateTrace}`);
     }
+  } else if (willChangeSymbol && state.replayDate) {
+    // A symbol switch with no date keeps the active session date so the new
+    // symbol loads the same trading session.
+    sanitized.date = { kind: 'absolute', value: state.replayDate };
+    trace.defaults.push(`date:${state.replayDate}`);
   }
 
   // Timeframe
   if (sanitized.timeframeMinutes !== undefined) {
     const tf = sanitized.timeframeMinutes;
-    if (tf === state.timeframe && willChangeSymbol) {
-      // Same timeframe as the active session while switching symbols: the new
-      // symbol's chart can use the current timeframe; do not emit a stale step.
+    if (tf === state.timeframe && !willChangeSymbol && !allowed.has('timeframe')) {
+      // Same timeframe on the same symbol is redundant when the request did not
+      // explicitly ground it.
       delete sanitized.timeframeMinutes;
       trace.defaults.push(`timeframe:${tf}m`);
     } else if (allowed.has('timeframe')) {
@@ -815,6 +845,10 @@ export function sanitizeIntentGrounding(
       delete sanitized.timeframeMinutes;
       trace.stripped.push(`timeframe:${tf}m`);
     }
+  } else if (willChangeSymbol && state.timeframe) {
+    // A symbol switch with no timeframe keeps the active timeframe.
+    sanitized.timeframeMinutes = state.timeframe;
+    trace.defaults.push(`timeframe:${state.timeframe}m`);
   }
 
   // Absolute time
@@ -1136,6 +1170,18 @@ async function routeMessage(
   // deterministic chart parser because it has no access to execution context.
   const anaphoric = looksLikeContextReference(text, ctx);
 
+  // Capability-inquiry follow-ups ("What can we do with that?") are not
+  // concrete analysis requests and should not produce an unsolicited chart action.
+  if (textRequestsCapabilityInquiry(text)) {
+    agentTrace('route', 'unsupported', { reason: 'capability inquiry' });
+    return {
+      ok: false,
+      message: 'I can answer candle, window, and comparison questions, but I cannot list or explore capabilities.',
+      wasChat: false,
+      route: 'unsupported',
+    };
+  }
+
   // 3. Conversation heuristics / classifier.
   let routeChat = isConversation(text);
   let classification = classifyOrionIntent(text);
@@ -1274,9 +1320,13 @@ async function routeMessage(
       agentTrace('route', 'compound-analysis-start', { text });
       const sanitization = sanitizeIntentGrounding(grounded, text, undefined, ctx);
       if (sanitization.ok) {
+        const state = ctx.getState();
         const plan = compileChartActionIntent(sanitization.intent!, {
-          anchorDate: ctx.getState().replayDate || new Date().toISOString().slice(0, 10),
-          stateSymbol: ctx.getState().symbol,
+          anchorDate: state.replayDate || new Date().toISOString().slice(0, 10),
+          stateSymbol: state.symbol,
+          stateDate: state.replayDate,
+          stateTimeframe: state.timeframe,
+          availableTickers: ctx.availableTickers,
         });
         const validation = validateAgentPlan(plan);
         if (validation.ok) {
@@ -1441,14 +1491,18 @@ async function routeMessage(
       }
 
       const sanitizedIntent = sanitization.intent!;
+      const state = ctx.getState();
       const plan = compileChartActionIntent(sanitizedIntent, {
         anchorDate:
           resolution.anchorDate ||
-          ctx.getState().replayDate ||
+          state.replayDate ||
           new Date().toISOString().slice(0, 10),
         resolvedCandle: resolution.resolvedCandle,
         resolvedCompare: resolution.resolvedCompare,
-        stateSymbol: ctx.getState().symbol,
+        stateSymbol: state.symbol,
+        stateDate: state.replayDate,
+        stateTimeframe: state.timeframe,
+        availableTickers: ctx.availableTickers,
       });
       const validation = validateAgentPlan(plan);
       if (!validation.ok) {
@@ -1520,6 +1574,45 @@ async function routeMessage(
         candleRequested.has('absoluteTime') || cmd.startTime !== undefined || cmd.endTime !== undefined;
       const isCandleShapeContext =
         textRequestsCandleShape(text) || candleRequested.has('candleQuery');
+
+      // Whole-session summary fallback: a clarification for a summary request
+      // should still answer with the session summary, and a symbol override must
+      // be honored before the analysis runs.
+      if (state.sessionActive && textRequestsSummary(text) && !isCandleShapeContext) {
+        const steps: AgentStep[] = [];
+        if (cmd.symbol && cmd.symbol !== state.symbol) {
+          steps.push({
+            id: 'step-switch',
+            capability: 'session.switch_symbol',
+            args: { symbol: cmd.symbol, date: state.replayDate },
+            required: true,
+          });
+        }
+        steps.push({
+          id: 'step-summary',
+          capability: 'analysis.window_summary',
+          args: { window: { kind: 'whole_session' } },
+          required: false,
+          ...(steps.length > 0 ? { dependsOn: [steps[steps.length - 1].id] } : {}),
+        });
+        const plan: AgentPlan = {
+          id: makePlanId(),
+          summary: cmd.symbol && cmd.symbol !== state.symbol ? `Switch to ${cmd.symbol} · session summary` : 'Session summary',
+          kind: steps.length > 1 ? 'mixed' : 'query',
+          steps,
+          meta: { planner: 'clarification-summary-fallback' },
+        };
+        const result = await executeAgentPlan(plan, ctx, token);
+        return {
+          ok: result.ok,
+          message: composeResponse(result, ctx),
+          wasChat: false,
+          route: 'llm-plan',
+          plan,
+          result,
+        };
+      }
+
       if (state.sessionActive && isCandleShapeContext) {
         if (!hasExplicitTime) {
           if (looksLikeTimeAttempt(text) && extractTimes(text).length === 0) {

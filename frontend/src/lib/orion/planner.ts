@@ -513,16 +513,51 @@ function extractSpeed(text: string): number | undefined {
   return undefined;
 }
 
+const SPOKEN_FRACTIONS: Record<string, number> = {
+  half: 0.5,
+  quarter: 0.25,
+};
+
+function minutesFromUnit(n: number, unit: string): number {
+  const u = unit.toLowerCase();
+  if (u.startsWith('hour') || u.startsWith('hr')) return Math.round(n * 60);
+  if (u.startsWith('min')) return Math.max(1, Math.round(n));
+  return Math.round(n);
+}
+
 function extractRelativeMinutes(text: string): number | undefined {
-  const re = /(?:another\s+)?(\d+(?:\.\d+)?)\s*(?:more\s+|extra\s+)?(?:min|minute|hour|hr)s?\b/gi;
   const t = text.toLowerCase();
+
+  // Spoken fractional durations: "half an hour", "quarter of an hour",
+  // "a quarter hour", "half a minute".  Guard against clock expressions
+  // such as "quarter past eleven" and "half past twelve".
+  const fractionRe = /(?:^|\b)(half|quarter)(?:\s+(?:of\s+(?:an?\s+)?|an?\s+))?(hour|hr|minute|min)s?(?:\s+(?:ago|earlier|later|before|after))?\b/gi;
+  for (const m of t.matchAll(fractionRe)) {
+    const start = m.index ?? 0;
+    if (isNamedWindowMinuteMatch(t, start)) continue;
+    // Avoid "quarter/half past/to X" clock expressions.
+    const before = t.slice(Math.max(0, start - 10), start);
+    if (/\b(?:quarter|half)\s+(?:past|to)\s+$/i.test(before)) continue;
+    const frac = SPOKEN_FRACTIONS[m[1].toLowerCase()];
+    if (frac === undefined) continue;
+    return Math.max(1, minutesFromUnit(frac, m[2]));
+  }
+
+  // Numeric forms and number words: "30 minutes", "1 hour", "half an hour",
+  // "one hour earlier".
+  const numberWords = 'one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|thirty|sixty';
+  const re = new RegExp(`(?:another\\s+)?(\\d+(?:\\.\\d+)?|${numberWords})\\s*(?:more\\s+|extra\\s+)?(min|minute|hour|hr)s?\\b`, 'gi');
   for (const m of t.matchAll(re)) {
     const start = m.index ?? 0;
     if (isNamedWindowMinuteMatch(t, start)) continue;
-    const n = parseFloat(m[1]);
+    const n = parseFloat(m[1]) || numberWord(m[1]) || 0;
     const unit = m[2]?.toLowerCase() || '';
-    if (Number.isNaN(n) || n <= 0) continue;
-    if (unit.startsWith('hour') || unit.startsWith('hr')) return Math.round(n * 60);
+    if (n <= 0) continue;
+    // Spoken hour forms (e.g. "one hour") are durations, not clock times;
+    // "one hour" without a direction is ambiguous, but "one hour earlier/later"
+    // is clearly a relative seek.
+    if (unit && /^(hour|hr)/.test(unit)) return Math.max(1, Math.round(n * 60));
+    if (unit && /^min/.test(unit)) return Math.max(1, Math.round(n));
     return Math.round(n);
   }
   return undefined;
@@ -615,10 +650,18 @@ export function extractTimeframe(text: string): number | undefined {
     if (/^\s*(ago|back|before|later|forward|ahead|from\s+now)\b/.test(after)) continue;
     if (isNamedWindowMinuteMatch(t, start)) continue;
 
-    // Skip when the number is the minute part of an HH:MM clock expression
-    // (e.g. "11:30 candle" should not be read as a 30-minute timeframe).
-    const beforeNumber = t.slice(Math.max(0, start - 5), start);
-    if (/\d{1,2}:\s*$/.test(beforeNumber)) continue;
+    // Skip when the number is the minute part of a clock expression
+    // (e.g. "11:30 candle" or "eleven thirty candle" should not be read
+    // as a 30-minute timeframe).  A minute word immediately preceded by an
+    // hour word/digit with no explicit unit is a spoken clock time, not a
+    // candle aggregation setting.
+    const beforeNumber = t.slice(Math.max(0, start - 15), start);
+    const hourWords = 'one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|noon|midnight';
+    const isSpokenMinute =
+      !rawUnit &&
+      /\b(?:fifteen|twenty|twenty[- ]?five|thirty|forty|fourty|forty[- ]?five|fifty)\b/.test(rawN) &&
+      new RegExp(`(?:^|\\s)(?:${hourWords}|\\d{1,2})\\s*$`, 'i').test(beforeNumber);
+    if (/\d{1,2}:\s*$/.test(beforeNumber) || isSpokenMinute) continue;
 
     const n = parseTimeframeNumber(rawN);
     if (n === undefined) continue;
@@ -641,8 +684,8 @@ function detectDirection(text: string, relative?: number): 'forward' | 'backward
   if (/(?:fast[- ]?forward|forward|ahead|skip ahead)/.test(t)) return 'forward';
   if (/(?:rewind|reverse|go back|back up|backward|back\b)/.test(t)) return 'backward';
   if (relative !== undefined) {
-    if (/\bback(?:ward)?\b/.test(t)) return 'backward';
-    if (/\b(?:forward|ahead)\b/.test(t)) return 'forward';
+    if (/\b(?:back(?:ward)?|earlier)\b/.test(t)) return 'backward';
+    if (/\b(?:forward|ahead|later)\b/.test(t)) return 'forward';
   }
   return undefined;
 }
@@ -708,6 +751,8 @@ function detectIntent(text: string, e: {
     }
 
     if (/(?:rewind|reverse|go back|back up|skip back)\b/i.test(t)) return 'rewind';
+    if (e.direction === 'backward') return 'rewind';
+    if (e.direction === 'forward') return 'fast_forward';
     if (/\b(?:play|run)\b/i.test(t)) return e.times.length > 0 || e.relative !== undefined ? 'fast_forward' : 'play';
     // A switch action requires a grounded symbol or an explicit switch/change
     // verb.  A bare date ("yesterday", "today") or non-switch verb like "show"

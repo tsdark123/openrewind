@@ -242,13 +242,9 @@ describe('verb-grounding regression', () => {
     expect(r.ok).toBe(true);
     expect(r.message).toMatch(/AAPL/);
 
-    const resolveStep = findStep(r.plan, 'session.resolve_symbol');
-    expect(resolveStep).toBeDefined();
-    expect(resolveStep?.args.name).toBe('AAPL');
-
     const switchStep = findStep(r.plan, 'session.switch_symbol');
     expect(switchStep).toBeDefined();
-    expect(switchStep?.args.symbol).toEqual({ $ref: resolveStep?.id, path: 'symbol' });
+    expect(switchStep?.args.symbol).toBe('AAPL');
 
     const summaryStep = findStep(r.plan, 'analysis.window_summary');
     expect(summaryStep).toBeDefined();
@@ -304,13 +300,9 @@ describe('verb-grounding regression', () => {
     expect(r.ok).toBe(true);
     expect(r.message).toMatch(/AAPL/);
 
-    const resolveStep = findStep(r.plan, 'session.resolve_symbol');
-    expect(resolveStep).toBeDefined();
-    expect(resolveStep?.args.name).toBe('AAPL');
-
     const switchStep = findStep(r.plan, 'session.switch_symbol');
     expect(switchStep).toBeDefined();
-    expect(switchStep?.args.symbol).toEqual({ $ref: resolveStep?.id, path: 'symbol' });
+    expect(switchStep?.args.symbol).toBe('AAPL');
 
     const summaryStep = findStep(r.plan, 'analysis.window_summary');
     expect(summaryStep).toBeDefined();
@@ -335,13 +327,9 @@ describe('verb-grounding regression', () => {
     expect(r.route).toBe('deterministic');
     expect(r.ok).toBe(true);
 
-    const resolveStep = findStep(r.plan, 'session.resolve_symbol');
-    expect(resolveStep).toBeDefined();
-    expect(resolveStep?.args.name).toBe('NVDA');
-
     const switchStep = findStep(r.plan, 'session.switch_symbol');
     expect(switchStep).toBeDefined();
-    expect(switchStep?.args.symbol).toEqual({ $ref: resolveStep?.id, path: 'symbol' });
+    expect(switchStep?.args.symbol).toBe('NVDA');
 
     const summaryStep = findStep(r.plan, 'analysis.window_summary');
     expect(summaryStep).toBeDefined();
@@ -365,13 +353,9 @@ describe('verb-grounding regression', () => {
     expect(r.route).toBe('deterministic');
     expect(r.ok).toBe(true);
 
-    const resolveStep = findStep(r.plan, 'session.resolve_symbol');
-    expect(resolveStep).toBeDefined();
-    expect(resolveStep?.args.name).toBe('AAPL');
-
     const switchStep = findStep(r.plan, 'session.switch_symbol');
     expect(switchStep).toBeDefined();
-    expect(switchStep?.args.symbol).toEqual({ $ref: resolveStep?.id, path: 'symbol' });
+    expect(switchStep?.args.symbol).toBe('AAPL');
 
     const ohlcStep = findStep(r.plan, 'analysis.window_ohlc');
     expect(ohlcStep).toBeDefined();
@@ -395,13 +379,13 @@ describe('verb-grounding regression', () => {
     expect(r.route).toBe('deterministic');
     expect(r.ok).toBe(true);
 
-    const resolveStep = findStep(r.plan, 'session.resolve_symbol');
-    expect(resolveStep).toBeDefined();
-    expect(resolveStep?.args.name).toBe('LLY');
+    const resolveDateStep = findStep(r.plan, 'session.resolve_trading_date');
+    expect(resolveDateStep).toBeDefined();
+    expect(resolveDateStep?.args.symbol).toBe('LLY');
 
     const switchStep = findStep(r.plan, 'session.switch_symbol');
     expect(switchStep).toBeDefined();
-    expect(switchStep?.args.symbol).toEqual({ $ref: resolveStep?.id, path: 'symbol' });
+    expect(switchStep?.args.symbol).toBe('LLY');
 
     const summaryStep = findStep(r.plan, 'analysis.window_summary');
     expect(summaryStep).toBeDefined();

@@ -33,6 +33,12 @@ export interface CompileOptions {
   resolvedCompare?: ResolvedCompare;
   /** Current session symbol, used as a fallback when a date is supplied with no symbol. */
   stateSymbol?: string;
+  /** Current session date, used to skip redundant resolve_trading_date. */
+  stateDate?: string;
+  /** Current session timeframe, used to skip redundant chart.set_timeframe. */
+  stateTimeframe?: number;
+  /** Tickers that do not need session.resolve_symbol. */
+  availableTickers?: string[];
 }
 
 export interface ContextResolutionSuccess {
@@ -862,77 +868,108 @@ export function compileChartActionIntent(
     });
   }
 
-  // 2. Resolve symbol when present (and not previous).
+  // 2. Resolve symbol when present (and not previous).  An exact ticker that is
+  // already in the available list can switch directly.
   let resolveSymbolId: string | undefined;
+  let switchSymbolValue: string | Record<string, unknown> | undefined;
   if (intent.symbol) {
-    resolveSymbolId = 'step-resolve-symbol';
-    pushStep({
-      id: resolveSymbolId,
-      capability: 'session.resolve_symbol',
-      args: { name: intent.symbol },
-      required: true,
-    });
-  }
-
-  // 3. Resolve trading date when present.
-  if (intent.date) {
-    if (intent.previousSymbol) {
-      throw new Error('compileChartActionIntent: date cannot be combined with previousSymbol.');
-    }
-    if (!resolveSymbolId) {
-      if (!options.stateSymbol) {
-        throw new Error('compileChartActionIntent: date requires a symbol.');
-      }
+    const available = (options.availableTickers ?? []).map((t) => t.toUpperCase());
+    if (available.includes(intent.symbol.toUpperCase())) {
+      switchSymbolValue = intent.symbol;
+    } else {
       resolveSymbolId = 'step-resolve-symbol';
       pushStep({
         id: resolveSymbolId,
         capability: 'session.resolve_symbol',
-        args: { name: options.stateSymbol },
+        args: { name: intent.symbol },
         required: true,
       });
+      switchSymbolValue = argRef(resolveSymbolId, 'symbol');
     }
-    const resolveDateId = 'step-resolve-date';
-    const dateStep: AgentStep = {
-      id: resolveDateId,
-      capability: 'session.resolve_trading_date',
-      args: {
-        symbol: argRef(resolveSymbolId, 'symbol'),
-        input:
-          intent.date.kind === 'absolute'
-            ? { kind: 'explicit', date: intent.date.value }
-            : intent.date.kind === 'relative_calendar'
-              ? {
-                  kind: 'relative_calendar',
-                  days: intent.date.count ?? 1,
-                  direction: intent.date.direction ?? 'backward',
-                  from: anchorDate,
-                }
-              : {
-                  kind: 'relative_trading',
-                  sessions: intent.date.count ?? 1,
-                  direction: intent.date.direction ?? 'backward',
-                  from: anchorDate,
-                },
-      },
-      required: true,
-      dependsOn: [resolveSymbolId],
-    };
-    steps.push(dateStep);
-    lastStepId = resolveDateId;
+  }
 
-    // 4. Switch symbol using resolved symbol and date.
+  // 3. Resolve trading date when present, unless the date is an explicit
+  // absolute date that matches the active session (resolve would be redundant).
+  let resolveDateId: string | undefined;
+  if (intent.date) {
+    if (intent.previousSymbol) {
+      throw new Error('compileChartActionIntent: date cannot be combined with previousSymbol.');
+    }
+    if (!switchSymbolValue && !options.stateSymbol) {
+      throw new Error('compileChartActionIntent: date requires a symbol.');
+    }
+    const symbolForDate = switchSymbolValue ?? options.stateSymbol;
+    const isKnownDate =
+      intent.date.kind === 'absolute' &&
+      intent.date.value === options.stateDate;
+
+    if (!isKnownDate) {
+      resolveDateId = 'step-resolve-date';
+      const dateStep: AgentStep = {
+        id: resolveDateId,
+        capability: 'session.resolve_trading_date',
+        args: {
+          symbol: symbolForDate,
+          input:
+            intent.date.kind === 'absolute'
+              ? { kind: 'explicit', date: intent.date.value }
+              : intent.date.kind === 'relative_calendar'
+                ? {
+                    kind: 'relative_calendar',
+                    days: intent.date.count ?? 1,
+                    direction: intent.date.direction ?? 'backward',
+                    from: anchorDate,
+                  }
+                : {
+                    kind: 'relative_trading',
+                    sessions: intent.date.count ?? 1,
+                    direction: intent.date.direction ?? 'backward',
+                    from: anchorDate,
+                  },
+        },
+        required: true,
+        ...(resolveSymbolId ? { dependsOn: [resolveSymbolId] } : {}),
+      };
+      steps.push(dateStep);
+      lastStepId = resolveDateId;
+    }
+
+    // 4. Switch symbol using the symbol and the explicit date (when known, the
+    // value is passed directly to avoid a redundant resolve step).
+    if (switchSymbolValue) {
+      const switchArgs: Record<string, unknown> = { symbol: switchSymbolValue };
+      if (intent.date.kind === 'absolute' && intent.date.value) {
+        switchArgs.date = intent.date.value;
+      } else if (resolveDateId) {
+        switchArgs.date = argRef(resolveDateId, 'date');
+      }
+      pushStep({
+        id: 'step-switch',
+        capability: 'session.switch_symbol',
+        args: switchArgs,
+        required: true,
+        dependsOn: resolveDateId ? [resolveDateId] : resolveSymbolId ? [resolveSymbolId] : undefined,
+      });
+    } else if (resolveSymbolId) {
+      // A resolved symbol but no date still needs a switch.
+      pushStep({
+        id: 'step-switch',
+        capability: 'session.switch_symbol',
+        args: { symbol: argRef(resolveSymbolId, 'symbol') },
+        required: true,
+        dependsOn: [resolveSymbolId],
+      });
+    }
+  } else if (switchSymbolValue) {
+    // 4a. Switch to an already-known symbol with no date.
     pushStep({
       id: 'step-switch',
       capability: 'session.switch_symbol',
-      args: {
-        symbol: argRef(resolveSymbolId, 'symbol'),
-        date: argRef(resolveDateId, 'date'),
-      },
+      args: { symbol: switchSymbolValue },
       required: true,
-      dependsOn: [resolveDateId],
     });
   } else if (resolveSymbolId) {
-    // 4a. Switch to the resolved symbol with no date.
+    // 4b. Switch to the resolved symbol with no date.
     pushStep({
       id: 'step-switch',
       capability: 'session.switch_symbol',

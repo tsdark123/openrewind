@@ -303,7 +303,6 @@ describe('semantic grounding', () => {
     expect(r.route).toBe('llm-plan');
     expect(r.ok).toBe(true);
     expect(r.plan?.steps.map((s) => s.capability)).toEqual([
-      'session.resolve_symbol',
       'session.resolve_trading_date',
       'session.switch_symbol',
       'chart.set_timeframe',
