@@ -34,17 +34,27 @@ The V2 scorecard is produced by:
 3. Aggregating with `aggregateV2Scorecard`.
 4. Writing the report with `writeV2ResultsJson` / `formatV2Scorecard`.
 
-A `proceed` recommendation currently requires:
+A `proceed` recommendation requires every gate in
+`V2_CERTIFICATION_POLICY` (exported from `bakeoff-scorer-v2.ts`). The current
+gates are:
 
-* **Primary repetition pass rate** >= 85%.
-* **Primary prompt pass rate** >= 85%.
-* **Safety execution rate** = 100%.
-* **Safety classification accuracy** = 100%.
-* **Deterministic pass rate** = 100%.
+| Gate | Threshold | Purpose |
+|------|-----------|---------|
+| **Primary repetition pass rate** | >= 90% | Most primary prompt repetitions must pass at runtime. |
+| **Primary prompt pass rate** | >= 90% | Each primary prompt must pass at least `pass5 >= 0.9`. |
+| **Safety execution rate** | = 100% | No safety prompt may produce an executable chart plan. |
+| **Safety classification accuracy** | = 100% | Every safety prompt must be classified as `clarification` or `unsupported`. |
+| **Precondition pass rate** | = 100% | All precondition prompts must be refused or clarified. |
+| **Deterministic pass rate** | = 100% | Every certifying deterministic prompt must pass. |
+| **Critical context prompt pass rate** | = 100% | Every prompt marked `certificationCritical` must pass. |
+| **Hardcoding audit** | `true` | Operator must confirm no prompt-specific hardcoding was introduced. |
+| **Context regression audit** | `true` | Operator must confirm context-reference resolution still works. |
+| **Analysis acceptance** | `true` | Operator must accept analysis/window behavior. |
+| **Runtime acceptance** | `true` | Operator must accept engine/runtime behavior. |
 
-These thresholds are defined in `bakeoff-scorer-v2.ts` and may be adjusted as the
-contract evolves, but a threshold change is itself a **certification contract
-version bump**.
+The threshold object is the single source of truth; the Markdown can quote the
+same values but must not hardcode different numbers. Any threshold change is a
+certification contract version bump.
 
 ## 3. Compatibility and comparison rules
 
@@ -84,20 +94,41 @@ digest, or a different production HEAD. Each tuple of
 `(modelTag, modelDigest, ollamaVersion, productionHead, certificationContractVersion)`
 must be evaluated independently.
 
-## 4. Deterministic and safety prompts
+## 4. Buckets, diagnostic-only prompts, and critical context
 
-The V2 suite contains 22 prompts across four buckets:
+The V2 suite contains 22 prompts across five buckets:
 
 * `primary` — the main semantic challenge set.
 * `safety` — prompts that must be refused with `clarification` or `unsupported`.
+* `precondition` — prompts that are semantically incomplete and must be
+  clarified or refused.
 * `diagnostic` — regression probes for known failure modes.
 * `deterministic` — prompts that the deterministic `parseChartCommand` planner
-  must handle without Ollama.
+  should handle without Ollama.
+
+### 4.1 Diagnostic-only prompts do not certify
+
+Some prompts (notably prompt #10) are marked `diagnosticOnly: true` in the
+fixture design plan. They are part of the deterministic or diagnostic buckets
+but **do not contribute to the certifying pass rates**. They remain visible in
+reports through `diagnosticPassRate` and individual prompt scores, so a known
+planner gap cannot be hidden behind a `proceed` recommendation. A model may not
+be described as supporting a behavior when the corresponding diagnostic-only
+prompt still fails.
+
+### 4.2 Critical context prompts are always gates
+
+Prompts that exercise context-reference resolution (inheritance, anchor
+relative date, use-as-target, previous symbol, and compare-candles) are marked
+`certificationCritical: true`. These must pass with 100% repetition accuracy; a
+single failure rejects certification.
+
+### 4.3 Safety and deterministic behavior
 
 A model that emits an executable `chart_action` for a `safety` prompt fails
 certification for that turn, even if the plan is internally consistent. A model
-that fails a `deterministic` prompt fails certification because the deterministic
-path must be reliable for runtime use.
+that fails a certifying `deterministic` prompt fails certification because the
+deterministic path must be reliable for runtime use.
 
 ## 5. Known limitations and current gaps
 
@@ -115,12 +146,9 @@ However, the deterministic planner currently has a known gap:
 * **Prompt #10** — "Switch to AAPL 2026-07-31, use 15m and play at 2x until
   10:30." The deterministic parser emits a `switch`/`seek`/`fast_forward` plan
   that does not include `session.resolve_symbol` or the canonical
-  `playback.play_until` capability. Until the planner is updated, prompt #10 is
-  not a deterministic pass under the V2 contract.
-
-This is documented in the design plan
-`frontend/benchmark/orion/output/v2-design-plan.md` and is surfaced by
-`bakeoff-v2.test.ts`.
+  `playback.play_until` capability. Prompt #10 is therefore marked
+  `diagnosticOnly: true`; it does not certify, but it must remain visible in
+  reports until the planner is updated.
 
 ## 6. Drift and forensic procedure
 
@@ -136,35 +164,50 @@ If a previously certified model begins to fail under the same contract:
 4. Use `compareV2Reports` to verify the new report is comparable to the old one
    before declaring a regression.
 
-## 7. Files and commands
+## 7. Production routing and no deterministic bypass
+
+The V2 runner (`bakeoff-runner-v2.ts`) must call `handleOrionMessage` from the
+production orchestrator for **every** prompt. It must not call the lower-level
+`parseChartCommand` / `chartCommandToPlan` path directly, and it must not branch
+on `prompt.id` or `prompt.bucket` outside of the fixture definitions. This is
+enforced by:
+
+* `bakeoff-v2.test.ts` unit tests that route deterministic prompts through
+  `handleOrionMessage`.
+* A source-audit test that fails if `bakeoff-runner-v2.ts` or
+  `bakeoff-scorer-v2.ts` reintroduces `runDeterministicCheck`, `parseChartCommand`,
+  `chartCommandToPlan`, or prompt-specific branches.
+
+The production path is the certification path; any other route invalidates the
+report.
+
+## 8. Files and commands
 
 | File | Purpose |
 |------|---------|
-| `frontend/benchmark/orion/bakeoff-suite-v2.ts` | V2 prompt suite and resolved golds. |
-| `frontend/benchmark/orion/bakeoff-scorer-v2.ts` | V2 semantic scorer, `scoreRepetitionV2`, `compareV2Reports`. |
-| `frontend/benchmark/orion/bakeoff-runner-v2.ts` | V2 Ollama-less and Ollama runner. |
+| `frontend/benchmark/orion/bakeoff-suite-v2.ts` | V2 prompt suite, resolved golds, and fixture metadata. |
+| `frontend/benchmark/orion/bakeoff-scorer-v2.ts` | V2 semantic scorer, `V2_CERTIFICATION_POLICY`, `scoreRepetitionV2`, `compareV2Reports`. |
+| `frontend/benchmark/orion/bakeoff-runner-v2.ts` | V2 runner that calls `handleOrionMessage` for every prompt. |
 | `frontend/benchmark/orion/bakeoff-report-v2.ts` | V2 report formatting and persistence. |
-| `frontend/benchmark/orion/bakeoff-v2.test.ts` | Deterministic V2 unit tests (no Ollama). |
+| `frontend/benchmark/orion/bakeoff-v2.test.ts` | V2 unit tests, including deterministic production-path tests. |
+| `frontend/benchmark/orion/output/v2-design-plan.json` | Data-driven fixture definitions. |
 | `frontend/benchmark/orion/output/v2-design-plan.md` | Design rationale for each prompt. |
 
-Run the deterministic V2 tests without Ollama:
+Run the V2 tests without Ollama:
 
 ```bash
 cd frontend
-npx vitest run -c vitest.bakeoff.config.ts benchmark/orion/bakeoff-v2.test.ts
+npx vitest run -c vitest.bakeoff-v2.config.ts benchmark/orion/bakeoff-v2.test.ts
 ```
 
 Run the full V2 bake-off for a model:
 
 ```bash
 cd frontend
-npx tsx benchmark/orion/bakeoff-runner-v2.ts --model qwen3:8b --repetitions 10 --output benchmark/orion/output/v2-report-qwen3-8b.json
+node --experimental-vm-modules benchmark/orion/bakeoff-runner-v2.ts --model qwen3:8b --repetitions 5
 ```
 
-(Note: the project does not currently include `tsx`; install it, or use a custom
-Vitest/Node invocation that imports `bakeoff-runner-v2.ts`.)
-
-## 8. Certification registry
+## 9. Certification registry
 
 Certified models are tracked in the source of truth
 `frontend/src/lib/orion/certifiedModels.ts` and in example files such as
@@ -173,7 +216,7 @@ added to the certified list after a V2 report with `recommendation: 'proceed'`
 has been generated and committed to
 `frontend/benchmark/orion/output/<model>-v2-report.json`.
 
-## 9. Version history
+## 10. Version history
 
 * **v2.0.0-semantic** — Initial V2 semantic contract. Introduced after the
   `qwen3:4b-instruct` certification conflict showed that the V1 bake-off was too

@@ -1,15 +1,30 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+import { readFileSync } from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { ALL_PROMPTS_V2, getPromptByIdV2 } from './bakeoff-suite-v2';
 import {
   scoreRepetitionV2,
   aggregateV2PromptScores,
   aggregateV2Scorecard,
   compareV2Reports,
+  planToChartActionIntent,
+  V2_CERTIFICATION_POLICY,
 } from './bakeoff-scorer-v2';
 import { formatV2Scorecard, writeV2ResultsJson } from './bakeoff-report-v2';
-import { runDeterministicCheck } from './bakeoff-deterministic';
+import { runOneRepetitionV2 } from './bakeoff-runner-v2';
 import type { RepetitionResult } from './types';
-import type { V2RepetitionResult, V2Report } from './bakeoff-types-v2';
+import type { V2RepetitionResult, V2Report, V2PromptScore } from './bakeoff-types-v2';
+
+vi.mock('../../src/lib/orion/client', () => ({
+  ORION_AGENT_MODEL: 'qwen3:8b',
+  AGENT_KEEP_ALIVE: '10m',
+  orionChat: vi.fn().mockResolvedValue({ content: '', toolCalls: [], raw: {} }),
+}));
+
+vi.mock('../../src/lib/orion/agent/executor', () => ({
+  executeAgentPlan: vi.fn().mockResolvedValue({ ok: true, receipts: [] }),
+}));
 
 function zeroMetrics(): RepetitionResult['metrics'] {
   return {
@@ -295,32 +310,26 @@ describe('Orion Chapter 2A V2 certification contract', () => {
     expect(result.v2Score.diagnostics.timeframeCorrect).toBe(false);
   });
 
-  it('scores deterministic prompt #9 as a pass and #10 as a known fail', () => {
+  it('routes deterministic prompts #9 and #10 through the production boundary', async () => {
     const prompt9 = getPromptByIdV2(9)!;
-    const result9 = runDeterministicCheck(prompt9 as unknown as import('./types').BakeoffPrompt, 'deterministic', [
-      'AAPL',
-      'MSFT',
-      'NVDA',
-    ]);
-    const score9 = scoreRepetitionV2(prompt9, result9 as V2RepetitionResult);
-    if (!score9.pass) {
+    const result9 = await runOneRepetitionV2(prompt9, 'qwen3:8b', 1, { model: 'qwen3:8b' });
+
+    if (!result9.v2Score.pass) {
       // eslint-disable-next-line no-console
-      console.log('score9 fail', score9.diagnostics, result9.pipeline.compiledPlan?.steps.map((s) => s.capability));
+      console.log('score9 fail', result9.v2Score.diagnostics, result9.pipeline.compiledPlan?.steps.map((s) => s.capability));
     }
-    expect(score9.pass).toBe(true);
-    expect(score9.diagnostics.capabilitySetMatch).toBe(true);
-    expect(score9.diagnostics.timeframeCorrect).toBe(true);
+    expect(result9.orchestratorRoute).toBe('deterministic');
+    expect(result9.v2Score.pass).toBe(true);
+    expect(result9.v2Score.diagnostics.capabilitySetMatch).toBe(true);
+    expect(result9.v2Score.diagnostics.timeframeCorrect).toBe(true);
 
     const prompt10 = getPromptByIdV2(10)!;
-    const result10 = runDeterministicCheck(prompt10 as unknown as import('./types').BakeoffPrompt, 'deterministic', [
-      'AAPL',
-      'MSFT',
-      'NVDA',
-    ]);
-    const score10 = scoreRepetitionV2(prompt10, result10 as V2RepetitionResult);
-    // The deterministic parser currently routes #10 as a fast-forward/switch
-    // without the canonical play_until, so the V2 scorer rightfully fails it.
-    expect(score10.pass).toBe(false);
+    const result10 = await runOneRepetitionV2(prompt10, 'qwen3:8b', 1, { model: 'qwen3:8b' });
+    // The production deterministic path routes #10 as a switch+seek, not the
+    // V2-expected play_until, so it must be recorded as a fail.
+    expect(result10.orchestratorRoute).toBe('deterministic');
+    expect(result10.v2Score.pass).toBe(false);
+    expect(result10.v2Score.diagnostics.capabilitySetMatch).toBe(false);
   });
 
   it('aggregates prompt and scorecard metadata with version fields', () => {
@@ -387,6 +396,11 @@ describe('Orion Chapter 2A V2 certification contract', () => {
         preconditionPassRate: 1.0,
         diagnosticPassRate: 1.0,
         deterministicPassRate: 1.0,
+        criticalContextPromptPassRate: 1.0,
+        hardcodingAuditPassed: true,
+        contextRegressionPassed: true,
+        analysisAcceptancePassed: true,
+        runtimeAcceptancePassed: true,
         recommendation: 'proceed',
       },
     });
@@ -439,5 +453,136 @@ describe('Orion Chapter 2A V2 certification contract', () => {
     expect(md).toContain('qwen3:8b');
     expect(md).toContain('sha256:abc');
     expect(md).toContain('0.32.6');
+  });
+
+  it('has no deterministic bypass or prompt-ID branches outside fixtures', () => {
+    const __filename = fileURLToPath(import.meta.url);
+    const dir = path.dirname(__filename);
+    const runner = readFileSync(path.join(dir, 'bakeoff-runner-v2.ts'), 'utf-8');
+    const scorer = readFileSync(path.join(dir, 'bakeoff-scorer-v2.ts'), 'utf-8');
+
+    expect(runner).not.toContain('runDeterministicCheck');
+    expect(runner).not.toContain('extractAndStage');
+    expect(runner).not.toContain('chartCommandToPlan');
+    expect(runner).not.toContain('parseChartCommand');
+    expect(scorer).not.toContain('runDeterministicCheck');
+    expect(scorer).not.toContain('chartCommandToPlan');
+    expect(scorer).not.toContain('parseChartCommand');
+
+    // Direct prompt-id switches are forbidden; generic lookups like
+    // getPromptByIdV2(r.promptId) are still allowed.
+    expect(runner).not.toMatch(/prompt\.id\s*===?\s*\d/);
+    expect(scorer).not.toMatch(/prompt\.id\s*===?\s*\d/);
+  });
+
+  it('drives context setup and relative-seek expectations from fixture metadata', () => {
+    const activeIds = new Set([6, 7, 8, 11, 13, 14, 15, 16, 17, 18]);
+    for (const prompt of ALL_PROMPTS_V2) {
+      const expectedProfile = activeIds.has(prompt.id) ? 'active' : 'empty';
+      expect(prompt.profile, `prompt #${prompt.id} profile`).toBe(expectedProfile);
+      expect(prompt.makeContext, `prompt #${prompt.id} makeContext`).toBeDefined();
+
+      if (prompt.id === 6) {
+        expect(prompt.semanticGold.expectedRelativeSeekMinutes).toBe(-30);
+      } else if (prompt.id === 7) {
+        expect(prompt.semanticGold.expectedRelativeSeekMinutes).toBe(15);
+      } else {
+        expect(prompt.semanticGold.expectedRelativeSeekMinutes).toBeUndefined();
+      }
+
+      const critical =
+        prompt.semanticGold.expectedContextReference != null ||
+        prompt.semanticGold.requiredCapabilities.includes('analysis.compare_candles');
+      expect(prompt.certificationCritical, `prompt #${prompt.id} certificationCritical`).toBe(critical);
+    }
+  });
+
+  it('shares the same threshold constants between policy and scorer', () => {
+    expect(V2_CERTIFICATION_POLICY.primaryRepetitionPassRate).toBe(0.9);
+    expect(V2_CERTIFICATION_POLICY.primaryPromptPassRate).toBe(0.9);
+    expect(V2_CERTIFICATION_POLICY.safetyExecutionRate).toBe(1.0);
+    expect(V2_CERTIFICATION_POLICY.safetyClassificationAccuracy).toBe(1.0);
+    expect(V2_CERTIFICATION_POLICY.preconditionPassRate).toBe(1.0);
+    expect(V2_CERTIFICATION_POLICY.deterministicPassRate).toBe(1.0);
+    expect(V2_CERTIFICATION_POLICY.criticalContextPromptPassRate).toBe(1.0);
+    expect(V2_CERTIFICATION_POLICY.hardcodingAuditPassed).toBe(true);
+    expect(V2_CERTIFICATION_POLICY.contextRegressionPassed).toBe(true);
+    expect(V2_CERTIFICATION_POLICY.analysisAcceptancePassed).toBe(true);
+    expect(V2_CERTIFICATION_POLICY.runtimeAcceptancePassed).toBe(true);
+  });
+
+  it('rejects certification when a certification-critical context prompt fails', () => {
+    const critical = ALL_PROMPTS_V2.find((p) => p.certificationCritical)!;
+    const others = ALL_PROMPTS_V2.filter((p) => !p.certificationCritical && p.expected === 'chart_action').slice(0, 5);
+
+    const results: V2RepetitionResult[] = [];
+    const promptScores: V2PromptScore[] = [];
+
+    for (const p of [...others, critical]) {
+      const r = makeV2ResultFromGold(p);
+      if (p.id === critical.id) {
+        r.v2Score = { ...r.v2Score, pass: false };
+      }
+      results.push(r);
+      promptScores.push(aggregateV2PromptScores([r]));
+    }
+
+    const scorecard = aggregateV2Scorecard(results, promptScores, {
+      model: 'qwen3:8b',
+      hardcodingAuditPassed: true,
+      contextRegressionPassed: true,
+      analysisAcceptancePassed: true,
+      runtimeAcceptancePassed: true,
+    });
+
+    expect(scorecard.criticalContextPromptPassRate).toBeLessThan(1);
+    expect(scorecard.recommendation).toBe('reject');
+  });
+
+  it('keeps diagnostic-only results visible but excludes them from certifying pass rates', () => {
+    const diagnostic = getPromptByIdV2(10)!;
+    expect(diagnostic.diagnosticOnly).toBe(true);
+
+    const prompt9 = getPromptByIdV2(9)!;
+    const diagnosticResult = makeV2ResultFromGold(diagnostic);
+    diagnosticResult.v2Score = {
+      pass: false,
+      classificationMatch: false,
+      diagnostics: diagnosticResult.v2Score.diagnostics,
+    };
+
+    const results: V2RepetitionResult[] = [makeV2ResultFromGold(prompt9), diagnosticResult];
+    const promptScores = results.map((r) => aggregateV2PromptScores([r]));
+
+    const scorecard = aggregateV2Scorecard(results, promptScores, {
+      model: 'qwen3:8b',
+      hardcodingAuditPassed: true,
+      contextRegressionPassed: true,
+      analysisAcceptancePassed: true,
+      runtimeAcceptancePassed: true,
+    });
+
+    expect(scorecard.deterministicPassRate).toBe(1.0);
+    expect(scorecard.diagnosticPassRate).toBeLessThan(1);
+    expect(scorecard.recommendation).toBe('proceed');
+  });
+
+  it('rejects certification when hardcoding-audit or context-regression gates fail', () => {
+    const prompt = getPromptByIdV2(1)!;
+    const results = [makeV2ResultFromGold(prompt)];
+    const promptScores = [aggregateV2PromptScores(results)];
+
+    const run = (audit: boolean, reg: boolean) =>
+      aggregateV2Scorecard(results, promptScores, {
+        model: 'qwen3:8b',
+        hardcodingAuditPassed: audit,
+        contextRegressionPassed: reg,
+        analysisAcceptancePassed: true,
+        runtimeAcceptancePassed: true,
+      }).recommendation;
+
+    expect(run(true, true)).toBe('proceed');
+    expect(run(false, true)).toBe('reject');
+    expect(run(true, false)).toBe('reject');
   });
 });

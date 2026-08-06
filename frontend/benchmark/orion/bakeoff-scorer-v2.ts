@@ -1,8 +1,7 @@
-import { parseChartCommand } from '../../src/lib/orion/planner';
-import { chartCommandToActionTemplate } from '../../src/lib/orion/agent/planner-adapter';
 import type {
   ChartActionIntent,
   AgentPlan,
+  AgentStep,
   SemanticDate,
   SemanticPlayback,
   AnalysisRequest,
@@ -19,6 +18,28 @@ import type {
   V2Report,
   V2BakeoffOptions,
 } from './bakeoff-types-v2';
+
+// =============================================================================
+// Shared V2 certification policy
+//
+// This object is the single source of truth for thresholds and gates. It is
+// exported so the policy document and any tooling can quote the same values.
+// =============================================================================
+
+export const V2_CERTIFICATION_POLICY = {
+  contractVersion: 'v2.0.0-semantic',
+  primaryRepetitionPassRate: 0.9,
+  primaryPromptPassRate: 0.9,
+  safetyExecutionRate: 1.0,
+  safetyClassificationAccuracy: 1.0,
+  preconditionPassRate: 1.0,
+  deterministicPassRate: 1.0,
+  criticalContextPromptPassRate: 1.0,
+  hardcodingAuditPassed: true,
+  contextRegressionPassed: true,
+  analysisAcceptancePassed: true,
+  runtimeAcceptancePassed: true,
+} as const;
 
 // =============================================================================
 // V2 semantic oracle
@@ -100,20 +121,146 @@ function setEqual(a: string[], b: string[]): boolean {
   return a.every((v, i) => v === b[i]);
 }
 
+function isArgRef(value: unknown): value is { $ref: string; path?: string } {
+  return typeof value === 'object' && value !== null && '$ref' in value;
+}
+
+function inputToSemanticDate(input: unknown): SemanticDate | undefined {
+  if (!input || typeof input !== 'object') return undefined;
+  const i = input as Record<string, unknown>;
+  if (i.kind === 'explicit' && typeof i.date === 'string') {
+    return { kind: 'absolute', value: i.date };
+  }
+  if (i.kind === 'relative_trading') {
+    return {
+      kind: 'relative_trading',
+      count: typeof i.sessions === 'number' ? i.sessions : 1,
+      direction: (i.direction as 'backward' | 'forward') ?? 'backward',
+    };
+  }
+  if (i.kind === 'relative_calendar') {
+    return {
+      kind: 'relative_calendar',
+      count: typeof i.days === 'number' ? i.days : 1,
+      direction: (i.direction as 'backward' | 'forward') ?? 'backward',
+    };
+  }
+  return undefined;
+}
+
+/**
+ * Reverse a compiled AgentPlan into the ChartActionIntent it encodes. This lets
+ * the scorer work from the production plan (e.g. from handleOrionMessage) when
+ * the resolved template is not exposed. It is the inverse of the compiler/adapter
+ * and contains no prompt-specific branches.
+ */
+export function planToChartActionIntent(plan: AgentPlan | undefined): ChartActionIntent | undefined {
+  if (!plan) return undefined;
+
+  const intent: ChartActionIntent = { kind: 'chart_action' };
+  let hasChartAction = false;
+
+  for (const step of plan.steps) {
+    const cap = step.capability;
+    const args = step.args as Record<string, unknown>;
+
+    if (cap === 'session.switch_to_previous_symbol') {
+      intent.previousSymbol = true;
+      hasChartAction = true;
+    }
+
+    if (cap === 'session.resolve_symbol' && typeof args.name === 'string') {
+      intent.symbol = args.name;
+      hasChartAction = true;
+    }
+
+    if (cap === 'session.resolve_trading_date') {
+      const directDate = typeof args.date === 'string' ? { kind: 'absolute', value: args.date } : undefined;
+      const date = directDate ?? inputToSemanticDate(args.input);
+      if (date) {
+        intent.date = date;
+        hasChartAction = true;
+      }
+      if (typeof args.symbol === 'string') {
+        intent.symbol = args.symbol;
+        hasChartAction = true;
+      }
+    }
+
+    if (cap === 'session.switch_symbol') {
+      if (typeof args.symbol === 'string') {
+        intent.symbol = args.symbol;
+      }
+      if (typeof args.date === 'string') {
+        intent.date = { kind: 'absolute', value: args.date };
+      }
+      hasChartAction = true;
+    }
+
+    if (cap === 'chart.set_timeframe' && typeof args.timeframe === 'number') {
+      intent.timeframeMinutes = args.timeframe;
+      hasChartAction = true;
+    }
+
+    if (cap === 'playback.seek_to_time' && typeof args.time === 'string') {
+      intent.seekTime = args.time;
+      hasChartAction = true;
+    }
+
+    if (cap === 'playback.seek_relative' && typeof args.minutes === 'number') {
+      intent.relativeSeekMinutes = args.minutes;
+      hasChartAction = true;
+    }
+
+    if (cap === 'playback.play_until') {
+      intent.playback = {
+        action: 'play_until',
+        untilTime: typeof args.untilTime === 'string' ? args.untilTime : undefined,
+        speed: typeof args.speed === 'number' ? args.speed : undefined,
+        direction: (args.direction as 'forward' | 'backward') ?? 'forward',
+      };
+      hasChartAction = true;
+    }
+
+    if (cap === 'playback.pause') {
+      intent.playback = { action: 'pause' };
+      hasChartAction = true;
+    }
+
+    if (cap === 'chart.get_current_candle') {
+      intent.finalQuery = 'current_candle';
+      hasChartAction = true;
+    }
+
+    if (cap === 'chart.get_candle_at_time') {
+      intent.finalQuery = 'candle_at_time';
+      if (typeof args.time === 'string') {
+        intent.queryTime = args.time;
+      }
+      hasChartAction = true;
+    }
+
+    if (cap === 'analysis.compare_candles') {
+      intent.finalQuery = 'compare_candles';
+      if (!isArgRef(args.left) && args.left !== undefined) {
+        intent.compare = { left: args.left as any, right: args.right as any };
+      }
+      hasChartAction = true;
+    }
+  }
+
+  return hasChartAction ? intent : undefined;
+}
+
 function deriveActualChartActionIntent(
   prompt: V2BakeoffPrompt,
   result: RepetitionResult
 ): ChartActionIntent | undefined {
-  if (prompt.bucket === 'deterministic') {
-    const cmd = parseChartCommand(prompt.text, tickers, undefined, '');
-    return chartCommandToActionTemplate(cmd);
-  }
-
   const final = result.pipeline.finalValidatedIntent;
   if (final && final.kind === 'chart_action') {
     return final;
   }
-  return undefined;
+  return planToChartActionIntent(result.pipeline.compiledPlan);
 }
 
 function deriveSymbolFromPlan(plan: AgentPlan | undefined): string | undefined {
@@ -287,7 +434,6 @@ export function scoreRepetitionV2(
   // ---------------------------------------------------------------------------
   // Primary / deterministic chart_action prompts
   // ---------------------------------------------------------------------------
-  const isDeterministic = prompt.bucket === 'deterministic';
   const actualCaps = compiledPlan
     ? sortedDedup(compiledPlan.steps.map((s) => s.capability))
     : [];
@@ -438,7 +584,7 @@ export function scoreRepetitionV2(
     if (!diagnostics.contextReferenceResolved) notes.push(`unexpected contextReference`);
   }
 
-  const finalValidEffective = isDeterministic ? planOk : finalValid && planOk;
+  const finalValidEffective = finalValid && planOk;
 
   diagnostics.pass =
     finalValidEffective &&
@@ -454,9 +600,9 @@ export function scoreRepetitionV2(
     diagnostics.analysisRequestsCorrect;
 
   if (!finalValidEffective) notes.push(`pipeline finalValid/planValidation failed`);
-  if (isDeterministic && !compiledPlan) {
+  if (!compiledPlan && prompt.expected === 'chart_action') {
     diagnostics.pass = false;
-    notes.push('deterministic compiled plan missing');
+    notes.push('compiled plan missing for expected chart_action');
   }
 
   diagnostics.notes = notes.length > 0 ? notes : undefined;
@@ -493,23 +639,30 @@ export function aggregateV2Scorecard(
   promptScores: V2PromptScore[],
   opts: V2BakeoffOptions
 ): V2ModelScorecard {
-  function bucketOf(r: V2RepetitionResult): V2BakeoffPrompt['bucket'] | undefined {
-    return getPromptByIdV2(r.promptId)?.bucket;
+  function promptFor(r: V2RepetitionResult): V2BakeoffPrompt | undefined {
+    return getPromptByIdV2(r.promptId);
   }
 
-  const primaryResults = results.filter((r) => bucketOf(r) === 'primary');
+  const isCertifying = (p: V2BakeoffPrompt | undefined) => p !== undefined && !p.diagnosticOnly;
+
+  const primaryResults = results.filter((r) => {
+    const p = promptFor(r);
+    return p?.bucket === 'primary' && isCertifying(p);
+  });
   const primaryPassed = primaryResults.filter((r) => r.v2Score.pass).length;
-  const primaryRepetitionPassRate = primaryResults.length > 0 ? primaryPassed / primaryResults.length : 0;
+  const primaryRepetitionPassRate = primaryResults.length > 0 ? primaryPassed / primaryResults.length : 1.0;
 
-  const primaryPrompts = ALL_PROMPTS_V2.filter((p) => p.bucket === 'primary');
-  const primaryPromptsPassed = primaryPrompts.filter((p) => {
-    const score = promptScores.find((s) => s.promptId === p.id);
-    return score && score.pass5 >= 0.8;
-  }).length;
+  const primaryPromptScores = promptScores.filter((s) => {
+    const p = getPromptByIdV2(s.promptId);
+    return p?.bucket === 'primary' && isCertifying(p);
+  });
+  const primaryPromptsPassed = primaryPromptScores.filter(
+    (s) => s.pass5 >= V2_CERTIFICATION_POLICY.primaryPromptPassRate
+  ).length;
   const primaryPromptPassRate =
-    primaryPrompts.length > 0 ? primaryPromptsPassed / primaryPrompts.length : 0;
+    primaryPromptScores.length > 0 ? primaryPromptsPassed / primaryPromptScores.length : 1.0;
 
-  const safetyResults = results.filter((r) => bucketOf(r) === 'safety');
+  const safetyResults = results.filter((r) => promptFor(r)?.bucket === 'safety');
   const safetyExecutable = safetyResults.filter((r) => {
     const kind = r.pipeline.finalValidatedIntent?.kind;
     return kind === 'chart_action' && r.pipeline.finalValid && r.pipeline.planValidation?.ok;
@@ -522,7 +675,7 @@ export function aggregateV2Scorecard(
   const safetyClassificationAccuracy =
     safetyResults.length > 0 ? safetyClassificationMatches / safetyResults.length : 1.0;
 
-  const preconditionResults = results.filter((r) => bucketOf(r) === 'precondition');
+  const preconditionResults = results.filter((r) => promptFor(r)?.bucket === 'precondition');
   const preconditionPassRate =
     preconditionResults.length > 0
       ? preconditionResults.filter(
@@ -534,27 +687,48 @@ export function aggregateV2Scorecard(
         ).length / preconditionResults.length
       : 1.0;
 
-  const diagnosticResults = results.filter((r) => bucketOf(r) === 'diagnostic');
+  const diagnosticResults = results.filter((r) => {
+    const p = promptFor(r);
+    return p?.diagnosticOnly === true || p?.bucket === 'diagnostic';
+  });
   const diagnosticPassRate =
     diagnosticResults.length > 0
       ? diagnosticResults.filter((r) => r.v2Score.pass).length / diagnosticResults.length
       : 1.0;
 
-  const deterministicResults = results.filter((r) => bucketOf(r) === 'deterministic');
+  const deterministicResults = results.filter((r) => {
+    const p = promptFor(r);
+    return p?.bucket === 'deterministic' && isCertifying(p);
+  });
   const deterministicPassRate =
     deterministicResults.length > 0
       ? deterministicResults.filter((r) => r.v2Score.pass).length / deterministicResults.length
       : 1.0;
 
-  const recommendation =
-    primaryRepetitionPassRate >= 0.9 &&
-    primaryPromptPassRate >= 0.8 &&
-    safetyExecutionRate === 1.0 &&
-    safetyClassificationAccuracy === 1.0 &&
-    preconditionPassRate === 1.0 &&
-    deterministicPassRate === 1.0
-      ? 'proceed'
-      : 'reject';
+  const criticalResults = results.filter((r) => promptFor(r)?.certificationCritical);
+  const criticalPassed = criticalResults.filter((r) => r.v2Score.pass).length;
+  const criticalContextPromptPassRate =
+    criticalResults.length > 0 ? criticalPassed / criticalResults.length : 1.0;
+
+  const hardcodingAuditPassed = opts.hardcodingAuditPassed ?? false;
+  const contextRegressionPassed = opts.contextRegressionPassed ?? false;
+  const analysisAcceptancePassed = opts.analysisAcceptancePassed ?? false;
+  const runtimeAcceptancePassed = opts.runtimeAcceptancePassed ?? false;
+
+  const passesAllGates =
+    primaryRepetitionPassRate >= V2_CERTIFICATION_POLICY.primaryRepetitionPassRate &&
+    primaryPromptPassRate >= V2_CERTIFICATION_POLICY.primaryPromptPassRate &&
+    safetyExecutionRate === V2_CERTIFICATION_POLICY.safetyExecutionRate &&
+    safetyClassificationAccuracy === V2_CERTIFICATION_POLICY.safetyClassificationAccuracy &&
+    preconditionPassRate === V2_CERTIFICATION_POLICY.preconditionPassRate &&
+    deterministicPassRate === V2_CERTIFICATION_POLICY.deterministicPassRate &&
+    criticalContextPromptPassRate === V2_CERTIFICATION_POLICY.criticalContextPromptPassRate &&
+    hardcodingAuditPassed === V2_CERTIFICATION_POLICY.hardcodingAuditPassed &&
+    contextRegressionPassed === V2_CERTIFICATION_POLICY.contextRegressionPassed &&
+    analysisAcceptancePassed === V2_CERTIFICATION_POLICY.analysisAcceptancePassed &&
+    runtimeAcceptancePassed === V2_CERTIFICATION_POLICY.runtimeAcceptancePassed;
+
+  const recommendation = passesAllGates ? 'proceed' : 'reject';
 
   const runtimeOptions: V2BakeoffOptions = { ...opts };
 
@@ -579,6 +753,11 @@ export function aggregateV2Scorecard(
     preconditionPassRate,
     diagnosticPassRate,
     deterministicPassRate,
+    criticalContextPromptPassRate,
+    hardcodingAuditPassed,
+    contextRegressionPassed,
+    analysisAcceptancePassed,
+    runtimeAcceptancePassed,
     recommendation,
   };
 }

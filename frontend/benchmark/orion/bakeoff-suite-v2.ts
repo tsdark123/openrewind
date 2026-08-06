@@ -18,16 +18,8 @@ const designPlan: { prompts: V2SemanticExpectation[] } = JSON.parse(
   readFileSync(designPlanPath, 'utf-8')
 );
 
-const FIXTURE_CONTEXT_PROMPT_IDS = new Set([
-  6, 7, 8, 11, 13, 14, 15, 16, 17, 18,
-]);
-
-function profileForPrompt(id: number): V2Profile {
-  return FIXTURE_CONTEXT_PROMPT_IDS.has(id) ? 'active' : 'empty';
-}
-
-function makeContextForPrompt(id: number): () => { store: import('../../src/lib/orion/agent/types').ExecutionContextStore; stateSymbol?: string } {
-  return FIXTURE_CONTEXT_PROMPT_IDS.has(id) ? makeContextFixture : makeEmptyContext;
+function makeContextForPrompt(profile: V2Profile): () => { store: import('../../src/lib/orion/agent/types').ExecutionContextStore; stateSymbol?: string } {
+  return profile === 'active' ? makeContextFixture : makeEmptyContext;
 }
 
 function normalizeSemanticDate(d: V2SemanticExpectation['expectedDate']): SemanticDate | undefined {
@@ -134,11 +126,7 @@ function deriveExpectedFinalQuery(gold: V2SemanticExpectation): V2SemanticExpect
   return undefined;
 }
 
-function deriveExpectedRelativeSeekMinutes(id: number): number | undefined {
-  if (id === 6) return -30;
-  if (id === 7) return 15;
-  return undefined;
-}
+
 
 function computeV2ResolvedGold(
   prompt: V2BakeoffPrompt
@@ -209,20 +197,26 @@ function normalizeV2SemanticExpectation(raw: V2SemanticExpectation): V2SemanticE
       requiredCapabilities: alt.requiredCapabilities,
     })),
     expectedFinalQuery: deriveExpectedFinalQuery(raw),
-    expectedRelativeSeekMinutes: deriveExpectedRelativeSeekMinutes(raw.id),
+    contextProfile: (raw.contextProfile as V2Profile) ?? 'empty',
+    certificationCritical: (raw.certificationCritical as boolean) ?? false,
+    diagnosticOnly: (raw.diagnosticOnly as boolean) ?? false,
+    expectedRelativeSeekMinutes: raw.expectedRelativeSeekMinutes as number | undefined,
   };
   return gold;
 }
 
 function buildV2Prompt(gold: V2SemanticExpectation): V2BakeoffPrompt {
+  const normalized = normalizeV2SemanticExpectation(gold);
   const prompt: V2BakeoffPrompt = {
     id: gold.id,
     text: gold.text,
-    profile: profileForPrompt(gold.id),
+    profile: normalized.contextProfile,
     bucket: gold.bucket,
     expected: gold.expectedKind,
-    semanticGold: normalizeV2SemanticExpectation(gold),
-    makeContext: makeContextForPrompt(gold.id),
+    semanticGold: normalized,
+    certificationCritical: normalized.certificationCritical,
+    diagnosticOnly: normalized.diagnosticOnly,
+    makeContext: makeContextForPrompt(normalized.contextProfile),
   };
 
   const resolved = computeV2ResolvedGold(prompt);

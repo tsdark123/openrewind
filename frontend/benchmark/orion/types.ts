@@ -88,6 +88,8 @@ export interface RepetitionResult {
   safetyExecutablePlanProduced: boolean;
   /** True when the final intent kind exactly matches the prompt's expected kind. */
   safetyClassificationMatch: boolean;
+  /** Production orchestrator route, when the result was produced by handleOrionMessage. */
+  orchestratorRoute?: string;
 }
 
 export interface PromptScore {

@@ -71,9 +71,15 @@ export interface V2SemanticExpectation {
   acceptableAlternatives: V2AcceptableAlternative[];
   reasonForChangeFromLegacy?: string;
 
+  // Fixture metadata that drives context setup, certification gating and the
+  // semantic expectation. All per-prompt branches live in the design-plan data.
+  contextProfile: V2Profile;
+  certificationCritical: boolean;
+  diagnosticOnly: boolean;
+  expectedRelativeSeekMinutes?: number;
+
   // Augmented fields that are not in the raw JSON but are derived for scoring.
   expectedFinalQuery?: 'current_candle' | 'candle_at_time' | 'compare_candles';
-  expectedRelativeSeekMinutes?: number;
 }
 
 export interface V2BakeoffPrompt {
@@ -83,6 +89,8 @@ export interface V2BakeoffPrompt {
   bucket: V2Bucket;
   expected: V2PromptKind;
   semanticGold: V2SemanticExpectation;
+  certificationCritical: boolean;
+  diagnosticOnly: boolean;
   /** Factory for a fresh, isolated ExecutionContextStore. */
   makeContext: () => { store: ExecutionContextStore; stateSymbol?: string };
 
@@ -143,6 +151,13 @@ export interface V2BakeoffOptions {
   productionHead?: string;
   ollamaVersion?: string;
   modelDigest?: string;
+
+  // Certification audit / acceptance gates. These must be supplied explicitly by
+  // the operator or the runner before a model can be marked proceed.
+  hardcodingAuditPassed?: boolean;
+  contextRegressionPassed?: boolean;
+  analysisAcceptancePassed?: boolean;
+  runtimeAcceptancePassed?: boolean;
 }
 
 export interface V2ReportMetadata {
@@ -168,6 +183,11 @@ export interface V2ModelScorecard extends V2ReportMetadata {
   preconditionPassRate: number;
   diagnosticPassRate: number;
   deterministicPassRate: number;
+  criticalContextPromptPassRate: number;
+  hardcodingAuditPassed: boolean;
+  contextRegressionPassed: boolean;
+  analysisAcceptancePassed: boolean;
+  runtimeAcceptancePassed: boolean;
   recommendation: 'proceed' | 'finalist' | 'reject';
 }
 
