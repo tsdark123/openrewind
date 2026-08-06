@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { AppState } from '../../../../types';
 import type { AgentContext } from '../types';
 import { handleOrionMessage } from '../orchestrator';
@@ -65,7 +65,7 @@ function makeCtx(overrides?: Partial<AgentContext>): AgentContext {
     performanceLog: {},
     apiBase: 'http://localhost:9000',
     dataDir: undefined,
-    availableTickers: ['AAPL', 'MSFT', 'NVDA'],
+    availableTickers: ['AAPL', 'MSFT', 'NVDA', 'LLY'],
     send: vi.fn(),
     dispatch: vi.fn(),
     onSwitchSymbol: async (symbol, date) => {
@@ -77,6 +77,15 @@ function makeCtx(overrides?: Partial<AgentContext>): AgentContext {
     ...overrides,
   };
 }
+
+const clarificationEcho = () => ({
+  content: JSON.stringify({
+    kind: 'clarification',
+    message: 'Describe Apple today.',
+  }),
+  toolCalls: [],
+  raw: {},
+});
 
 const windowSummaryIntent = () => ({
   content: JSON.stringify({
@@ -118,6 +127,10 @@ function hasSwitchCausedByDescribe(plan: { steps: { capability: string; args: Re
 }
 
 describe('verb-grounding regression', () => {
+  beforeEach(() => {
+    vi.mocked(orionChat).mockReset();
+  });
+
   it('"Describe what happened today." with active session routes to window_summary', async () => {
     const ctx = makeCtx();
     ctx.getState().sessionActive = true;
@@ -211,12 +224,11 @@ describe('verb-grounding regression', () => {
     expect(hasSwitchCausedByDescribe(r.plan)).toBe(false);
   });
 
-  it('"Describe Apple today." with another active symbol switches and summarizes', async () => {
-    vi.mocked(orionChat).mockResolvedValueOnce(windowSummaryIntent());
+  it('"Describe Apple today." from no active session switches and summarizes without calling the model', async () => {
+    vi.mocked(orionChat).mockResolvedValueOnce(clarificationEcho());
 
     const ctx = makeCtx();
-    ctx.getState().sessionActive = true;
-    ctx.getState().symbol = 'MSFT';
+    ctx.getState().sessionActive = false;
 
     const r = await handleOrionMessage({
       text: 'Describe Apple today.',
@@ -224,20 +236,57 @@ describe('verb-grounding regression', () => {
       setupReady: true,
     });
 
+    expect(orionChat).not.toHaveBeenCalled();
     expect(r.wasChat).toBe(false);
-    expect(r.route).toBe('llm-plan');
+    expect(r.route).toBe('deterministic');
     expect(r.ok).toBe(true);
     expect(r.message).toMatch(/AAPL/);
+
+    const resolveStep = findStep(r.plan, 'session.resolve_symbol');
+    expect(resolveStep).toBeDefined();
+    expect(resolveStep?.args.name).toBe('AAPL');
+
     const switchStep = findStep(r.plan, 'session.switch_symbol');
     expect(switchStep).toBeDefined();
+    expect(switchStep?.args.symbol).toEqual({ $ref: resolveStep?.id, path: 'symbol' });
+
     const summaryStep = findStep(r.plan, 'analysis.window_summary');
     expect(summaryStep).toBeDefined();
+    expect(summaryStep?.args.window).toEqual({ kind: 'whole_session' });
     expect(hasResolveSymbolNamed(r.plan, 'Describe')).toBe(false);
     expect(hasSwitchCausedByDescribe(r.plan)).toBe(false);
   });
 
+  it('"Describe Apple today." when AAPL/date are already active runs window_summary without a switch', async () => {
+    vi.mocked(orionChat).mockResolvedValueOnce(clarificationEcho());
+
+    const ctx = makeCtx();
+    ctx.getState().sessionActive = true;
+    ctx.getState().symbol = 'AAPL';
+    ctx.getState().replayDate = '2026-07-10';
+
+    const r = await handleOrionMessage({
+      text: 'Describe Apple today.',
+      ctx,
+      setupReady: true,
+    });
+
+    expect(orionChat).not.toHaveBeenCalled();
+    expect(r.wasChat).toBe(false);
+    expect(r.route).toBe('deterministic');
+    expect(r.ok).toBe(true);
+
+    expect(findStep(r.plan, 'session.resolve_symbol')).toBeUndefined();
+    expect(findStep(r.plan, 'session.resolve_trading_date')).toBeUndefined();
+    expect(findStep(r.plan, 'session.switch_symbol')).toBeUndefined();
+
+    const summaryStep = findStep(r.plan, 'analysis.window_summary');
+    expect(summaryStep).toBeDefined();
+    expect(summaryStep?.args.window).toEqual({ kind: 'whole_session' });
+  });
+
   it('"Describe AAPL today." with another active symbol switches and summarizes', async () => {
-    vi.mocked(orionChat).mockResolvedValueOnce(windowSummaryIntent());
+    vi.mocked(orionChat).mockResolvedValueOnce(clarificationEcho());
 
     const ctx = makeCtx();
     ctx.getState().sessionActive = true;
@@ -249,16 +298,132 @@ describe('verb-grounding regression', () => {
       setupReady: true,
     });
 
+    expect(orionChat).not.toHaveBeenCalled();
     expect(r.wasChat).toBe(false);
-    expect(r.route).toBe('llm-plan');
+    expect(r.route).toBe('deterministic');
     expect(r.ok).toBe(true);
     expect(r.message).toMatch(/AAPL/);
+
+    const resolveStep = findStep(r.plan, 'session.resolve_symbol');
+    expect(resolveStep).toBeDefined();
+    expect(resolveStep?.args.name).toBe('AAPL');
+
     const switchStep = findStep(r.plan, 'session.switch_symbol');
     expect(switchStep).toBeDefined();
+    expect(switchStep?.args.symbol).toEqual({ $ref: resolveStep?.id, path: 'symbol' });
+
     const summaryStep = findStep(r.plan, 'analysis.window_summary');
     expect(summaryStep).toBeDefined();
     expect(hasResolveSymbolNamed(r.plan, 'Describe')).toBe(false);
     expect(hasSwitchCausedByDescribe(r.plan)).toBe(false);
+  });
+
+  it('"How did Nvidia do today?" switches to NVDA and runs window_summary', async () => {
+    vi.mocked(orionChat).mockResolvedValueOnce(clarificationEcho());
+
+    const ctx = makeCtx();
+    ctx.getState().sessionActive = false;
+
+    const r = await handleOrionMessage({
+      text: 'How did Nvidia do today?',
+      ctx,
+      setupReady: true,
+    });
+
+    expect(orionChat).not.toHaveBeenCalled();
+    expect(r.wasChat).toBe(false);
+    expect(r.route).toBe('deterministic');
+    expect(r.ok).toBe(true);
+
+    const resolveStep = findStep(r.plan, 'session.resolve_symbol');
+    expect(resolveStep).toBeDefined();
+    expect(resolveStep?.args.name).toBe('NVDA');
+
+    const switchStep = findStep(r.plan, 'session.switch_symbol');
+    expect(switchStep).toBeDefined();
+    expect(switchStep?.args.symbol).toEqual({ $ref: resolveStep?.id, path: 'symbol' });
+
+    const summaryStep = findStep(r.plan, 'analysis.window_summary');
+    expect(summaryStep).toBeDefined();
+    expect(summaryStep?.args.window).toEqual({ kind: 'whole_session' });
+  });
+
+  it('"Show me Apple\'s first-hour range today." switches to AAPL and runs window_ohlc on 09:30-10:30', async () => {
+    vi.mocked(orionChat).mockResolvedValueOnce(clarificationEcho());
+
+    const ctx = makeCtx();
+    ctx.getState().sessionActive = false;
+
+    const r = await handleOrionMessage({
+      text: "Show me Apple's first-hour range today.",
+      ctx,
+      setupReady: true,
+    });
+
+    expect(orionChat).not.toHaveBeenCalled();
+    expect(r.wasChat).toBe(false);
+    expect(r.route).toBe('deterministic');
+    expect(r.ok).toBe(true);
+
+    const resolveStep = findStep(r.plan, 'session.resolve_symbol');
+    expect(resolveStep).toBeDefined();
+    expect(resolveStep?.args.name).toBe('AAPL');
+
+    const switchStep = findStep(r.plan, 'session.switch_symbol');
+    expect(switchStep).toBeDefined();
+    expect(switchStep?.args.symbol).toEqual({ $ref: resolveStep?.id, path: 'symbol' });
+
+    const ohlcStep = findStep(r.plan, 'analysis.window_ohlc');
+    expect(ohlcStep).toBeDefined();
+    expect(ohlcStep?.args.window).toEqual({ kind: 'time_range', fromTime: '09:30', toTime: '10:30' });
+  });
+
+  it('"Give me the session summary for Eli Lilly yesterday." switches to LLY on 2026-07-09 and summarizes', async () => {
+    vi.mocked(orionChat).mockResolvedValueOnce(clarificationEcho());
+
+    const ctx = makeCtx();
+    ctx.getState().sessionActive = false;
+
+    const r = await handleOrionMessage({
+      text: 'Give me the session summary for Eli Lilly yesterday.',
+      ctx,
+      setupReady: true,
+    });
+
+    expect(orionChat).not.toHaveBeenCalled();
+    expect(r.wasChat).toBe(false);
+    expect(r.route).toBe('deterministic');
+    expect(r.ok).toBe(true);
+
+    const resolveStep = findStep(r.plan, 'session.resolve_symbol');
+    expect(resolveStep).toBeDefined();
+    expect(resolveStep?.args.name).toBe('LLY');
+
+    const switchStep = findStep(r.plan, 'session.switch_symbol');
+    expect(switchStep).toBeDefined();
+    expect(switchStep?.args.symbol).toEqual({ $ref: resolveStep?.id, path: 'symbol' });
+
+    const summaryStep = findStep(r.plan, 'analysis.window_summary');
+    expect(summaryStep).toBeDefined();
+    expect(summaryStep?.args.window).toEqual({ kind: 'whole_session' });
+  });
+
+  it('"What was the range and volume today?" stays ambiguous and does not hijack the semantic path', async () => {
+    vi.mocked(orionChat).mockResolvedValueOnce(clarificationEcho());
+
+    const ctx = makeCtx();
+    ctx.getState().sessionActive = true;
+    ctx.getState().symbol = 'AAPL';
+
+    const r = await handleOrionMessage({
+      text: 'What was the range and volume today?',
+      ctx,
+      setupReady: true,
+    });
+
+    expect(orionChat).toHaveBeenCalled();
+    expect(r.route).toBe('clarification');
+    expect(r.message).toBe('Describe Apple today.');
   });
 
   it('"Describe the candle at eleven thirty." still produces candle_shape at 11:30', async () => {

@@ -25,6 +25,7 @@ import type {
   AgentContext,
   AgentPlan,
   AgentExecutionResult,
+  AnalysisRequest,
   CancellationToken,
   ChartActionIntent,
   CandleSnapshot,
@@ -55,8 +56,8 @@ import { commonSenseReply } from '../commonSense';
 import type { SymbolResolution } from './resolveSymbol';
 import { chartCommandToPlan, chartCommandToActionTemplate } from './planner-adapter';
 import { executeAgentPlan } from './executor';
-import { extractSemanticIntent, validateSemanticIntent } from './intent';
-import { compileChartActionIntent, resolveContextReference, resolveAnalysisInheritance } from './intentCompiler';
+import { extractSemanticIntent, selectedAnalysisKinds, validateSemanticIntent } from './intent';
+import { compileChartActionIntent, newWindowFromText, resolveContextReference, resolveAnalysisInheritance } from './intentCompiler';
 import { validateAgentPlan } from './validatePlan';
 import { agentTrace } from './config';
 import {
@@ -280,7 +281,8 @@ async function handleCanonicalRepeat(
 }
 
 function looksLikeContextReference(text: string, ctx: AgentContext): boolean {
-  const hasPriorAction = ctx.executionLog.latestSuccessfulAction() !== null;
+  const latest = ctx.executionLog.latestSuccessfulAction();
+  const hasPriorAction = latest != null;
   return textRequestsContextReference(text, hasPriorAction);
 }
 
@@ -502,6 +504,79 @@ function makeSessionSummaryPlan(text: string, sessionActive: boolean): AgentPlan
   };
 }
 
+/**
+ * Build a ChartActionIntent for a grounded symbol/date with a single
+ * deterministically selected analysis.  Returns undefined when the request is
+ * ambiguous (no analysis, multiple analysis kinds, candle-query shape, or a
+ * playback/seek/timeframe action) so the normal semantic path can handle it.
+ */
+function buildGroundedCompoundAnalysisIntent(
+  text: string,
+  cmd: ChartCommand
+): ChartActionIntent | undefined {
+  if (!cmd.symbol) return undefined;
+  if (
+    cmd.startTime !== undefined ||
+    cmd.endTime !== undefined ||
+    cmd.relativeMinutes !== undefined ||
+    cmd.timeframe !== undefined ||
+    cmd.speed !== undefined
+  ) {
+    return undefined;
+  }
+  if (!textRequestsAnalysis(text)) return undefined;
+  if (textRequestsCandleShape(text) || textRequestsCandleQuery(text)) return undefined;
+
+  const kinds = selectedAnalysisKinds(text);
+  if (!kinds || kinds.length !== 1) return undefined;
+
+  const kind = kinds[0];
+  const window = newWindowFromText(text) ?? { kind: 'whole_session' } as const;
+
+  let request: AnalysisRequest;
+  if (kind === 'candle_shape') {
+    // Deterministic candle-shape-with-symbol is not supported here; the
+    // candle_query path or the LLM should handle explicit time references.
+    return undefined;
+  }
+  request = { kind, window } as AnalysisRequest;
+
+  const intent: ChartActionIntent = {
+    kind: 'chart_action',
+    symbol: cmd.symbol,
+    analysisRequests: [request],
+  };
+
+  if (cmd.date) {
+    intent.date = { kind: 'absolute', value: cmd.date };
+  } else if (cmd.dateInput) {
+    // Preserve the parser's original date input (today, relative_trading, etc.)
+    // so the compiler can resolve it through the normal pipeline.
+    if (cmd.dateInput.kind === 'explicit') {
+      intent.date = { kind: 'absolute', value: cmd.dateInput.date ?? '' };
+    } else if (cmd.dateInput.kind === 'today') {
+      intent.date = { kind: 'absolute', value: cmd.dateInput.from ?? new Date().toISOString().slice(0, 10) };
+    } else if (cmd.dateInput.kind === 'relative_trading') {
+      intent.date = {
+        kind: 'relative_trading',
+        count: cmd.dateInput.count ?? 1,
+        direction: cmd.dateInput.direction ?? 'backward',
+      };
+    } else {
+      intent.date = {
+        kind: 'relative_calendar',
+        count: cmd.dateInput.count ?? 1,
+        direction: cmd.dateInput.direction ?? 'backward',
+      };
+    }
+  }
+
+  // If the requested symbol/date are already the active session, the sanitizer
+  // will strip the redundant setup fields so compileChartActionIntent emits only
+  // the analysis step.
+  return intent;
+}
+
 // ---------------------------------------------------------------------------
 // Deterministic planning completeness
 // ---------------------------------------------------------------------------
@@ -627,6 +702,13 @@ export function sanitizeIntentGrounding(
   const willChangeSymbol = resolved.symbol !== undefined && resolved.symbol !== state.symbol;
 
   const allowed = new Set<ActionDimension>(requested);
+  const willRunNonSetup =
+    (allowed.has('analysisRequest') &&
+      ((resolved.analysisRequests && resolved.analysisRequests.length > 0) || resolved.finalQuery !== undefined)) ||
+    (allowed.has('timeframe') && resolved.timeframeMinutes !== undefined) ||
+    (allowed.has('absoluteTime') && resolved.seekTime !== undefined) ||
+    (allowed.has('relativeSeek') && resolved.relativeSeekMinutes !== undefined) ||
+    (allowed.has('playbackControl') && resolved.playback !== undefined);
   if (anaphoric && originalContextReference) {
     const { mode, inherit } = originalContextReference;
     if (mode === 'repeat') {
@@ -674,11 +756,13 @@ export function sanitizeIntentGrounding(
 
   // Symbol
   if (sanitized.symbol !== undefined) {
-    if (allowed.has('symbol')) {
-      trace.kept.push(`symbol:${sanitized.symbol}`);
-    } else if (sanitized.symbol === state.symbol && state.symbol) {
+    if (sanitized.symbol === state.symbol && state.symbol && willRunNonSetup) {
+      // The requested symbol is already the active session and the only remaining
+      // request is a non-setup action; do not emit a redundant switch.
       delete sanitized.symbol;
       trace.defaults.push(`symbol:${state.symbol}`);
+    } else if (allowed.has('symbol')) {
+      trace.kept.push(`symbol:${sanitized.symbol}`);
     } else {
       const v = sanitized.symbol;
       delete sanitized.symbol;
@@ -699,9 +783,14 @@ export function sanitizeIntentGrounding(
   // Date
   if (sanitized.date) {
     const dateTrace = formatDateForTrace(sanitized.date);
-    if (sanitized.date.kind === 'absolute' && sanitized.date.value === state.replayDate && willChangeSymbol) {
-      // Same date as the active session while switching symbols: the new symbol
-      // can use the current replay date; do not emit a stale resolve step.
+    if (
+      sanitized.date.kind === 'absolute' &&
+      sanitized.date.value === state.replayDate &&
+      (willChangeSymbol || willRunNonSetup)
+    ) {
+      // The requested date already matches the active session and we are either
+      // switching to a different symbol or running a non-setup action; no resolve
+      // step is needed and keeping it would force a redundant switch.
       delete sanitized.date;
       trace.defaults.push(`date:${state.replayDate}`);
     } else if (allowed.has('date')) {
@@ -1173,6 +1262,39 @@ async function routeMessage(
       route: 'deterministic',
       template,
     };
+  }
+
+  // 4c. Grounded compound session-analysis: "Describe Apple today.",
+  // "How did NVDA do today?", "Show me AAPL's first-hour range today."
+  // The parser has already grounded symbol and date; we select a single analysis
+  // kind, derive a named window when present, and run the full sanitizer/compiler.
+  if (!anaphoric) {
+    const grounded = buildGroundedCompoundAnalysisIntent(text, cmd);
+    if (grounded) {
+      agentTrace('route', 'compound-analysis-start', { text });
+      const sanitization = sanitizeIntentGrounding(grounded, text, undefined, ctx);
+      if (sanitization.ok) {
+        const plan = compileChartActionIntent(sanitization.intent!, {
+          anchorDate: ctx.getState().replayDate || new Date().toISOString().slice(0, 10),
+          stateSymbol: ctx.getState().symbol,
+        });
+        const validation = validateAgentPlan(plan);
+        if (validation.ok) {
+          plan.id = plan.id || makePlanId();
+          const result = await executeAgentPlan(plan, ctx, token);
+          agentTrace('route', 'deterministic', { ok: result.ok, kind: 'compound-analysis' });
+          return {
+            ok: result.ok,
+            message: composeResponse(result, ctx),
+            wasChat: false,
+            plan,
+            result,
+            route: 'deterministic',
+            template: sanitization.intent,
+          };
+        }
+      }
+    }
   }
 
   // 5. Incomplete or unresolved switch: let resolve_symbol handle it.

@@ -655,7 +655,7 @@ export function textRequestsSummary(t: string): boolean {
 
   const hasSubject = subjectTokens.length > 0;
   const hasWindowOrShape = d.kinds.window || d.kinds.shape;
-  const hasSession = d.concepts.has('today') || d.concepts.has('day') || d.concepts.has('now');
+  const hasSession = d.concepts.has('today') || d.concepts.has('day') || d.concepts.has('now') || d.concepts.has('session');
 
   return hasSubject || hasWindowOrShape || hasSession;
 }

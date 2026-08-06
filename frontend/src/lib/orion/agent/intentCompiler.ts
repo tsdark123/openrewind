@@ -194,18 +194,18 @@ function resolveCandleShape(
   return { source: 'current_chart_candle' };
 }
 
-function newWindowFromText(text: string): AnalysisWindow | undefined {
+export function newWindowFromText(text: string): AnalysisWindow | undefined {
   const t = text.toLowerCase();
 
-  const lastHour = /\b(?:last|final|closing)\s+(?:hour|hr)\b/;
-  const firstHour = /\b(?:first|opening)\s+(?:hour|hr)\b/;
+  const lastHour = /\b(?:last|final|closing)(?:\s+|-)(?:hour|hr)\b/;
+  const firstHour = /\b(?:first|opening)(?:\s+|-)(?:hour|hr)\b/;
   const morning = /\bmorning\b/;
   const afternoon = /\bafternoon\b/;
 
   if (lastHour.test(t)) return normalizeAnalysisWindow({ kind: 'last_hour' }) as AnalysisWindow;
   if (firstHour.test(t)) return normalizeAnalysisWindow({ kind: 'first_hour' }) as AnalysisWindow;
 
-  const nMinutesMatch = t.match(/\b(?:first|opening|last|final|closing)\s+(\d+)\s*(?:minute|minutes|min|mins)\b/);
+  const nMinutesMatch = t.match(/\b(?:first|opening|last|final|closing)(?:\s+|-)?(\d+)(?:\s+|-)?(?:minute|minutes|min|mins)\b/);
   if (nMinutesMatch) {
     const n = parseInt(nMinutesMatch[1], 10);
     const isLast = /\b(?:last|final|closing)\b/.test(nMinutesMatch[0]);
