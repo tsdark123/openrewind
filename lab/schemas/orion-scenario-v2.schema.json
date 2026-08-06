@@ -2122,6 +2122,10 @@
             "additionalProperties": false
           },
           "minItems": 1
+        },
+        "meta": {
+          "type": "object",
+          "additionalProperties": {}
         }
       },
       "required": [

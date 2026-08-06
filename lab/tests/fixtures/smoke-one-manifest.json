@@ -1,0 +1,5 @@
+{
+  "scenarios": [
+    "scenarios/smoke/absolute-seek.json"
+  ]
+}

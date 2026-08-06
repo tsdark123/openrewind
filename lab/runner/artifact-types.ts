@@ -20,6 +20,19 @@ export const turnStatusSchema = z.enum(['pass', 'fail', 'skip', 'timeout', 'erro
 
 export type TurnStatus = z.infer<typeof turnStatusSchema>;
 
+export const coreSemanticStatusSchema = z.enum(['pass', 'fail', 'uncertain']);
+
+export type CoreSemanticStatus = z.infer<typeof coreSemanticStatusSchema>;
+
+export const consumerQualityStatusSchema = z.enum([
+  'pass',
+  'warn',
+  'fail',
+  'not_evaluated',
+]);
+
+export type ConsumerQualityStatus = z.infer<typeof consumerQualityStatusSchema>;
+
 export const violationSchema = z.object({
   stage: z.string(),
   message: z.string(),
@@ -33,6 +46,8 @@ export const turnResultSchema = z.object({
   turnId: z.string(),
   utterance: z.string(),
   status: turnStatusSchema,
+  coreSemanticStatus: coreSemanticStatusSchema.default('uncertain'),
+  consumerQualityStatus: consumerQualityStatusSchema.default('not_evaluated'),
   durationMs: z.number().int().optional(),
   route: planSourceSchema.optional(),
   plan: z.record(z.unknown()).optional(),
@@ -44,6 +59,9 @@ export const turnResultSchema = z.object({
   finalWorldState: z.record(z.unknown()).optional(),
   message: z.string().optional(),
   violations: z.array(violationSchema).default([]),
+  coreViolations: z.array(violationSchema).default([]),
+  consumerViolations: z.array(violationSchema).default([]),
+  consumerQualityWarnings: z.array(violationSchema).default([]),
 });
 
 export type TurnResult = z.infer<typeof turnResultSchema>;
@@ -59,6 +77,8 @@ export const scenarioResultPayloadSchema = z.object({
   engineUrl: z.string().optional(),
   dataSet: z.record(z.unknown()),
   status: turnStatusSchema,
+  coreSemanticStatus: coreSemanticStatusSchema.default('uncertain'),
+  consumerQualityStatus: consumerQualityStatusSchema.default('not_evaluated'),
   durationMs: z.number().int(),
   message: z.string().optional(),
   turns: z.array(turnResultSchema),
@@ -87,6 +107,11 @@ export const runSummarySchema = z.object({
   failCount: z.number().int(),
   timeoutCount: z.number().int(),
   skipCount: z.number().int().default(0),
+  coreSemanticPassCount: z.number().int().default(0),
+  coreSemanticFailCount: z.number().int().default(0),
+  consumerQualityPassCount: z.number().int().default(0),
+  consumerQualityWarnCount: z.number().int().default(0),
+  consumerQualityFailCount: z.number().int().default(0),
   model: z.string().optional(),
   engineUrl: z.string().optional(),
   ollamaUrl: z.string().optional(),

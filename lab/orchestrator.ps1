@@ -143,6 +143,11 @@ function Wait-EngineHealthy {
             Write-Log "Engine healthy at $Url"
             return
         } catch {
+            $msg = $_.ToString()
+            if ($msg -match 'No active session') {
+                Write-Log "Engine healthy at $Url (no active session)"
+                return
+            }
             Start-Sleep -Milliseconds 250
         }
     }

@@ -15,7 +15,7 @@
         "message": "Seeked to 11:30.",
         "data": {
           "time": "11:30",
-          "cursor": 60
+          "cursor": 120
         }
       }
     ],
@@ -33,7 +33,7 @@
       "symbol": "SYNTH",
       "date": "2026-08-05",
       "timeframe": 1,
-      "cursor": 60,
+      "cursor": 120,
       "totalCandles": 390,
       "isPlaying": false,
       "speed": 1,
@@ -160,8 +160,8 @@
       "symbol": "SYNTH",
       "date": "2026-08-05",
       "timeframe": 5,
-      "cursor": 77,
-      "totalCandles": 78,
+      "cursor": 389,
+      "totalCandles": 390,
       "isPlaying": false,
       "speed": 1,
       "direction": "forward",

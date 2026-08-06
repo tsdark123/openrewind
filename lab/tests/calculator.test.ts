@@ -57,6 +57,14 @@ describe('reference calculator', () => {
     expect(result.candleCount).toBe(390);
   });
 
+  it('locates 11:30 candle at cursor 120 with zero-based indexing', () => {
+    const c = candles.find((x) => x.marketTime === '11:30')!;
+    const index = candles.indexOf(c);
+    // 09:30 is index 0; 11:30 is 120 minutes later, so index 120.
+    expect(index).toBe(120);
+    expect(index).not.toBe(60);
+  });
+
   it('computes 11:30 candle shape', () => {
     const c = candles.find((x) => x.marketTime === '11:30')!;
     const shape = candleShape(c);

@@ -50,7 +50,7 @@
         "symbol": "SYNTH",
         "date": "2026-08-05",
         "timeframe": 1,
-        "cursor": 60,
+        "cursor": 120,
         "totalCandles": 390,
         "sessionActive": true
       },

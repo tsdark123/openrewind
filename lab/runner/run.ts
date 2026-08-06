@@ -15,6 +15,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { ScenarioRunner } from './scenario-runner.ts';
 import { FixtureEngineAdapter } from './adapters/engine-adapter.ts';
 import { FixtureAgentAdapter } from './adapters/fixture-agent.ts';
@@ -87,7 +88,7 @@ async function loadAdapters(opts: CliOptions, scenarios: Scenario[]): Promise<{ 
   }
 
   const resolved = path.resolve(opts.adapterModule);
-  const mod = await import(resolved);
+  const mod = await import(pathToFileURL(resolved).href);
   if (typeof mod.createProductionAgentAdapter !== 'function' || typeof mod.createProductionEngineAdapter !== 'function') {
     throw new Error(`Adapter module ${resolved} must export createProductionAgentAdapter and createProductionEngineAdapter.`);
   }
@@ -129,6 +130,7 @@ function collectScenarios(opts: CliOptions): Scenario[] {
 
 async function main() {
   const opts = parseArgs();
+  process.env.OLLAMA_BASE_URL = opts.ollamaUrl;
   const scenarios = collectScenarios(opts);
 
   const { engine, agent } = await loadAdapters(opts, scenarios);

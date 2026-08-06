@@ -61,6 +61,25 @@
                     "error"
                   ]
                 },
+                "coreSemanticStatus": {
+                  "type": "string",
+                  "enum": [
+                    "pass",
+                    "fail",
+                    "uncertain"
+                  ],
+                  "default": "uncertain"
+                },
+                "consumerQualityStatus": {
+                  "type": "string",
+                  "enum": [
+                    "pass",
+                    "warn",
+                    "fail",
+                    "not_evaluated"
+                  ],
+                  "default": "not_evaluated"
+                },
                 "durationMs": {
                   "type": "integer"
                 },
@@ -87,6 +106,25 @@
                           "timeout",
                           "error"
                         ]
+                      },
+                      "coreSemanticStatus": {
+                        "type": "string",
+                        "enum": [
+                          "pass",
+                          "fail",
+                          "uncertain"
+                        ],
+                        "default": "uncertain"
+                      },
+                      "consumerQualityStatus": {
+                        "type": "string",
+                        "enum": [
+                          "pass",
+                          "warn",
+                          "fail",
+                          "not_evaluated"
+                        ],
+                        "default": "not_evaluated"
                       },
                       "durationMs": {
                         "type": "integer"
@@ -153,6 +191,72 @@
                         "type": "string"
                       },
                       "violations": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "stage": {
+                              "type": "string"
+                            },
+                            "message": {
+                              "type": "string"
+                            },
+                            "expected": {},
+                            "actual": {}
+                          },
+                          "required": [
+                            "stage",
+                            "message"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "default": []
+                      },
+                      "coreViolations": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "stage": {
+                              "type": "string"
+                            },
+                            "message": {
+                              "type": "string"
+                            },
+                            "expected": {},
+                            "actual": {}
+                          },
+                          "required": [
+                            "stage",
+                            "message"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "default": []
+                      },
+                      "consumerViolations": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "stage": {
+                              "type": "string"
+                            },
+                            "message": {
+                              "type": "string"
+                            },
+                            "expected": {},
+                            "actual": {}
+                          },
+                          "required": [
+                            "stage",
+                            "message"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "default": []
+                      },
+                      "consumerQualityWarnings": {
                         "type": "array",
                         "items": {
                           "type": "object",
@@ -260,6 +364,26 @@
                   "type": "integer"
                 },
                 "skipCount": {
+                  "type": "integer",
+                  "default": 0
+                },
+                "coreSemanticPassCount": {
+                  "type": "integer",
+                  "default": 0
+                },
+                "coreSemanticFailCount": {
+                  "type": "integer",
+                  "default": 0
+                },
+                "consumerQualityPassCount": {
+                  "type": "integer",
+                  "default": 0
+                },
+                "consumerQualityWarnCount": {
+                  "type": "integer",
+                  "default": 0
+                },
+                "consumerQualityFailCount": {
                   "type": "integer",
                   "default": 0
                 },

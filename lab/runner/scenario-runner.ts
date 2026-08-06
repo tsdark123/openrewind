@@ -39,6 +39,11 @@ export class ScenarioRunner {
     let failCount = 0;
     let timeoutCount = 0;
     let skipCount = 0;
+    let coreSemanticPassCount = 0;
+    let coreSemanticFailCount = 0;
+    let consumerQualityPassCount = 0;
+    let consumerQualityWarnCount = 0;
+    let consumerQualityFailCount = 0;
 
     fs.mkdirSync(this.opts.outboxDir, { recursive: true });
     const eventsPath = path.join(this.opts.outboxDir, 'events.jsonl');
@@ -53,6 +58,13 @@ export class ScenarioRunner {
       else if (envelope.payload.status === 'fail') failCount++;
       else if (envelope.payload.status === 'timeout') timeoutCount++;
       else if (envelope.payload.status === 'skip') skipCount++;
+
+      if (envelope.payload.coreSemanticStatus === 'pass') coreSemanticPassCount++;
+      else coreSemanticFailCount++;
+
+      if (envelope.payload.consumerQualityStatus === 'pass') consumerQualityPassCount++;
+      else if (envelope.payload.consumerQualityStatus === 'warn') consumerQualityWarnCount++;
+      else if (envelope.payload.consumerQualityStatus === 'fail') consumerQualityFailCount++;
     }
 
     const summary: RunSummary = {
@@ -67,6 +79,11 @@ export class ScenarioRunner {
       failCount,
       timeoutCount,
       skipCount,
+      coreSemanticPassCount,
+      coreSemanticFailCount,
+      consumerQualityPassCount,
+      consumerQualityWarnCount,
+      consumerQualityFailCount,
       model: this.opts.model,
       engineUrl: this.opts.engineUrl,
       ollamaUrl: this.opts.ollamaUrl,
@@ -94,6 +111,8 @@ export class ScenarioRunner {
     const turnResults: TurnResult[] = [];
     const previousAgentResults: AgentTurnResult[] = [];
     let scenarioStatus: import('./artifact-types.ts').TurnStatus = 'pass';
+    let scenarioCoreStatus: import('./artifact-types.ts').CoreSemanticStatus = 'pass';
+    let scenarioConsumerStatus: import('./artifact-types.ts').ConsumerQualityStatus = 'not_evaluated';
     const scenarioStart = Date.now();
 
     const referenceCandles = await this.opts.engineAdapter.fetchCandles({
@@ -140,6 +159,20 @@ export class ScenarioRunner {
       if (evaluated.status !== 'pass' && scenarioStatus === 'pass') {
         scenarioStatus = evaluated.status;
       }
+
+      if (evaluated.coreSemanticStatus !== 'pass' && scenarioCoreStatus === 'pass') {
+        scenarioCoreStatus = 'fail';
+      }
+
+      if (scenarioConsumerStatus === 'not_evaluated') {
+        if (evaluated.consumerQualityStatus !== 'not_evaluated') {
+          scenarioConsumerStatus = evaluated.consumerQualityStatus;
+        }
+      } else if (evaluated.consumerQualityStatus === 'fail') {
+        scenarioConsumerStatus = 'fail';
+      } else if (evaluated.consumerQualityStatus === 'warn' && scenarioConsumerStatus === 'pass') {
+        scenarioConsumerStatus = 'warn';
+      }
     }
 
     const payload: ScenarioResultPayload = {
@@ -153,6 +186,8 @@ export class ScenarioRunner {
       engineUrl: this.opts.engineUrl,
       dataSet: scenario.dataSet,
       status: scenarioStatus,
+      coreSemanticStatus: scenarioCoreStatus,
+      consumerQualityStatus: scenarioConsumerStatus,
       durationMs: Date.now() - scenarioStart,
       turns: turnResults,
       note: 'fixture-mode lab validation; not real Orion certification',

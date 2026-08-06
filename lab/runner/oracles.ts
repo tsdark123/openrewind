@@ -487,7 +487,12 @@ function checkFinalWorldState(
 
   if (turn.expectedContextUnchanged && previousResults.length > 0) {
     const previous = previousResults[previousResults.length - 1].finalWorldState as Record<string, unknown> | undefined;
-    if (!deepEqual(state, previous ?? {})) {
+    const stable = (obj: Record<string, unknown> | undefined) => {
+      if (!obj) return obj;
+      const { builtAt, ...rest } = obj;
+      return rest;
+    };
+    if (!deepEqual(stable(state), stable(previous) ?? {})) {
       violations.push({
         stage: 'final-world-state',
         message: `WorldState was expected to remain unchanged`,
@@ -498,29 +503,157 @@ function checkFinalWorldState(
   }
 }
 
+function containsInternalEngineIdentifier(message: string): boolean {
+  // Engine-internal policy labels, plan IDs, and raw ISO timestamps with milliseconds.
+  return (
+    /\bengine_[\w_]+\b/i.test(message) ||
+    /\bplan-[a-z0-9-]+\b/i.test(message) ||
+    /\b\d{10,}\b/.test(message) ||
+    /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z/.test(message)
+  );
+}
+
+function looksLikeAnswerTime(message: string): string | undefined {
+  // Detects a phrase that asserts a specific time as *the* requested time,
+  // e.g. "The 11:49 candle", "candle at 11:49".
+  const m = message.match(/(?:the |^)(\d{1,2}:\d{2})\s+(?:candle|bar)|(?:candle|bar)\s+(?:at|for)\s+(\d{1,2}:\d{2})/i);
+  return m?.[1] ?? m?.[2];
+}
+
+function isContradictoryPhrase(phrase: string, message: string): boolean {
+  if (/^\d{1,2}:\d{2}$/.test(phrase)) {
+    const answerTime = looksLikeAnswerTime(message);
+    if (answerTime && answerTime !== phrase) return true;
+  }
+  return false;
+}
+
+function isMessageGrounded(
+  turn: Turn,
+  result: AgentTurnResult,
+  allowedNumbers: import('./numeric-equivalence.ts').AllowedNumber[],
+): boolean {
+  const message = result.message ?? '';
+  if (message.trim().length === 0) return false;
+
+  // Clarification/unsupported turns with no side effects are grounded if they
+  // explain, ask a question, or do not claim an action.
+  if (result.capabilities.length === 0 && result.receipts.length === 0) {
+    const clarificationWords = /\b(what|how|would|can|can't|cannot|support|unsupported|clarify|explain|sorry)\b/i;
+    return clarificationWords.test(message) || message.includes('?');
+  }
+
+  // Otherwise the message should contain a known anchor: symbol, date, an allowed
+  // number, or analysis/receipt vocabulary.
+  const symbol = (result.finalWorldState?.symbol ?? turn.exactInvariants?.symbol) as string | undefined;
+  const date = (result.finalWorldState?.date ?? turn.exactInvariants?.date) as string | undefined;
+  const hasSymbol = symbol ? message.toLowerCase().includes(symbol.toLowerCase()) : false;
+  const hasDate = date ? message.includes(date) : false;
+  const hasAllowedNumber = allowedNumbers.some((n) =>
+    message.includes(String(n.value)) ||
+    message.includes(n.value.toFixed(2)) ||
+    message.includes(n.value.toFixed(0)),
+  );
+  const hasAnalysisTerms = /\b(open|high|low|close|volume|candle|bar|range|delta|session|summary)\b/i.test(message);
+  const hasTime = /\b\d{1,2}:\d{2}\b/.test(message);
+
+  return hasSymbol || hasDate || hasAllowedNumber || hasAnalysisTerms || hasTime;
+}
+
+function isEvasiveOrUnrelated(
+  turn: Turn,
+  result: AgentTurnResult,
+  allowedNumbers: import('./numeric-equivalence.ts').AllowedNumber[],
+): boolean {
+  const message = result.message ?? '';
+  if (message.trim().length === 0) return true;
+
+  // A non-empty message that has no side effects and no clear relation to the
+  // subject is evasive unless it is a clarification/unsupported response.
+  if (result.capabilities.length === 0 && result.receipts.length === 0) {
+    const clarificationWords = /\b(what|how|would|can|can't|cannot|support|unsupported|clarify|explain|sorry)\b/i;
+    const hasQuestion = message.includes('?');
+    return !(clarificationWords.test(message) || hasQuestion);
+  }
+
+  return !isMessageGrounded(turn, result, allowedNumbers);
+}
+
+function containsActionClaimWithoutReceipt(result: AgentTurnResult): boolean {
+  const message = result.message ?? '';
+  if (result.capabilities.length > 0 || result.receipts.length > 0) return false;
+  // A message with no receipts/capabilities should not claim an action happened.
+  const actionClaims = /\b(?:I\s+(?:set|sought|switched|changed|played|analyzed|compared)|(?:sought|switched|changed|played|analyzed|compared)\s+(?:the|to))\b/i;
+  const negatedClaims = /\b(?:did\s+not|didn't|could\s+not|couldn't|failed|unable)\b/i;
+  return actionClaims.test(message) && !negatedClaims.test(message);
+}
+
+function containsHiddenFailure(result: AgentTurnResult): boolean {
+  const message = result.message ?? '';
+  const hasFailedReceipt = result.receipts.some((r) => (r as { success?: boolean }).success === false);
+  if (!hasFailedReceipt) return false;
+  const failureWords = /\b(?:did\s+not|didn't|could\s+not|couldn't|failed|unable|error|not\s+confirm)\b/i;
+  return !failureWords.test(message);
+}
+
 function checkConsumerResponse(
   turn: Turn,
   result: AgentTurnResult,
   allowedNumbers: import('./numeric-equivalence.ts').AllowedNumber[],
-  violations: Violation[],
+  failures: Violation[],
+  warnings: Violation[],
 ): void {
   const expectations = turn.consumerResponseExpectations ?? scenarioDefaultConsumerResponse();
   const message = result.message ?? '';
 
+  if (message.trim().length === 0) {
+    failures.push({
+      stage: 'consumer',
+      message: 'Consumer response is empty or whitespace',
+      actual: message,
+    });
+    // Empty messages cannot satisfy any further expectations.
+    return;
+  }
+
+  if (isEvasiveOrUnrelated(turn, result, allowedNumbers)) {
+    failures.push({
+      stage: 'consumer',
+      message: 'Consumer response is evasive or unrelated to the request',
+      actual: message,
+    });
+  }
+
   for (const phrase of expectations.mustContain ?? []) {
     if (!message.toLowerCase().includes(phrase.toLowerCase())) {
-      violations.push({
-        stage: 'consumer',
-        message: `Response missing required phrase: "${phrase}"`,
-        expected: phrase,
-        actual: message,
-      });
+      if (isContradictoryPhrase(phrase, message)) {
+        failures.push({
+          stage: 'consumer',
+          message: `Response contradicts required phrase "${phrase}"`,
+          expected: phrase,
+          actual: message,
+        });
+      } else if (isMessageGrounded(turn, result, allowedNumbers)) {
+        warnings.push({
+          stage: 'consumer',
+          message: `Response missing required phrase "${phrase}" but is semantically grounded`,
+          expected: phrase,
+          actual: message,
+        });
+      } else {
+        failures.push({
+          stage: 'consumer',
+          message: `Response missing required phrase: "${phrase}"`,
+          expected: phrase,
+          actual: message,
+        });
+      }
     }
   }
 
   for (const phrase of expectations.mustNotContain ?? []) {
     if (message.toLowerCase().includes(phrase.toLowerCase())) {
-      violations.push({
+      failures.push({
         stage: 'consumer',
         message: `Response contains forbidden phrase: "${phrase}"`,
         actual: message,
@@ -530,17 +663,26 @@ function checkConsumerResponse(
 
   for (const pattern of expectations.mustMatch ?? []) {
     if (!new RegExp(pattern, 'i').test(message)) {
-      violations.push({
-        stage: 'consumer',
-        message: `Response does not match regex: ${pattern}`,
-        actual: message,
-      });
+      if (isMessageGrounded(turn, result, allowedNumbers)) {
+        warnings.push({
+          stage: 'consumer',
+          message: `Response does not match regex "${pattern}" but is semantically grounded`,
+          expected: pattern,
+          actual: message,
+        });
+      } else {
+        failures.push({
+          stage: 'consumer',
+          message: `Response does not match regex: ${pattern}`,
+          actual: message,
+        });
+      }
     }
   }
 
   for (const topic of expectations.forbiddenTopics ?? []) {
     if (new RegExp(`\\b${topic.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(message)) {
-      violations.push({
+      failures.push({
         stage: 'consumer',
         message: `Response contains forbidden topic: ${topic}`,
         actual: message,
@@ -549,7 +691,7 @@ function checkConsumerResponse(
   }
 
   if (expectations.maxLength && message.length > expectations.maxLength) {
-    violations.push({
+    failures.push({
       stage: 'consumer',
       message: `Response exceeds maxLength ${expectations.maxLength}`,
       expected: expectations.maxLength,
@@ -564,12 +706,36 @@ function checkConsumerResponse(
       expectations.numericEquivalence ?? defaultNumericEquivalenceConfig(),
     );
     if (!numericCheck.ok) {
-      violations.push({
+      failures.push({
         stage: 'consumer-numeric',
         message: `Unsupported or hallucinated numbers: ${numericCheck.unsupported.join(', ')}`,
         actual: numericCheck.unsupported,
       });
     }
+  }
+
+  if (containsInternalEngineIdentifier(message)) {
+    warnings.push({
+      stage: 'consumer',
+      message: 'Response exposes internal engine identifiers or raw timestamps',
+      actual: message,
+    });
+  }
+
+  if (containsActionClaimWithoutReceipt(result)) {
+    failures.push({
+      stage: 'consumer',
+      message: 'Response claims an action occurred but no receipt was produced',
+      actual: message,
+    });
+  }
+
+  if (containsHiddenFailure(result)) {
+    failures.push({
+      stage: 'consumer',
+      message: 'Response hides a failed capability behind confident prose',
+      actual: message,
+    });
   }
 }
 
@@ -644,32 +810,63 @@ function checkCapabilityNames(
 
 export function evaluateTurn(opts: EvaluateTurnOptions): TurnResult {
   const { scenario, turn, turnResult, previousResults, referenceCandles, durationMs } = opts;
-  const violations: Violation[] = [];
+  const coreViolations: Violation[] = [];
 
-  checkStatusAndSafety(turn, turnResult, violations);
-  checkCapabilityNames(turn, turnResult, violations);
-  checkForbiddenAndPermitted(turn, turnResult, violations);
-  checkGroundingInvariants(turn, turnResult, violations);
-  checkRequiredCapabilities(turn, turnResult, violations);
-  checkContextInheritance(scenario, turn, turnResult, previousResults, violations);
-  checkReceipts(turn, turnResult, violations);
-  checkNumericalTruth(turn, turnResult, referenceCandles, violations);
-  checkFinalWorldState(turn, turnResult, previousResults, violations);
+  checkStatusAndSafety(turn, turnResult, coreViolations);
+  checkCapabilityNames(turn, turnResult, coreViolations);
+  checkForbiddenAndPermitted(turn, turnResult, coreViolations);
+  checkGroundingInvariants(turn, turnResult, coreViolations);
+  checkRequiredCapabilities(turn, turnResult, coreViolations);
+  checkContextInheritance(scenario, turn, turnResult, previousResults, coreViolations);
+  checkReceipts(turn, turnResult, coreViolations);
+  checkNumericalTruth(turn, turnResult, referenceCandles, coreViolations);
+  checkFinalWorldState(turn, turnResult, previousResults, coreViolations);
+  checkExactRouteAndPlan(turn, turnResult, coreViolations);
 
+  const consumerFailures: Violation[] = [];
+  const consumerWarnings: Violation[] = [];
   const allowedNumbers: import('./numeric-equivalence.ts').AllowedNumber[] = [];
   for (const receipt of turnResult.receipts) {
     allowedNumbersFromObject((receipt as { data?: unknown }).data, 'receipt', allowedNumbers);
   }
-  checkConsumerResponse(turn, turnResult, allowedNumbers, violations);
-  checkExactRouteAndPlan(turn, turnResult, violations);
+  checkConsumerResponse(turn, turnResult, allowedNumbers, consumerFailures, consumerWarnings);
 
-  const status: import('./artifact-types.ts').TurnStatus =
-    violations.length === 0 ? 'pass' : 'fail';
+  const coreSemanticStatus: import('./artifact-types.ts').CoreSemanticStatus =
+    coreViolations.length === 0 ? 'pass' : 'fail';
+
+  const hasConsumerExpectations =
+    turn.consumerResponseExpectations !== undefined || consumerFailures.length > 0 || consumerWarnings.length > 0;
+
+  let consumerQualityStatus: import('./artifact-types.ts').ConsumerQualityStatus;
+  if (!hasConsumerExpectations) {
+    consumerQualityStatus = 'not_evaluated';
+  } else if (consumerFailures.length > 0) {
+    consumerQualityStatus = 'fail';
+  } else if (consumerWarnings.length > 0) {
+    consumerQualityStatus = 'warn';
+  } else {
+    consumerQualityStatus = 'pass';
+  }
+
+  // Overall turn status reflects core semantics; consumer quality is reported
+  // separately. Consumer warnings do not fail the overall turn.
+  let status: import('./artifact-types.ts').TurnStatus;
+  if (coreSemanticStatus !== 'pass') {
+    status = 'fail';
+  } else if (consumerQualityStatus === 'fail') {
+    status = 'fail';
+  } else {
+    status = 'pass';
+  }
+
+  const violations = [...coreViolations, ...consumerFailures];
 
   return {
     turnId: turn.id,
     utterance: turn.utterance,
     status,
+    coreSemanticStatus,
+    consumerQualityStatus,
     durationMs,
     route: turnResult.route,
     plan: turnResult.plan,
@@ -681,5 +878,8 @@ export function evaluateTurn(opts: EvaluateTurnOptions): TurnResult {
     finalWorldState: turnResult.finalWorldState,
     message: turnResult.message,
     violations,
+    coreViolations,
+    consumerViolations: consumerFailures,
+    consumerQualityWarnings: consumerWarnings,
   };
 }

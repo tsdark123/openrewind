@@ -10,9 +10,12 @@ export interface ReportOptions {
 
 function violationLines(turn: TurnResult): string[] {
   const lines: string[] = [];
-  const first = turn.violations[0];
-  if (first) {
-    lines.push(`- **First failing stage:** ${first.stage}`);
+  const firstCore = turn.coreViolations?.[0];
+  const firstConsumer = turn.consumerViolations?.[0];
+  if (firstCore) {
+    lines.push(`- **First failing core stage:** ${firstCore.stage}`);
+  } else if (firstConsumer) {
+    lines.push(`- **First failing consumer stage:** ${firstConsumer.stage}`);
   }
 
   if (turn.expectedCapabilities) {
@@ -22,7 +25,7 @@ function violationLines(turn: TurnResult): string[] {
     lines.push(`- **Actual capabilities:** ${turn.capabilities.join(', ') || '(none)'}`);
   }
 
-  const invariants = turn.violations.filter((v) => v.stage === 'grounding' || v.stage === 'final-world-state');
+  const invariants = (turn.coreViolations ?? []).filter((v) => v.stage === 'grounding' || v.stage === 'final-world-state');
   if (invariants.length > 0) {
     lines.push(`- **Violated exact invariants / final WorldState:**`);
     for (const v of invariants) {
@@ -32,7 +35,7 @@ function violationLines(turn: TurnResult): string[] {
     }
   }
 
-  const forbidden = turn.violations.filter((v) => v.stage === 'forbidden');
+  const forbidden = (turn.coreViolations ?? []).filter((v) => v.stage === 'forbidden');
   if (forbidden.length > 0) {
     lines.push(`- **Forbidden side effects:**`);
     for (const v of forbidden) {
@@ -41,7 +44,7 @@ function violationLines(turn: TurnResult): string[] {
     }
   }
 
-  const context = turn.violations.filter((v) => v.stage.startsWith('context'));
+  const context = (turn.coreViolations ?? []).filter((v) => v.stage.startsWith('context'));
   if (context.length > 0) {
     lines.push(`- **Expected versus actual context:**`);
     for (const v of context) {
@@ -51,7 +54,7 @@ function violationLines(turn: TurnResult): string[] {
     }
   }
 
-  const numeric = turn.violations.filter((v) => v.stage === 'numeric' || v.stage === 'consumer-numeric');
+  const numeric = (turn.coreViolations ?? []).filter((v) => v.stage === 'numeric' || v.stage === 'consumer-numeric');
   if (numeric.length > 0) {
     lines.push(`- **Numeric mismatches:**`);
     for (const v of numeric) {
@@ -61,9 +64,26 @@ function violationLines(turn: TurnResult): string[] {
     }
   }
 
-  if (turn.violations.length > 0) {
-    lines.push(`- **All violations:**`);
-    for (const v of turn.violations) {
+  const allCore = turn.coreViolations ?? [];
+  if (allCore.length > 0) {
+    lines.push(`- **All core semantic violations:**`);
+    for (const v of allCore) {
+      lines.push(`  - **${v.stage}**: ${v.message}`);
+    }
+  }
+
+  const allConsumer = turn.consumerViolations ?? [];
+  if (allConsumer.length > 0) {
+    lines.push(`- **All consumer-quality failures:**`);
+    for (const v of allConsumer) {
+      lines.push(`  - **${v.stage}**: ${v.message}`);
+    }
+  }
+
+  const warnings = turn.consumerQualityWarnings ?? [];
+  if (warnings.length > 0) {
+    lines.push(`- **Consumer-quality warnings:**`);
+    for (const v of warnings) {
       lines.push(`  - **${v.stage}**: ${v.message}`);
     }
   }
@@ -118,8 +138,13 @@ export function generateMarkdownReport(opts: ReportOptions): string {
   lines.push(`| Metric | Value |`);
   lines.push(`|--------|-------|`);
   lines.push(`| Scenarios | ${summary.scenarioCount} |`);
-  lines.push(`| Pass | ${summary.passCount} |`);
-  lines.push(`| Fail | ${summary.failCount} |`);
+  lines.push(`| Overall pass | ${summary.passCount} |`);
+  lines.push(`| Overall fail | ${summary.failCount} |`);
+  lines.push(`| Core semantic pass | ${summary.coreSemanticPassCount} |`);
+  lines.push(`| Core semantic fail | ${summary.coreSemanticFailCount} |`);
+  lines.push(`| Consumer-quality pass | ${summary.consumerQualityPassCount} |`);
+  lines.push(`| Consumer-quality warn | ${summary.consumerQualityWarnCount} |`);
+  lines.push(`| Consumer-quality fail | ${summary.consumerQualityFailCount} |`);
   lines.push(`| Timeout | ${summary.timeoutCount} |`);
   lines.push(`| Skip | ${summary.skipCount} |`);
   lines.push('');
@@ -128,21 +153,23 @@ export function generateMarkdownReport(opts: ReportOptions): string {
     const p = envelope.payload;
     lines.push(`## ${p.scenarioId}`);
     lines.push('');
-    lines.push(`**Status:** ${p.status}  `);
+    lines.push(`**Overall status:** ${p.status}  `);
+    lines.push(`**Core semantic status:** ${p.coreSemanticStatus}  `);
+    lines.push(`**Consumer quality status:** ${p.consumerQualityStatus}  `);
     if (p.familyId) lines.push(`**Family:** ${p.familyId}  `);
     lines.push(`**Duration:** ${p.durationMs}ms`);
     lines.push('');
-    lines.push(`| Turn | Status | Duration | Violations |`);
-    lines.push(`|------|--------|----------|------------|`);
+    lines.push(`| Turn | Overall | Core | Consumer | Duration | Violations | Warnings |`);
+    lines.push(`|------|---------|------|----------|----------|------------|----------|`);
     for (const turn of p.turns) {
       lines.push(
-        `| ${turn.turnId} | ${turn.status} | ${turn.durationMs ?? '-'}ms | ${turn.violations.length} |`,
+        `| ${turn.turnId} | ${turn.status} | ${turn.coreSemanticStatus} | ${turn.consumerQualityStatus} | ${turn.durationMs ?? '-'}ms | ${(turn.violations ?? []).length} | ${(turn.consumerQualityWarnings ?? []).length} |`,
       );
     }
     lines.push('');
 
     for (const turn of p.turns) {
-      if (turn.violations.length === 0) continue;
+      if ((turn.violations ?? []).length === 0 && (turn.consumerQualityWarnings ?? []).length === 0) continue;
       lines.push(`### ${turn.turnId}: ${turn.utterance}`);
       lines.push('');
       for (const line of violationLines(turn)) {

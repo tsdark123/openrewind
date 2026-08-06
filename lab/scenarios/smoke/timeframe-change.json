@@ -49,8 +49,8 @@
         "symbol": "SYNTH",
         "date": "2026-08-05",
         "timeframe": 5,
-        "cursor": 77,
-        "totalCandles": 78,
+        "cursor": 389,
+        "totalCandles": 390,
         "sessionActive": true
       },
       "consumerResponseExpectations": {
