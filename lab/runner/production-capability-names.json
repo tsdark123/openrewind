@@ -1,0 +1,23 @@
+{
+  "names": [
+    "analysis.candle_shape",
+    "analysis.compare_candles",
+    "analysis.window_change",
+    "analysis.window_compare",
+    "analysis.window_ohlc",
+    "analysis.window_summary",
+    "analysis.window_volume",
+    "chart.get_candle_at_time",
+    "chart.get_current_candle",
+    "chart.set_timeframe",
+    "playback.pause",
+    "playback.play_until",
+    "playback.seek_relative",
+    "playback.seek_to_time",
+    "session.resolve_symbol",
+    "session.resolve_trading_date",
+    "session.switch_symbol",
+    "session.switch_to_previous_symbol",
+    "system.get_world_state"
+  ]
+}

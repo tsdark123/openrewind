@@ -26,7 +26,7 @@
   },
   "exactInvariants": { "symbol": "SYNTH", "date": "2026-08-05", "timeframe": 1 },
   "permittedActions": ["analysis.*"],
-  "forbiddenActions": ["session.*", "playback.*", "symbol.*"],
+  "forbiddenActions": ["session.*", "playback.*"],
   "expectedContextInheritance": [
     { "fromTurn": "t1", "toTurn": "t2", "mode": "inherit", "fields": ["window"] }
   ],
@@ -52,6 +52,17 @@
         "analysisRequests": [
           { "kind": "window_ohlc", "window": { "kind": "time_range", "fromTime": "09:30", "toTime": "10:30" } }
         ]
+      },
+      "expectedReceipts": [
+        { "capability": "analysis.window_ohlc", "success": true, "dataShape": { "open": true, "high": true, "low": true, "close": true } }
+      ],
+      "expectedFinalWorldState": {
+        "symbol": "SYNTH",
+        "date": "2026-08-05",
+        "timeframe": 1,
+        "cursor": 389,
+        "totalCandles": 390,
+        "sessionActive": true
       },
       "numericalTruthChecks": [
         {
@@ -92,6 +103,17 @@
             "right": { "kind": "time_range", "fromTime": "15:00", "toTime": "16:00" }
           }
         ]
+      },
+      "expectedReceipts": [
+        { "capability": "analysis.window_compare", "success": true, "dataShape": { "left": true, "right": true, "priceDeltaAbs": true, "volumeDeltaAbs": true } }
+      ],
+      "expectedFinalWorldState": {
+        "symbol": "SYNTH",
+        "date": "2026-08-05",
+        "timeframe": 1,
+        "cursor": 389,
+        "totalCandles": 390,
+        "sessionActive": true
       },
       "numericalTruthChecks": [
         {

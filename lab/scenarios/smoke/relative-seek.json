@@ -43,6 +43,17 @@
         "timeframeMinutes": 1,
         "relativeSeekMinutes": 15
       },
+      "expectedReceipts": [
+        { "capability": "playback.seek_relative", "success": true, "dataShape": { "minutes": true, "cursor": true } }
+      ],
+      "expectedFinalWorldState": {
+        "symbol": "SYNTH",
+        "date": "2026-08-05",
+        "timeframe": 1,
+        "cursor": 15,
+        "totalCandles": 390,
+        "sessionActive": true
+      },
       "consumerResponseExpectations": {
         "mustContain": ["15"]
       }

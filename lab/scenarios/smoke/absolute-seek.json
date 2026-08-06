@@ -34,7 +34,7 @@
       "utterance": "Jump to 11:30.",
       "expectedRoute": "deterministic",
       "assertExactRoute": false,
-      "expectedCapabilities": ["playback.seek_absolute"],
+      "expectedCapabilities": ["playback.seek_to_time"],
       "exactInvariants": { "symbol": "SYNTH", "date": "2026-08-05", "timeframe": 1, "seekTime": "11:30" },
       "expectedContextAfter": {
         "kind": "chart_action",
@@ -42,6 +42,17 @@
         "date": { "kind": "absolute", "value": "2026-08-05" },
         "timeframeMinutes": 1,
         "seekTime": "11:30"
+      },
+      "expectedReceipts": [
+        { "capability": "playback.seek_to_time", "success": true, "dataShape": { "time": true, "cursor": true } }
+      ],
+      "expectedFinalWorldState": {
+        "symbol": "SYNTH",
+        "date": "2026-08-05",
+        "timeframe": 1,
+        "cursor": 60,
+        "totalCandles": 390,
+        "sessionActive": true
       },
       "consumerResponseExpectations": {
         "mustContain": ["11:30"]

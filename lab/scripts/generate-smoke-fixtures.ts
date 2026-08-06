@@ -9,7 +9,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadScenario } from '../runner/scenario-validator.ts';
-import type { Scenario } from '../runner/scenario-types.ts';
+import type { Scenario, Turn } from '../runner/scenario-types.ts';
 import { computeCapability } from '../reference/calculator.ts';
 import { FixtureEngineAdapter } from '../runner/adapters/engine-adapter.ts';
 import type { AgentTurnResult } from '../runner/adapters/agent-adapter.ts';
@@ -23,34 +23,25 @@ fs.mkdirSync(fixturesDir, { recursive: true });
 
 const engine = new FixtureEngineAdapter({ fixtureDir: path.join(baseDir, 'reference', 'fixtures') });
 
-function buildFinalWorldState(scenario: Scenario, turn: { id: string; exactInvariants?: { timeframe?: number } }): Record<string, unknown> {
+function buildFinalWorldState(scenario: Scenario, turn: Turn): Record<string, unknown> {
   const session = scenario.initialWorldState.session;
   const invariantTimeframe = turn.exactInvariants?.timeframe ?? session.timeframe;
-  const cursor = (() => {
-    if (turn.id === 'absolute-seek') return 60;
-    if (turn.id === 'relative-seek') return 15;
-    return session.cursor;
-  })();
-  const totalCandles = (() => {
-    if (invariantTimeframe === 5) return 78;
-    if (turn.id === 'symbol-switch') return 390;
-    return session.totalCandles;
-  })();
-  const sessionActive = (() => {
-    if (turn.id === 'symbol-switch') return true;
-    return session.sessionActive;
-  })();
+
+  const expected = turn.expectedFinalWorldState ?? {};
+  const cursor = expected.cursor ?? session.cursor;
+  const totalCandles = expected.totalCandles ?? (invariantTimeframe === 5 ? 78 : session.totalCandles || 390);
+  const sessionActive = expected.sessionActive ?? (scenario.id === 'symbol-switch' ? true : session.sessionActive);
 
   return {
-    symbol: session.symbol || scenario.dataSet.symbol,
-    date: session.date || scenario.dataSet.date,
-    timeframe: invariantTimeframe,
+    symbol: expected.symbol ?? session.symbol ?? scenario.dataSet.symbol,
+    date: expected.date ?? session.date ?? scenario.dataSet.date,
+    timeframe: expected.timeframe ?? invariantTimeframe,
     cursor,
     totalCandles,
-    isPlaying: false,
-    speed: 1,
-    direction: 'forward',
-    currentPrice: session.currentPrice || 0,
+    isPlaying: expected.isPlaying ?? false,
+    speed: expected.speed ?? 1,
+    direction: (expected.direction as any) ?? 'forward',
+    currentPrice: expected.currentPrice ?? session.currentPrice ?? 0,
     sessionActive,
   };
 }
@@ -72,35 +63,78 @@ function buildMessage(scenario: Scenario, summaryData?: any): string {
   }
 }
 
-async function buildResponse(scenario: Scenario, turnIndex: number): Promise<AgentTurnResult> {
-  const turn = scenario.turns[turnIndex];
-  const capabilities = turn.expectedCapabilities ?? [];
+async function buildReceipts(scenario: Scenario, turn: Turn): Promise<{ receipts: Record<string, unknown>[]; summaryData?: any }> {
   const receipts: Record<string, unknown>[] = [];
   let summaryData: any;
 
-  if (capabilities.includes('analysis.window_summary')) {
-    const candles = await engine.fetchCandles(scenario.dataSet);
-    summaryData = computeCapability(candles, {
-      capability: 'analysis.window_summary',
-      window: turn.exactInvariants?.window ?? { kind: 'whole_session' },
-    });
-    receipts.push({
-      stepId: `${turn.id}-summary`,
-      capability: 'analysis.window_summary',
-      success: true,
-      planId: `${scenario.id}-${turn.id}`,
-      message: 'Fixture summary generated.',
-      data: summaryData,
-    });
+  for (const cap of turn.expectedCapabilities ?? []) {
+    const stepId = `${turn.id}-${cap.replace(/\./g, '-')}`;
+    if (cap === 'session.switch_symbol') {
+      receipts.push({
+        stepId,
+        capability: cap,
+        success: true,
+        planId: `${scenario.id}-${turn.id}`,
+        message: `Switched to ${scenario.dataSet.symbol} ${scenario.dataSet.date}.`,
+        data: { symbol: scenario.dataSet.symbol, date: scenario.dataSet.date, sessionActive: true },
+      });
+    } else if (cap === 'chart.set_timeframe') {
+      receipts.push({
+        stepId,
+        capability: cap,
+        success: true,
+        planId: `${scenario.id}-${turn.id}`,
+        message: `Timeframe set to ${turn.exactInvariants?.timeframe ?? 5}m.`,
+        data: { timeframe: turn.exactInvariants?.timeframe ?? 5 },
+      });
+    } else if (cap === 'playback.seek_to_time') {
+      receipts.push({
+        stepId,
+        capability: cap,
+        success: true,
+        planId: `${scenario.id}-${turn.id}`,
+        message: `Seeked to ${turn.exactInvariants?.seekTime}.`,
+        data: { time: turn.exactInvariants?.seekTime, cursor: 60 },
+      });
+    } else if (cap === 'playback.seek_relative') {
+      receipts.push({
+        stepId,
+        capability: cap,
+        success: true,
+        planId: `${scenario.id}-${turn.id}`,
+        message: `Seeked relative 15 minutes.`,
+        data: { minutes: 15, cursor: 15 },
+      });
+    } else if (cap === 'analysis.window_summary') {
+      const candles = await engine.fetchCandles(scenario.dataSet);
+      summaryData = computeCapability(candles, {
+        capability: 'analysis.window_summary',
+        window: turn.exactInvariants?.window ?? { kind: 'whole_session' },
+      });
+      receipts.push({
+        stepId,
+        capability: cap,
+        success: true,
+        planId: `${scenario.id}-${turn.id}`,
+        message: 'Fixture summary generated.',
+        data: summaryData,
+      });
+    }
   }
 
+  return { receipts, summaryData };
+}
+
+async function buildResponse(scenario: Scenario, turnIndex: number): Promise<AgentTurnResult> {
+  const turn = scenario.turns[turnIndex];
+  const { receipts, summaryData } = await buildReceipts(scenario, turn);
   const finalWorldState = buildFinalWorldState(scenario, turn);
 
   return {
     ok: true,
     route: 'deterministic',
     message: buildMessage(scenario, summaryData),
-    capabilities,
+    capabilities: turn.expectedCapabilities ?? [],
     receipts,
     template: turn.expectedContextAfter ? JSON.parse(JSON.stringify(turn.expectedContextAfter)) : undefined,
     finalWorldState,

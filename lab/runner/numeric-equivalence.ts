@@ -51,7 +51,8 @@ const SUFFIX_MULTIPLIERS: Record<string, number> = {
 export function extractConsumerNumbers(text: string): ConsumerNumber[] {
   const results: ConsumerNumber[] = [];
   const approxPrefix = `(?:\\b(?:${APPROXIMATE_WORDS.join('|').replace(/\s+/g, '\\s+')})\\s+)?`;
-  const numberGroup = `([+-]?\\d{1,3}(?:,\\d{3})+(?:\\.\\d+)?|\\d+(?:\\.\\d+)?)`;
+  // Exclude numbers that are part of a time literal such as "11:30".
+  const numberGroup = '((?<![:\\d])[+-]?(?:\\d{1,3}(?:,\\d{3})+(?:\\.\\d+)?|\\d+(?:\\.\\d+)?)(?![\\d:]))';
   // A compact suffix (e.g. 29.99M) is only matched when not part of a longer word
   // like "million". Percent and word multipliers are matched as whole words.
   const suffixOrWord = `(?:\\s*((?:K|M|B|k|m|b)(?!\\w)|%(?!\\w)|(?:thousand|million|billion|percent)(?!\\w)))?`;

@@ -50,6 +50,17 @@
           { "kind": "window_summary", "window": { "kind": "whole_session" } }
         ]
       },
+      "expectedReceipts": [
+        { "capability": "analysis.window_summary", "success": true, "dataShape": { "open": true, "close": true, "totalVolume": true } }
+      ],
+      "expectedFinalWorldState": {
+        "symbol": "SYNTH",
+        "date": "2026-08-05",
+        "timeframe": 1,
+        "cursor": 389,
+        "totalCandles": 390,
+        "sessionActive": true
+      },
       "numericalTruthChecks": [
         {
           "receiptCapability": "analysis.window_summary",

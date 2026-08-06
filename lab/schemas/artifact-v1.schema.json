@@ -34,6 +34,9 @@
                 "scenarioId": {
                   "type": "string"
                 },
+                "familyId": {
+                  "type": "string"
+                },
                 "repetition": {
                   "type": "integer",
                   "default": 1
@@ -107,6 +110,25 @@
                       "plan": {
                         "type": "object",
                         "additionalProperties": {}
+                      },
+                      "expectedCapabilities": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        },
+                        "default": []
+                      },
+                      "permittedActions": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "forbiddenActions": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
                       },
                       "capabilities": {
                         "type": "array",

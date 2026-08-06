@@ -252,6 +252,21 @@ export const latencyLimitsSchema = z.object({
 
 export type LatencyLimits = z.infer<typeof latencyLimitsSchema>;
 
+export const expectedFinalWorldStateSchema = z.object({
+  symbol: z.string().optional(),
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  timeframe: z.number().int().optional(),
+  cursor: z.number().int().optional(),
+  totalCandles: z.number().int().optional(),
+  isPlaying: z.boolean().optional(),
+  speed: z.number().int().optional(),
+  direction: z.enum(['forward', 'backward']).optional(),
+  currentPrice: z.number().optional(),
+  sessionActive: z.boolean().optional(),
+}).optional();
+
+export type ExpectedFinalWorldState = z.infer<typeof expectedFinalWorldStateSchema>;
+
 export const turnSchema = z.object({
   id: z.string(),
   utterance: z.string(),
@@ -267,6 +282,7 @@ export const turnSchema = z.object({
   expectedContextAfter: actionTemplateSchema.optional(),
   expectedContextUnchanged: z.boolean().default(false),
   expectedReceipts: z.array(receiptCheckSchema).default([]),
+  expectedFinalWorldState: expectedFinalWorldStateSchema,
   numericalTruthChecks: z.array(numericTruthCheckSchema).default([]),
   consumerResponseExpectations: consumerResponseExpectationsSchema.optional(),
   latencyMs: z.number().int().optional(),

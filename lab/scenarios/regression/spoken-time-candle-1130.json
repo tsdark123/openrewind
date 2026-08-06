@@ -27,7 +27,7 @@
   },
   "exactInvariants": { "symbol": "SYNTH", "date": "2026-08-05", "timeframe": 1 },
   "permittedActions": ["analysis.*"],
-  "forbiddenActions": ["session.*", "playback.*", "symbol.*"],
+  "forbiddenActions": ["session.*", "playback.*"],
   "latencyLimits": { "maxMsPerTurn": 5000 },
   "turns": [
     {
@@ -50,6 +50,17 @@
         "analysisRequests": [
           { "kind": "candle_shape", "source": "market_time", "marketTime": "11:30" }
         ]
+      },
+      "expectedReceipts": [
+        { "capability": "analysis.candle_shape", "success": true, "dataShape": { "candle": true, "body": true, "upperWick": true, "lowerWick": true, "range": true } }
+      ],
+      "expectedFinalWorldState": {
+        "symbol": "SYNTH",
+        "date": "2026-08-05",
+        "timeframe": 1,
+        "cursor": 389,
+        "totalCandles": 390,
+        "sessionActive": true
       },
       "numericalTruthChecks": [
         {

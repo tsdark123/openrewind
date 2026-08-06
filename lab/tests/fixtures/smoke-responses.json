@@ -4,9 +4,21 @@
     "route": "deterministic",
     "message": "Jumped to 11:30.",
     "capabilities": [
-      "playback.seek_absolute"
+      "playback.seek_to_time"
     ],
-    "receipts": [],
+    "receipts": [
+      {
+        "stepId": "t1-playback-seek_to_time",
+        "capability": "playback.seek_to_time",
+        "success": true,
+        "planId": "absolute-seek-t1",
+        "message": "Seeked to 11:30.",
+        "data": {
+          "time": "11:30",
+          "cursor": 60
+        }
+      }
+    ],
     "template": {
       "kind": "chart_action",
       "symbol": "SYNTH",
@@ -21,7 +33,7 @@
       "symbol": "SYNTH",
       "date": "2026-08-05",
       "timeframe": 1,
-      "cursor": 0,
+      "cursor": 60,
       "totalCandles": 390,
       "isPlaying": false,
       "speed": 1,
@@ -37,7 +49,19 @@
     "capabilities": [
       "playback.seek_relative"
     ],
-    "receipts": [],
+    "receipts": [
+      {
+        "stepId": "t1-playback-seek_relative",
+        "capability": "playback.seek_relative",
+        "success": true,
+        "planId": "relative-seek-t1",
+        "message": "Seeked relative 15 minutes.",
+        "data": {
+          "minutes": 15,
+          "cursor": 15
+        }
+      }
+    ],
     "template": {
       "kind": "chart_action",
       "symbol": "SYNTH",
@@ -52,7 +76,7 @@
       "symbol": "SYNTH",
       "date": "2026-08-05",
       "timeframe": 1,
-      "cursor": 0,
+      "cursor": 15,
       "totalCandles": 390,
       "isPlaying": false,
       "speed": 1,
@@ -68,7 +92,20 @@
     "capabilities": [
       "session.switch_symbol"
     ],
-    "receipts": [],
+    "receipts": [
+      {
+        "stepId": "t1-session-switch_symbol",
+        "capability": "session.switch_symbol",
+        "success": true,
+        "planId": "symbol-switch-t1",
+        "message": "Switched to SYNTH 2026-08-05.",
+        "data": {
+          "symbol": "SYNTH",
+          "date": "2026-08-05",
+          "sessionActive": true
+        }
+      }
+    ],
     "template": {
       "kind": "chart_action",
       "symbol": "SYNTH",
@@ -83,12 +120,12 @@
       "date": "2026-08-05",
       "timeframe": 1,
       "cursor": 0,
-      "totalCandles": 0,
+      "totalCandles": 390,
       "isPlaying": false,
       "speed": 1,
       "direction": "forward",
       "currentPrice": 0,
-      "sessionActive": false
+      "sessionActive": true
     }
   },
   "timeframe-change:t1": {
@@ -96,9 +133,20 @@
     "route": "deterministic",
     "message": "Switched to 5 minute candles.",
     "capabilities": [
-      "session.set_timeframe"
+      "chart.set_timeframe"
     ],
-    "receipts": [],
+    "receipts": [
+      {
+        "stepId": "t1-chart-set_timeframe",
+        "capability": "chart.set_timeframe",
+        "success": true,
+        "planId": "timeframe-change-t1",
+        "message": "Timeframe set to 5m.",
+        "data": {
+          "timeframe": 5
+        }
+      }
+    ],
     "template": {
       "kind": "chart_action",
       "symbol": "SYNTH",
@@ -112,7 +160,7 @@
       "symbol": "SYNTH",
       "date": "2026-08-05",
       "timeframe": 5,
-      "cursor": 389,
+      "cursor": 77,
       "totalCandles": 78,
       "isPlaying": false,
       "speed": 1,
@@ -130,7 +178,7 @@
     ],
     "receipts": [
       {
-        "stepId": "t1-summary",
+        "stepId": "t1-analysis-window_summary",
         "capability": "analysis.window_summary",
         "success": true,
         "planId": "whole-session-summary-t1",

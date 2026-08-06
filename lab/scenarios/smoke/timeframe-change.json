@@ -25,8 +25,8 @@
     "groundTruth": { "source": "fixture", "fixture": "synthetic-session-1m" }
   },
   "exactInvariants": { "symbol": "SYNTH", "date": "2026-08-05", "timeframe": 5 },
-  "permittedActions": ["session.*"],
-  "forbiddenActions": ["analysis.*", "playback.*", "symbol.*"],
+  "permittedActions": ["chart.*"],
+  "forbiddenActions": ["analysis.*", "playback.*", "session.*"],
   "latencyLimits": { "maxMsPerTurn": 5000 },
   "turns": [
     {
@@ -34,13 +34,24 @@
       "utterance": "Switch to 5 minute candles.",
       "expectedRoute": "deterministic",
       "assertExactRoute": false,
-      "expectedCapabilities": ["session.set_timeframe"],
+      "expectedCapabilities": ["chart.set_timeframe"],
       "exactInvariants": { "symbol": "SYNTH", "date": "2026-08-05", "timeframe": 5 },
       "expectedContextAfter": {
         "kind": "chart_action",
         "symbol": "SYNTH",
         "date": { "kind": "absolute", "value": "2026-08-05" },
         "timeframeMinutes": 5
+      },
+      "expectedReceipts": [
+        { "capability": "chart.set_timeframe", "success": true, "dataShape": { "timeframe": true } }
+      ],
+      "expectedFinalWorldState": {
+        "symbol": "SYNTH",
+        "date": "2026-08-05",
+        "timeframe": 5,
+        "cursor": 77,
+        "totalCandles": 78,
+        "sessionActive": true
       },
       "consumerResponseExpectations": {
         "mustContain": ["5"]

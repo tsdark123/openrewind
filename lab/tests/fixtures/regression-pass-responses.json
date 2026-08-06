@@ -1,0 +1,354 @@
+{
+  "candle-anatomy-follow-up-unsupported:t1": {
+    "ok": true,
+    "route": "deterministic",
+    "message": "The 11:30 candle is bullish with body 0.05 and range 0.09.",
+    "capabilities": [
+      "analysis.candle_shape"
+    ],
+    "receipts": [
+      {
+        "capability": "analysis.candle_shape",
+        "success": true,
+        "data": {
+          "candle": {
+            "marketTime": "11:30",
+            "open": 101.2,
+            "high": 101.27,
+            "low": 101.18,
+            "close": 101.25,
+            "volume": 2200
+          },
+          "body": {
+            "direction": "up",
+            "size": 0.04999999999999716,
+            "topPrice": 101.25,
+            "bottomPrice": 101.2
+          },
+          "upperWick": 0.01999999999999602,
+          "lowerWick": 0.01999999999999602,
+          "range": 0.0899999999999892
+        }
+      }
+    ],
+    "template": {
+      "kind": "chart_action",
+      "symbol": "SYNTH",
+      "date": {
+        "kind": "absolute",
+        "value": "2026-08-05"
+      },
+      "timeframeMinutes": 1,
+      "analysisRequests": [
+        {
+          "kind": "candle_shape",
+          "source": "market_time",
+          "marketTime": "11:30"
+        }
+      ]
+    },
+    "finalWorldState": {
+      "symbol": "SYNTH",
+      "date": "2026-08-05",
+      "timeframe": 1,
+      "cursor": 389,
+      "totalCandles": 390,
+      "sessionActive": true
+    }
+  },
+  "candle-anatomy-follow-up-unsupported:t2": {
+    "ok": true,
+    "route": "unsupported",
+    "message": "I don't support that yet.",
+    "capabilities": [],
+    "receipts": []
+  },
+  "describe-whole-session:t1": {
+    "ok": true,
+    "route": "deterministic",
+    "message": "SYNTH session summary: open 100.00 close 103.89.",
+    "capabilities": [
+      "analysis.window_summary"
+    ],
+    "receipts": [
+      {
+        "capability": "analysis.window_summary",
+        "success": true,
+        "data": {
+          "open": 100,
+          "high": 103.94,
+          "low": 99.94,
+          "close": 103.89,
+          "candleCount": 390,
+          "firstMarketTime": "09:30",
+          "lastMarketTime": "15:59",
+          "highAt": "15:57",
+          "lowAt": "09:31",
+          "absoluteChange": 3.8900000000000006,
+          "percentChange": 3.8900000000000006,
+          "direction": "up",
+          "totalVolume": 1148550,
+          "averageVolume": 2945,
+          "largestVolume": 4890,
+          "largestVolumeAt": "15:59",
+          "averageBody": 0.03333333333333333,
+          "averageUpperWick": 0.019999999999999993,
+          "averageLowerWick": 0.01999999999999992
+        }
+      }
+    ],
+    "template": {
+      "kind": "chart_action",
+      "symbol": "SYNTH",
+      "date": {
+        "kind": "absolute",
+        "value": "2026-08-05"
+      },
+      "timeframeMinutes": 1,
+      "analysisRequests": [
+        {
+          "kind": "window_summary",
+          "window": {
+            "kind": "whole_session"
+          }
+        }
+      ]
+    },
+    "finalWorldState": {
+      "symbol": "SYNTH",
+      "date": "2026-08-05",
+      "timeframe": 1,
+      "cursor": 389,
+      "totalCandles": 390,
+      "sessionActive": true
+    }
+  },
+  "explicit-time-candle-1130:t1": {
+    "ok": true,
+    "route": "deterministic",
+    "message": "The 11:30 candle is bullish with body 0.05 and range 0.09.",
+    "capabilities": [
+      "analysis.candle_shape"
+    ],
+    "receipts": [
+      {
+        "capability": "analysis.candle_shape",
+        "success": true,
+        "data": {
+          "candle": {
+            "marketTime": "11:30",
+            "open": 101.2,
+            "high": 101.27,
+            "low": 101.18,
+            "close": 101.25,
+            "volume": 2200
+          },
+          "body": {
+            "direction": "up",
+            "size": 0.04999999999999716,
+            "topPrice": 101.25,
+            "bottomPrice": 101.2
+          },
+          "upperWick": 0.01999999999999602,
+          "lowerWick": 0.01999999999999602,
+          "range": 0.0899999999999892
+        }
+      }
+    ],
+    "template": {
+      "kind": "chart_action",
+      "symbol": "SYNTH",
+      "date": {
+        "kind": "absolute",
+        "value": "2026-08-05"
+      },
+      "timeframeMinutes": 1,
+      "analysisRequests": [
+        {
+          "kind": "candle_shape",
+          "source": "market_time",
+          "marketTime": "11:30"
+        }
+      ]
+    },
+    "finalWorldState": {
+      "symbol": "SYNTH",
+      "date": "2026-08-05",
+      "timeframe": 1,
+      "cursor": 389,
+      "totalCandles": 390,
+      "sessionActive": true
+    }
+  },
+  "first-hour-vs-last-hour:t1": {
+    "ok": true,
+    "route": "deterministic",
+    "message": "First hour (09:30–10:29): open 100.00 high 100.64 low 99.94 close 100.59.",
+    "capabilities": [
+      "analysis.window_ohlc"
+    ],
+    "receipts": [
+      {
+        "capability": "analysis.window_ohlc",
+        "success": true,
+        "data": {
+          "open": 100,
+          "high": 100.64,
+          "low": 99.94,
+          "close": 100.59,
+          "candleCount": 60,
+          "firstMarketTime": "09:30",
+          "lastMarketTime": "10:29",
+          "highAt": "10:27",
+          "lowAt": "09:31"
+        }
+      }
+    ],
+    "template": {
+      "kind": "chart_action",
+      "symbol": "SYNTH",
+      "date": {
+        "kind": "absolute",
+        "value": "2026-08-05"
+      },
+      "timeframeMinutes": 1,
+      "analysisRequests": [
+        {
+          "kind": "window_ohlc",
+          "window": {
+            "kind": "time_range",
+            "fromTime": "09:30",
+            "toTime": "10:30"
+          }
+        }
+      ]
+    },
+    "finalWorldState": {
+      "symbol": "SYNTH",
+      "date": "2026-08-05",
+      "timeframe": 1,
+      "cursor": 389,
+      "totalCandles": 390,
+      "sessionActive": true
+    }
+  },
+  "first-hour-vs-last-hour:t2": {
+    "ok": true,
+    "route": "deterministic",
+    "message": "Comparing first hour (09:30–10:29) with last hour (15:00–15:59).",
+    "capabilities": [
+      "analysis.window_compare"
+    ],
+    "receipts": [
+      {
+        "capability": "analysis.window_compare",
+        "success": true,
+        "data": {
+          "left": {
+            "kind": "time_range",
+            "fromTime": "09:30",
+            "toTime": "10:30"
+          },
+          "right": {
+            "kind": "time_range",
+            "fromTime": "15:00",
+            "toTime": "16:00"
+          },
+          "priceDeltaAbs": 3.299999999999997,
+          "priceDeltaPercent": 3.280644199224572,
+          "volumeDeltaAbs": 198000,
+          "volumeDeltaPercent": 254.8262548262548
+        }
+      }
+    ],
+    "template": {
+      "kind": "chart_action",
+      "symbol": "SYNTH",
+      "date": {
+        "kind": "absolute",
+        "value": "2026-08-05"
+      },
+      "timeframeMinutes": 1,
+      "analysisRequests": [
+        {
+          "kind": "window_compare",
+          "left": {
+            "kind": "time_range",
+            "fromTime": "09:30",
+            "toTime": "10:30"
+          },
+          "right": {
+            "kind": "time_range",
+            "fromTime": "15:00",
+            "toTime": "16:00"
+          }
+        }
+      ]
+    },
+    "finalWorldState": {
+      "symbol": "SYNTH",
+      "date": "2026-08-05",
+      "timeframe": 1,
+      "cursor": 389,
+      "totalCandles": 390,
+      "sessionActive": true
+    }
+  },
+  "spoken-time-candle-1130:t1": {
+    "ok": true,
+    "route": "deterministic",
+    "message": "The 11:30 candle is bullish with body 0.05 and range 0.09.",
+    "capabilities": [
+      "analysis.candle_shape"
+    ],
+    "receipts": [
+      {
+        "capability": "analysis.candle_shape",
+        "success": true,
+        "data": {
+          "candle": {
+            "marketTime": "11:30",
+            "open": 101.2,
+            "high": 101.27,
+            "low": 101.18,
+            "close": 101.25,
+            "volume": 2200
+          },
+          "body": {
+            "direction": "up",
+            "size": 0.04999999999999716,
+            "topPrice": 101.25,
+            "bottomPrice": 101.2
+          },
+          "upperWick": 0.01999999999999602,
+          "lowerWick": 0.01999999999999602,
+          "range": 0.0899999999999892
+        }
+      }
+    ],
+    "template": {
+      "kind": "chart_action",
+      "symbol": "SYNTH",
+      "date": {
+        "kind": "absolute",
+        "value": "2026-08-05"
+      },
+      "timeframeMinutes": 1,
+      "analysisRequests": [
+        {
+          "kind": "candle_shape",
+          "source": "market_time",
+          "marketTime": "11:30"
+        }
+      ]
+    },
+    "finalWorldState": {
+      "symbol": "SYNTH",
+      "date": "2026-08-05",
+      "timeframe": 1,
+      "cursor": 389,
+      "totalCandles": 390,
+      "sessionActive": true
+    }
+  }
+}

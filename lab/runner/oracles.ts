@@ -13,6 +13,7 @@ import {
   allowedNumbersFromObject,
   checkConsumerNumericEquivalence,
 } from './numeric-equivalence.ts';
+import { validateCapabilityName } from './capability-registry.ts';
 
 export interface EvaluateTurnOptions {
   scenario: Scenario;
@@ -222,11 +223,30 @@ function checkContextInheritance(
   violations: Violation[],
 ): void {
   if (turn.expectedContextUnchanged) {
-    const previousTemplate = previousResults[previousResults.length - 1]?.template as ActionTemplate | undefined;
+    const previous = previousResults[previousResults.length - 1];
+    const previousTemplate = previous?.template as ActionTemplate | undefined;
+
+    if (result.capabilities && result.capabilities.length > 0) {
+      violations.push({
+        stage: 'context',
+        message: `Context was expected to be unchanged, but capabilities were emitted: ${result.capabilities.join(', ')}`,
+        actual: result.capabilities,
+      });
+    }
+
+    if (result.receipts && result.receipts.length > 0) {
+      violations.push({
+        stage: 'context',
+        message: `Context was expected to be unchanged, but execution receipts were produced`,
+        actual: result.receipts.map((r) => (r as { capability?: string }).capability ?? 'unknown'),
+      });
+    }
+
     if (result.template && !deepEqual(result.template, previousTemplate ?? {})) {
       violations.push({
         stage: 'context',
-        message: `Context was expected to be unchanged, but a new template was produced`,
+        message: `Context was expected to be unchanged, but the template changed`,
+        expected: previousTemplate,
         actual: result.template,
       });
     }
@@ -450,12 +470,28 @@ function checkFinalWorldState(
     });
   }
 
+  if (turn.expectedFinalWorldState) {
+    const expected = turn.expectedFinalWorldState as Record<string, unknown> | undefined;
+    for (const [key, expectedValue] of Object.entries(expected ?? {})) {
+      if (expectedValue === undefined) continue;
+      if (state[key] !== expectedValue) {
+        violations.push({
+          stage: 'final-world-state',
+          message: `Final WorldState field ${key} mismatch`,
+          expected: expectedValue,
+          actual: state[key],
+        });
+      }
+    }
+  }
+
   if (turn.expectedContextUnchanged && previousResults.length > 0) {
     const previous = previousResults[previousResults.length - 1].finalWorldState as Record<string, unknown> | undefined;
     if (!deepEqual(state, previous ?? {})) {
       violations.push({
         stage: 'final-world-state',
         message: `WorldState was expected to remain unchanged`,
+        expected: previous,
         actual: state,
       });
     }
@@ -585,11 +621,33 @@ function scenarioDefaultConsumerResponse(): import('./scenario-types.ts').Consum
   };
 }
 
+function checkCapabilityNames(
+  turn: Turn,
+  result: AgentTurnResult,
+  violations: Violation[],
+): void {
+  for (const cap of result.capabilities) {
+    const errors = validateCapabilityName(cap, `scenario ${turn.id} turn result capabilities`);
+    for (const err of errors) {
+      violations.push({ stage: 'capability-name', message: err, actual: cap });
+    }
+  }
+  for (const receipt of result.receipts) {
+    const cap = (receipt as { capability?: string }).capability;
+    if (!cap) continue;
+    const errors = validateCapabilityName(cap, `scenario ${turn.id} receipt`);
+    for (const err of errors) {
+      violations.push({ stage: 'capability-name', message: err, actual: cap });
+    }
+  }
+}
+
 export function evaluateTurn(opts: EvaluateTurnOptions): TurnResult {
   const { scenario, turn, turnResult, previousResults, referenceCandles, durationMs } = opts;
   const violations: Violation[] = [];
 
   checkStatusAndSafety(turn, turnResult, violations);
+  checkCapabilityNames(turn, turnResult, violations);
   checkForbiddenAndPermitted(turn, turnResult, violations);
   checkGroundingInvariants(turn, turnResult, violations);
   checkRequiredCapabilities(turn, turnResult, violations);
@@ -615,6 +673,9 @@ export function evaluateTurn(opts: EvaluateTurnOptions): TurnResult {
     durationMs,
     route: turnResult.route,
     plan: turnResult.plan,
+    expectedCapabilities: turn.expectedCapabilities ?? [],
+    permittedActions: turn.permittedActions,
+    forbiddenActions: turn.forbiddenActions,
     capabilities: turnResult.capabilities,
     receipts: turnResult.receipts,
     finalWorldState: turnResult.finalWorldState,

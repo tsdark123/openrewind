@@ -42,6 +42,16 @@
         "date": { "kind": "absolute", "value": "2026-08-05" },
         "timeframeMinutes": 1
       },
+      "expectedReceipts": [
+        { "capability": "session.switch_symbol", "success": true, "dataShape": { "symbol": true, "date": true, "sessionActive": true } }
+      ],
+      "expectedFinalWorldState": {
+        "symbol": "SYNTH",
+        "date": "2026-08-05",
+        "timeframe": 1,
+        "sessionActive": true,
+        "totalCandles": 390
+      },
       "consumerResponseExpectations": {
         "mustContain": ["SYNTH", "2026-08-05"]
       }

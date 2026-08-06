@@ -55,6 +55,17 @@
           { "kind": "candle_shape", "source": "market_time", "marketTime": "11:30" }
         ]
       },
+      "expectedReceipts": [
+        { "capability": "analysis.candle_shape", "success": true, "dataShape": { "candle": true, "body": true, "upperWick": true, "lowerWick": true, "range": true } }
+      ],
+      "expectedFinalWorldState": {
+        "symbol": "SYNTH",
+        "date": "2026-08-05",
+        "timeframe": 1,
+        "cursor": 389,
+        "totalCandles": 390,
+        "sessionActive": true
+      },
       "numericalTruthChecks": [
         {
           "receiptCapability": "analysis.candle_shape",
@@ -75,7 +86,7 @@
       "expectedRoute": "unsupported",
       "assertExactRoute": false,
       "expectedCapabilities": [],
-      "forbiddenActions": ["analysis.*", "session.*", "playback.*", "timeframe.*"],
+      "forbiddenActions": ["analysis.*", "session.*", "playback.*", "chart.*"],
       "expectedContextUnchanged": true,
       "consumerResponseExpectations": {
         "mustMatch": ["don't|do not|not (?:yet |currently )?support|unsupported|can't|cannot"],

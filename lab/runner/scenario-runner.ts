@@ -147,6 +147,7 @@ export class ScenarioRunner {
       timestamp: new Date().toISOString(),
       mode: this.opts.mode,
       scenarioId: scenario.id,
+      familyId: scenario.familyId,
       repetition: 1,
       model: this.opts.model,
       engineUrl: this.opts.engineUrl,

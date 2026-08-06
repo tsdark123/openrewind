@@ -68,6 +68,8 @@ async function main() {
   });
 
   console.log(`Fixture run complete.`);
+  console.log(`  Note:    This was fixture-mode lab validation using explicit synthetic artifacts.`);
+  console.log(`           It is not real Orion certification and does not invoke Ollama, the engine, or Tauri.`);
   console.log(`  Outbox:  ${opts.outbox}`);
   console.log(`  Report:  ${reportPath}`);
   console.log(`  Status:  ${summary.passCount}/${summary.scenarioCount} passed`);

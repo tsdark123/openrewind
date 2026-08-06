@@ -1,0 +1,9 @@
+{
+  "scenarios": [
+    "/home/ubuntu/repos/openrewind/lab/scenarios/regression/candle-anatomy-follow-up-unsupported.json",
+    "/home/ubuntu/repos/openrewind/lab/scenarios/regression/describe-whole-session.json",
+    "/home/ubuntu/repos/openrewind/lab/scenarios/regression/explicit-time-candle-1130.json",
+    "/home/ubuntu/repos/openrewind/lab/scenarios/regression/first-hour-vs-last-hour.json",
+    "/home/ubuntu/repos/openrewind/lab/scenarios/regression/spoken-time-candle-1130.json"
+  ]
+}

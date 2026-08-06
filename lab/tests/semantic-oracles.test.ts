@@ -17,7 +17,7 @@ describe('capability glob matching', () => {
   it('matches wildcard segments', () => {
     expect(matchesGlob('analysis.window_ohlc', 'analysis.*')).toBe(true);
     expect(matchesGlob('session.switch_symbol', 'session.*')).toBe(true);
-    expect(matchesGlob('playback.seek_absolute', 'playback.*')).toBe(true);
+    expect(matchesGlob('playback.seek_to_time', 'playback.*')).toBe(true);
     expect(matchesGlob('analysis.window_ohlc', 'session.*')).toBe(false);
   });
 
@@ -52,7 +52,7 @@ describe('semantic oracle evaluation', () => {
         },
       ],
       template: JSON.parse(JSON.stringify(turn.expectedContextAfter)),
-      finalWorldState: { symbol: 'SYNTH', date: '2026-08-05', timeframe: 1 },
+      finalWorldState: turn.expectedFinalWorldState ?? { symbol: 'SYNTH', date: '2026-08-05', timeframe: 1 },
     };
 
     const result = evaluateTurn({
@@ -78,7 +78,7 @@ describe('semantic oracle evaluation', () => {
       capabilities: ['analysis.window_summary', 'session.switch_symbol'],
       receipts: [],
       template: JSON.parse(JSON.stringify(turn.expectedContextAfter)),
-      finalWorldState: { symbol: 'SYNTH', date: '2026-08-05', timeframe: 1 },
+      finalWorldState: turn.expectedFinalWorldState ?? { symbol: 'SYNTH', date: '2026-08-05', timeframe: 1 },
     };
 
     const result = evaluateTurn({
@@ -111,7 +111,7 @@ describe('semantic oracle evaluation', () => {
         },
       ],
       template: JSON.parse(JSON.stringify(turn.expectedContextAfter)),
-      finalWorldState: { symbol: 'SYNTH', date: '2026-08-05', timeframe: 1 },
+      finalWorldState: turn.expectedFinalWorldState ?? { symbol: 'SYNTH', date: '2026-08-05', timeframe: 1 },
     };
 
     const result = evaluateTurn({
