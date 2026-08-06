@@ -371,6 +371,44 @@ export function extractTimes(text: string): ParsedTime[] {
     matches.push({ time: t, index });
   };
 
+  function parseRangeToken(token: string, minuteStr?: string): ParsedTime | null {
+    const t = token.toLowerCase().trim();
+    if (t === 'noon') return parse24hTime(12, 0);
+    if (t === 'midnight') return parse24hTime(0, 0);
+    if (t === 'market open') return { ...US_EQUITY_MARKET_OPEN };
+    if (t === 'market close') return { ...US_EQUITY_MARKET_CLOSE };
+    const h = parseHourToken(token);
+    if (h === undefined) return null;
+    const m = minuteStr ? parseInt(minuteStr, 10) : 0;
+    if (Number.isNaN(m)) return null;
+    return parse24hTime(h, m);
+  }
+
+  // Compound time ranges with bare numeric hours and named boundaries:
+  // "from 10 to noon", "between 10 and 12", "10-to-noon", "10 through 12".
+  // These are not caught by the colon or am/pm matchers above, so we extract
+  // both start and end explicitly to make "from X to Y" a first-class window.
+  const connector = `(?:to|and|through|thru|till|\\'?til|until)`;
+  const boundary = `noon|midnight|market\\s+(?:open|close)`;
+  const rangeRe = new RegExp(
+    `\\b(?:from|between)?\\s*(\\d{1,2})(?::(\\d{2}))?\\s*[-:\\s]*${connector}\\s*[-:\\s]*((\\d{1,2})(?::(\\d{2}))?|${boundary})\\b`,
+    'gi'
+  );
+  for (const m of text.matchAll(rangeRe)) {
+    const startTok = m[1];
+    const startMin = m[2];
+    const endTok = m[3];
+    const endMin = m[5];
+    const start = parseRangeToken(startTok, startMin);
+    const end = parseRangeToken(endTok, endMin);
+    if (start && end) {
+      const startIndex = (m.index ?? 0) + (m[0].indexOf(startTok) ?? 0);
+      const endIndex = (m.index ?? 0) + (m[0].lastIndexOf(endTok) ?? 0);
+      add(start.hour, start.minute, startIndex);
+      add(end.hour, end.minute, endIndex);
+    }
+  }
+
   // "2:30pm", "2:30 p.m.", "14:00", etc.
   for (const m of text.matchAll(/\b(\d{1,2}):(\d{2})(?::\d{2})?\s*(a\.?m\.?|p\.?m\.?)?\b/gi)) {
     add(parseInt(m[1], 10), parseInt(m[2], 10), m.index ?? 0, normalizeMeridian(m[3]));

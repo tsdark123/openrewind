@@ -15,7 +15,7 @@
 
 import type {
   AgentPlan, AgentStep, ChartActionIntent, CandleSnapshot, SemanticPlayback,
-  ExecutionContextEntry, InheritableField, CompareSide, ResolvedCompare,
+  ExecutionContextEntry, InheritableField, CompareSide, CompareSides, ResolvedCompare,
   ResolvedCompareSide, AnalysisRequest, AnalysisWindow,
 } from './types';
 import type { AgentContext } from './types';
@@ -355,24 +355,28 @@ function mergeAnalysisRequests(
       if (baseReq || inheritedWindow) {
         const baseCompareLeft = baseReq?.kind === 'window_compare' ? baseReq.left : inheritedWindow;
         const baseCompareRight = baseReq?.kind === 'window_compare' ? baseReq.right : inheritedWindow;
+        const textWindow = newWindowFromText(text);
 
         if (!left && !right) {
           if (baseReq?.kind === 'window_compare' && baseReq.left && baseReq.right) {
             left = baseReq.left;
             right = baseReq.right;
+          } else if (textWindow) {
+            left = inheritedWindow ?? textWindow;
+            right = textWindow;
           } else {
             left = inheritedWindow ?? defaultAnalysisWindow();
             right = inheritedWindow ?? defaultAnalysisWindow();
           }
         } else {
-          if (!left) left = baseCompareLeft ?? right ?? defaultAnalysisWindow();
-          if (!right) right = baseCompareRight ?? left ?? defaultAnalysisWindow();
+          if (!left) left = baseCompareLeft ?? right ?? textWindow ?? defaultAnalysisWindow();
+          if (!right) right = baseCompareRight ?? left ?? textWindow ?? defaultAnalysisWindow();
+        }
 
-          const compare = resolveComparisonWindows(left, right, inheritedWindow, sessionOpen, sessionClose, text);
-          if (compare) {
-            left = compare.left;
-            right = compare.right;
-          }
+        const compare = resolveComparisonWindows(left, right, inheritedWindow, sessionOpen, sessionClose, text);
+        if (compare) {
+          left = compare.left;
+          right = compare.right;
         }
       } else {
         if (!left || !right) {
@@ -394,8 +398,11 @@ function mergeAnalysisRequests(
     let win = (cur.window ? normalizeAnalysisWindow(cur.window) : undefined) as AnalysisWindow | undefined;
     if (isUngroundedWholeSession(win, text, isContextual)) win = undefined;
 
+    const textWindow = newWindowFromText(text);
     if (win) {
       resolved.push({ kind, window: win } as AnalysisRequest);
+    } else if (textWindow) {
+      resolved.push({ kind, window: textWindow } as AnalysisRequest);
     } else if (inheritedWindow) {
       resolved.push({ kind, window: inheritedWindow } as AnalysisRequest);
     } else if (isContextual) {
@@ -486,25 +493,30 @@ export function resolveAnalysisInheritance(
       if (baseReq || inheritedWindow) {
         const baseCompareLeft = baseReq?.kind === 'window_compare' ? baseReq.left : inheritedWindow;
         const baseCompareRight = baseReq?.kind === 'window_compare' ? baseReq.right : inheritedWindow;
+        const textWindow = newWindowFromText(opts.text);
 
         if (!left && !right) {
           // Copy the entire comparison when both sides are missing.
           if (baseReq?.kind === 'window_compare' && baseReq.left && baseReq.right) {
             left = baseReq.left;
             right = baseReq.right;
+          } else if (textWindow) {
+            // A text-derived window pairs with the inherited window for "compare that with the last hour".
+            left = inheritedWindow ?? textWindow;
+            right = textWindow;
           } else {
             left = inheritedWindow ?? defaultAnalysisWindow();
             right = inheritedWindow ?? defaultAnalysisWindow();
           }
         } else {
-          if (!left) left = baseCompareLeft ?? right ?? defaultAnalysisWindow();
-          if (!right) right = baseCompareRight ?? left ?? defaultAnalysisWindow();
+          if (!left) left = baseCompareLeft ?? right ?? textWindow ?? defaultAnalysisWindow();
+          if (!right) right = baseCompareRight ?? left ?? textWindow ?? defaultAnalysisWindow();
+        }
 
-          const compare = resolveComparisonWindows(left, right, inheritedWindow, sessionOpen, sessionClose, opts.text);
-          if (compare) {
-            left = compare.left;
-            right = compare.right;
-          }
+        const compare = resolveComparisonWindows(left, right, inheritedWindow, sessionOpen, sessionClose, opts.text);
+        if (compare) {
+          left = compare.left;
+          right = compare.right;
         }
       } else {
         if (!left || !right) {
@@ -528,6 +540,14 @@ export function resolveAnalysisInheritance(
       continue;
     }
 
+    // An explicit text-derived window (e.g. "from 10 to noon" or "first hour")
+    // overrides an ungrounded or missing model window and any inherited default.
+    const textWindow = newWindowFromText(opts.text);
+    if (textWindow) {
+      resolved.push({ kind: cur.kind, window: textWindow } as AnalysisRequest);
+      continue;
+    }
+
     const inherited = inheritedWindow;
     if (inherited) {
       resolved.push({ kind: cur.kind, window: inherited } as AnalysisRequest);
@@ -539,6 +559,18 @@ export function resolveAnalysisInheritance(
     }
 
     resolved.push({ kind: cur.kind, window: defaultAnalysisWindow() } as AnalysisRequest);
+  }
+
+  // A compound request that explicitly asks for a move/change but the model
+  // emitted a summary or OHLC analysis should be treated as the change the
+  // user asked for, so the response includes the requested change/metric.
+  const t = opts.text.toLowerCase();
+  const asksForMove = /\b(move|change|movement)\b/.test(t) && !/\bsummary\b/.test(t);
+  if (asksForMove && !resolved.some((r) => r.kind === 'window_change')) {
+    const idx = resolved.findIndex((r) => r.kind === 'window_summary' || r.kind === 'window_ohlc');
+    if (idx >= 0) {
+      resolved[idx] = { ...resolved[idx], kind: 'window_change' } as AnalysisRequest;
+    }
   }
 
   return { ok: true, requests: resolved };
@@ -642,6 +674,56 @@ export function resolveCompareOperands(
   return { ok: true, resolved: { left: left.side, right: right.side } };
 }
 
+function textAuthorizesReturnedCandleComparison(text: string): boolean {
+  const t = text.toLowerCase();
+  const hasPreviousReference = /\b(previous|prior|earlier|last|reported|said|told|gave|mentioned|discussed)\b/.test(t);
+  const hasExplicitCurrentChart = /\b(current\s+chart|live\s+chart|chart\s+candle|live\s+candle|now)\b/.test(t);
+  return hasPreviousReference && !hasExplicitCurrentChart;
+}
+
+function repairCompareCandleSources(
+  intent: ChartActionIntent,
+  ctx: AgentContext,
+  text: string
+): ChartActionIntent {
+  if (intent.finalQuery !== 'compare_candles' || !intent.compare) return intent;
+
+  const log = ctx.executionLog;
+  const latest = log.latestReturnedCandle();
+  const previous = log.previousReturnedCandle();
+  if (!latest || !previous) return intent;
+
+  if (!textAuthorizesReturnedCandleComparison(text)) return intent;
+
+  const sides = intent.compare;
+  const left = sides.left;
+  const right = sides.right;
+  const t = text.toLowerCase();
+  const hasPreviousRef = /\b(previous|prior|earlier|last|reported|said|told|gave|mentioned|discussed)\b/.test(t);
+  const rightShouldBePrevious = right.source === 'current_chart_candle' && hasPreviousRef;
+  const leftShouldBeLatest =
+    left.source === 'current_chart_candle' &&
+    (right.source === 'previous_returned_candle' || rightShouldBePrevious || /\b(this|that|the)\s+(candle|bar|one)\b/.test(t));
+
+  const newSides: CompareSides = { ...sides };
+
+  if (leftShouldBeLatest) {
+    newSides.left = { source: 'latest_returned_candle' };
+  }
+  if (rightShouldBePrevious) {
+    newSides.right = { source: 'previous_returned_candle' };
+  }
+  // If the model duplicated the same side, normalize distinct snapshot references.
+  if (newSides.left.source === 'latest_returned_candle' && newSides.right.source === 'latest_returned_candle' && hasPreviousRef) {
+    newSides.right = { source: 'previous_returned_candle' };
+  }
+  if (newSides.left.source === 'current_chart_candle' && newSides.right.source === 'previous_returned_candle') {
+    newSides.left = { source: 'latest_returned_candle' };
+  }
+
+  return { ...intent, compare: newSides };
+}
+
 export function resolveContextReference(
   intent: ChartActionIntent,
   ctx: AgentContext,
@@ -649,9 +731,10 @@ export function resolveContextReference(
 ): ContextResolutionResult {
   // Candle comparisons resolve both explicit sides before compilation.
   if (intent.finalQuery === 'compare_candles') {
-    const resolved = resolveCompareOperands(intent, ctx);
+    const repaired = repairCompareCandleSources(intent, ctx, requestText);
+    const resolved = resolveCompareOperands(repaired, ctx);
     if (!resolved.ok) return { ok: false, error: resolved.error };
-    return { ok: true, intent, resolvedCompare: resolved.resolved };
+    return { ok: true, intent: repaired, resolvedCompare: resolved.resolved };
   }
 
   const ref = intent.contextReference;
@@ -898,10 +981,17 @@ export function compileChartActionIntent(
     if (!switchSymbolValue && !options.stateSymbol) {
       throw new Error('compileChartActionIntent: date requires a symbol.');
     }
-    const symbolForDate = switchSymbolValue ?? options.stateSymbol;
+    let symbolForDate = switchSymbolValue ?? options.stateSymbol;
     const isKnownDate =
       intent.date.kind === 'absolute' &&
       intent.date.value === options.stateDate;
+
+    // A date-only request with no new symbol should switch the active symbol
+    // to the resolved date, so long as an active symbol exists.
+    if (!switchSymbolValue && options.stateSymbol) {
+      switchSymbolValue = options.stateSymbol;
+      symbolForDate = switchSymbolValue;
+    }
 
     if (!isKnownDate) {
       resolveDateId = 'step-resolve-date';
@@ -936,7 +1026,13 @@ export function compileChartActionIntent(
 
     // 4. Switch symbol using the symbol and the explicit date (when known, the
     // value is passed directly to avoid a redundant resolve step).
-    if (switchSymbolValue) {
+    // Skip only a fully redundant switch to the same symbol and same date.
+    const isRedundantDateSwitch =
+      isKnownDate &&
+      typeof switchSymbolValue === 'string' &&
+      switchSymbolValue === options.stateSymbol;
+
+    if (switchSymbolValue && !isRedundantDateSwitch) {
       const switchArgs: Record<string, unknown> = { symbol: switchSymbolValue };
       if (intent.date.kind === 'absolute' && intent.date.value) {
         switchArgs.date = intent.date.value;
@@ -979,8 +1075,22 @@ export function compileChartActionIntent(
     });
   }
 
-  // 5. Set timeframe.
-  if (intent.timeframeMinutes !== undefined) {
+  // 5. Set timeframe only when it changes or this is a pure timeframe request
+  // (e.g. "Use the same timeframe.").  In compound actions a redundant
+  // timeframe step is omitted so context references do not replay it.
+  const hasNonTimeframeWork =
+    intent.previousSymbol ||
+    intent.symbol ||
+    intent.date ||
+    (intent.analysisRequests && intent.analysisRequests.length > 0) ||
+    intent.finalQuery ||
+    intent.seekTime !== undefined ||
+    intent.relativeSeekMinutes !== undefined ||
+    intent.playback;
+  if (
+    intent.timeframeMinutes !== undefined &&
+    (intent.timeframeMinutes !== options.stateTimeframe || !hasNonTimeframeWork)
+  ) {
     pushStep({
       id: 'step-timeframe',
       capability: 'chart.set_timeframe',

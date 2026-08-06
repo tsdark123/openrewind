@@ -57,6 +57,15 @@ describe('extractTimes colloquial parsing', () => {
     expect(extractTimes('seek to two in the afternoon').map(format)).toEqual(['14:00']);
   });
 
+  it('parses bare numeric compound ranges and named boundaries', () => {
+    expect(extractTimes('from 10 to noon').map(format)).toEqual(['10:00', '12:00']);
+    expect(extractTimes('between 10 and 12').map(format)).toEqual(['10:00', '12:00']);
+    expect(extractTimes('10-to-noon').map(format)).toEqual(['10:00', '12:00']);
+    expect(extractTimes('from 9:30 to market close').map(format)).toEqual(['09:30', '16:00']);
+    expect(extractTimes('10 through 12').map(format)).toEqual(['10:00', '12:00']);
+    expect(extractTimes('10 til noon').map(format)).toEqual(['10:00', '12:00']);
+  });
+
   it('does not double-extract the hour word inside a colloquial phrase', () => {
     expect(extractTimes('quarter past three p.m.').map(format)).toEqual(['15:15']);
     expect(extractTimes('half past three p.m.').map(format)).toEqual(['15:30']);

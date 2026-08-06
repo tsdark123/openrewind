@@ -93,4 +93,49 @@ describe('compileChartActionIntent', () => {
       })
     ).toThrow();
   });
+
+  it('compiles a date-only request using the active symbol', () => {
+    const plan = compileChartActionIntent(
+      {
+        kind: 'chart_action',
+        date: { kind: 'relative_trading', count: 1, direction: 'backward' },
+      },
+      { stateSymbol: 'AAPL', stateDate: '2026-07-31', stateTimeframe: 15 }
+    );
+    expect(plan.kind).toBe('mixed');
+    expect(plan.steps.map((s) => s.capability)).toEqual([
+      'session.resolve_trading_date',
+      'session.switch_symbol',
+    ]);
+    expect(plan.steps[0].args.symbol).toBe('AAPL');
+    expect(plan.steps[1].args.symbol).toBe('AAPL');
+  });
+
+  it('skips a redundant timeframe step in a compound context but keeps it for a pure timeframe request', () => {
+    const compound = compileChartActionIntent(
+      {
+        kind: 'chart_action',
+        symbol: 'AAPL',
+        date: { kind: 'relative_trading', count: 1, direction: 'backward' },
+        timeframeMinutes: 15,
+      },
+      { stateSymbol: 'AAPL', stateDate: '2026-07-31', stateTimeframe: 15, availableTickers: ['AAPL'] }
+    );
+    expect(compound.steps.some((s) => s.capability === 'chart.set_timeframe')).toBe(false);
+
+    const pure = compileChartActionIntent(
+      { kind: 'chart_action', timeframeMinutes: 15 },
+      { stateSymbol: 'AAPL', stateDate: '2026-07-31', stateTimeframe: 15 }
+    );
+    expect(pure.steps.map((s) => s.capability)).toEqual(['chart.set_timeframe']);
+  });
+
+  it('throws for a date-only request with no active symbol', () => {
+    expect(() =>
+      compileChartActionIntent(
+        { kind: 'chart_action', date: { kind: 'relative_trading', count: 1, direction: 'backward' } },
+        { stateDate: '2026-07-31' }
+      )
+    ).toThrow('compileChartActionIntent: date requires a symbol.');
+  });
 });

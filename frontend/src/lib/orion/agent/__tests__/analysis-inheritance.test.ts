@@ -405,5 +405,38 @@ describe('resolveAnalysisInheritance', () => {
         { kind: 'candle_shape', source: 'market_time', marketTime: '12:00' },
       ]);
     });
+
+    it('derives a text window when the model emits whole_session on a compound range', () => {
+      const current: AnalysisRequest[] = [
+        { kind: 'window_change', window: { kind: 'whole_session' } },
+        { kind: 'window_volume', window: { kind: 'whole_session' } },
+        { kind: 'candle_shape', source: 'current_chart_candle' },
+      ];
+      const result = resolveAnalysisInheritance(current, [firstHour], {
+        text: 'Give me the move, total volume and candle anatomy from 10 to noon.',
+        hasPriorAction: true,
+      });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.requests).toEqual([
+        { kind: 'window_change', window: { kind: 'time_range', fromTime: '10:00', toTime: '12:00' } },
+        { kind: 'window_volume', window: { kind: 'time_range', fromTime: '10:00', toTime: '12:00' } },
+        { kind: 'candle_shape', source: 'market_time', marketTime: '12:00' },
+      ]);
+    });
+
+    it('derives a text window for a bare metric follow-up with an explicit named window', () => {
+      const current: AnalysisRequest[] = [{ kind: 'window_volume', window: { kind: 'whole_session' } }];
+      const result = resolveAnalysisInheritance(current, [firstHour], {
+        text: 'same thing but first hour',
+        hasPriorAction: true,
+      });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.requests[0]).toEqual({
+        kind: 'window_volume',
+        window: { kind: 'time_range', fromTime: '09:30', toTime: '10:30' },
+      });
+    });
   });
 });

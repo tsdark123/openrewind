@@ -323,4 +323,58 @@ describe('resolveContextReference', () => {
     expect(r.ok).toBe(true);
     expect(r.intent).toMatchObject({ kind: 'chart_action', symbol: 'AAPL', timeframeMinutes: 5 });
   });
+
+  it('repairs anaphoric current_chart_candle compare sides to distinct returned snapshots', () => {
+    const ctx = makeContext();
+    const candle1 = {
+      snapshotId: 1,
+      symbol: 'AAPL',
+      date: '2026-07-10',
+      timeframe: 5,
+      timestamp: 1755036600,
+      marketTime: '11:00',
+      open: 100,
+      high: 101,
+      low: 99,
+      close: 100.5,
+      volume: 1000,
+      source: 'current_candle',
+    } as any;
+    const candle2 = {
+      snapshotId: 2,
+      symbol: 'AAPL',
+      date: '2026-07-10',
+      timeframe: 5,
+      timestamp: 1755037500,
+      marketTime: '11:15',
+      open: 100.5,
+      high: 101.5,
+      low: 100,
+      close: 101,
+      volume: 1100,
+      source: 'current_candle',
+    } as any;
+    ctx.executionLog.record({
+      ...makeEntry({ kind: 'chart_action', symbol: 'AAPL', finalQuery: 'current_candle' }, true, '2026-07-10'),
+      returnedCandles: [candle1],
+    });
+    ctx.executionLog.record({
+      ...makeEntry({ kind: 'chart_action', symbol: 'AAPL', finalQuery: 'current_candle' }, true, '2026-07-10'),
+      returnedCandles: [candle2],
+    });
+
+    const r = resolveContextReference(
+      {
+        kind: 'chart_action',
+        finalQuery: 'compare_candles',
+        compare: { left: { source: 'current_chart_candle' }, right: { source: 'current_chart_candle' } },
+      },
+      ctx,
+      'Compare this candle with the previous candle you reported.'
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.resolvedCompare?.left).toMatchObject({ snapshotId: 2, marketTime: '11:15' });
+    expect(r.resolvedCompare?.right).toMatchObject({ snapshotId: 1, marketTime: '11:00' });
+  });
 });

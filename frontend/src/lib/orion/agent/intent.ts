@@ -628,7 +628,47 @@ function makeFixedWindow(
   return { kind: 'time_range', fromTime: formatTime(fromTime), toTime: formatTime(toTime) };
 }
 
+function parseStringWindow(s: string): unknown {
+  const t = s.trim().toLowerCase().replace(/[_-]+/g, ' ');
+
+  // Named aliases.
+  if (/\bwhole\s*(session|day)\b/.test(t) || t === 'whole_session' || t === 'session') {
+    return { kind: 'whole_session' };
+  }
+  if (t === 'up_to_cursor' || /\bup\s*to\s*(cursor|now)\b/.test(t)) {
+    return { kind: 'up_to_cursor' };
+  }
+  if (/\bmorning\b/.test(t) && !/\bto\b/.test(t)) {
+    return makeFixedWindow(US_EQUITY_MARKET_OPEN, MORNING_END);
+  }
+  if (/\bafternoon\b/.test(t) && !/\bto\b/.test(t)) {
+    return makeFixedWindow(AFTERNOON_START, US_EQUITY_MARKET_CLOSE);
+  }
+  if (/(\bfirst\b|\bopening\b).*\bhour\b/.test(t) || /\bfirst\s*hour\b/.test(t)) {
+    return makeFirstMinutesWindow(60);
+  }
+  if (/(\blast\b|\bfinal\b|\bclosing\b).*\bhour\b/.test(t) || /\blast\s*hour\b/.test(t)) {
+    return makeLastMinutesWindow(60);
+  }
+  if (/(\bfirst\b|\bopening\b).*\b30\b.*\bmin/.test(t) || /\bfirst\s*30\b/.test(t)) {
+    return makeFirstMinutesWindow(30);
+  }
+
+  // Try to extract a pair of clock times from colloquial strings like
+  // "10:00 to 12:00" or "9:30 to 10".
+  const times = extractTimes(s);
+  if (times.length === 2) {
+    return makeFixedWindow(times[0]!, times[1]!);
+  }
+
+  // Could not parse the string; leave it to fail strict validation.
+  return s;
+}
+
 export function normalizeAnalysisWindow(win: unknown): unknown {
+  if (typeof win === 'string') {
+    return parseStringWindow(win);
+  }
   if (!win || typeof win !== 'object' || Array.isArray(win)) return win;
   const w = win as Record<string, unknown>;
 
