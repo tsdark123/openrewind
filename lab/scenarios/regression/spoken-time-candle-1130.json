@@ -1,0 +1,70 @@
+{
+  "id": "spoken-time-candle-1130",
+  "name": "Spoken 11:30 candle",
+  "description": "User asks for the candle at 'eleven thirty'. Spoken time must resolve to 11:30.",
+  "version": "2.0.0",
+  "familyId": "candle-shape",
+  "seedId": "spoken-time-candle-1130",
+  "variantOf": "explicit-time-candle-1130",
+  "tags": ["regression", "candle-shape", "time-resolution", "spoken"],
+  "dataSet": { "symbol": "SYNTH", "date": "2026-08-05", "timeframe": 1 },
+  "initialWorldState": {
+    "session": {
+      "symbol": "SYNTH",
+      "date": "2026-08-05",
+      "timeframe": 1,
+      "cursor": 389,
+      "totalCandles": 390,
+      "isPlaying": false,
+      "speed": 1,
+      "direction": "forward",
+      "currentPrice": 103.89,
+      "sessionActive": true
+    },
+    "availableTickers": ["SYNTH"],
+    "recentCandles": [],
+    "groundTruth": { "source": "fixture", "fixture": "synthetic-session-1m" }
+  },
+  "exactInvariants": { "symbol": "SYNTH", "date": "2026-08-05", "timeframe": 1 },
+  "permittedActions": ["analysis.*"],
+  "forbiddenActions": ["session.*", "playback.*", "symbol.*"],
+  "latencyLimits": { "maxMsPerTurn": 5000 },
+  "turns": [
+    {
+      "id": "t1",
+      "utterance": "Describe the candle at eleven thirty.",
+      "expectedRoute": "deterministic",
+      "assertExactRoute": false,
+      "expectedCapabilities": ["analysis.candle_shape"],
+      "exactInvariants": {
+        "symbol": "SYNTH",
+        "date": "2026-08-05",
+        "timeframe": 1,
+        "marketTime": "11:30"
+      },
+      "expectedContextAfter": {
+        "kind": "chart_action",
+        "symbol": "SYNTH",
+        "date": { "kind": "absolute", "value": "2026-08-05" },
+        "timeframeMinutes": 1,
+        "analysisRequests": [
+          { "kind": "candle_shape", "source": "market_time", "marketTime": "11:30" }
+        ]
+      },
+      "numericalTruthChecks": [
+        {
+          "receiptCapability": "analysis.candle_shape",
+          "computed": {
+            "capability": "analysis.candle_shape",
+            "marketTime": "11:30"
+          },
+          "tolerance": { "absolute": 0.005, "relative": 0.001 }
+        }
+      ],
+      "consumerResponseExpectations": {
+        "mustContain": ["11:30"],
+        "mustNotContain": ["current"]
+      }
+    }
+  ]
+}

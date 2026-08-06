@@ -1,0 +1,114 @@
+{
+  "id": "first-hour-vs-last-hour",
+  "name": "First hour range then compare last hour",
+  "description": "User asks for the first hour, then asks to compare it with the last hour. The agent must not re-analyze the whole session or switch context.",
+  "version": "2.0.0",
+  "familyId": "window-compare",
+  "seedId": "first-hour-vs-last-hour",
+  "tags": ["regression", "window-compare", "context-inheritance"],
+  "dataSet": { "symbol": "SYNTH", "date": "2026-08-05", "timeframe": 1 },
+  "initialWorldState": {
+    "session": {
+      "symbol": "SYNTH",
+      "date": "2026-08-05",
+      "timeframe": 1,
+      "cursor": 389,
+      "totalCandles": 390,
+      "isPlaying": false,
+      "speed": 1,
+      "direction": "forward",
+      "currentPrice": 103.89,
+      "sessionActive": true
+    },
+    "availableTickers": ["SYNTH"],
+    "recentCandles": [],
+    "groundTruth": { "source": "fixture", "fixture": "synthetic-session-1m" }
+  },
+  "exactInvariants": { "symbol": "SYNTH", "date": "2026-08-05", "timeframe": 1 },
+  "permittedActions": ["analysis.*"],
+  "forbiddenActions": ["session.*", "playback.*", "symbol.*"],
+  "expectedContextInheritance": [
+    { "fromTurn": "t1", "toTurn": "t2", "mode": "inherit", "fields": ["window"] }
+  ],
+  "latencyLimits": { "maxMsPerTurn": 5000 },
+  "turns": [
+    {
+      "id": "t1",
+      "utterance": "first hour range?",
+      "expectedRoute": "deterministic",
+      "assertExactRoute": false,
+      "expectedCapabilities": ["analysis.window_ohlc"],
+      "exactInvariants": {
+        "symbol": "SYNTH",
+        "date": "2026-08-05",
+        "timeframe": 1,
+        "window": { "kind": "time_range", "fromTime": "09:30", "toTime": "10:30" }
+      },
+      "expectedContextAfter": {
+        "kind": "chart_action",
+        "symbol": "SYNTH",
+        "date": { "kind": "absolute", "value": "2026-08-05" },
+        "timeframeMinutes": 1,
+        "analysisRequests": [
+          { "kind": "window_ohlc", "window": { "kind": "time_range", "fromTime": "09:30", "toTime": "10:30" } }
+        ]
+      },
+      "numericalTruthChecks": [
+        {
+          "receiptCapability": "analysis.window_ohlc",
+          "computed": {
+            "capability": "analysis.window_ohlc",
+            "window": { "kind": "time_range", "fromTime": "09:30", "toTime": "10:30" }
+          },
+          "tolerance": { "absolute": 0.005, "relative": 0.001 }
+        }
+      ],
+      "consumerResponseExpectations": {
+        "mustContain": ["09:30"],
+        "mustMatch": ["10:29"],
+        "forbiddenTopics": ["last hour", "15:00"]
+      }
+    },
+    {
+      "id": "t2",
+      "utterance": "Compare that with the last hour.",
+      "expectedRoute": "deterministic",
+      "assertExactRoute": false,
+      "expectedCapabilities": ["analysis.window_compare"],
+      "exactInvariants": {
+        "symbol": "SYNTH",
+        "date": "2026-08-05",
+        "timeframe": 1
+      },
+      "expectedContextAfter": {
+        "kind": "chart_action",
+        "symbol": "SYNTH",
+        "date": { "kind": "absolute", "value": "2026-08-05" },
+        "timeframeMinutes": 1,
+        "analysisRequests": [
+          {
+            "kind": "window_compare",
+            "left": { "kind": "time_range", "fromTime": "09:30", "toTime": "10:30" },
+            "right": { "kind": "time_range", "fromTime": "15:00", "toTime": "16:00" }
+          }
+        ]
+      },
+      "numericalTruthChecks": [
+        {
+          "receiptCapability": "analysis.window_compare",
+          "computed": {
+            "capability": "analysis.window_compare",
+            "left": { "kind": "time_range", "fromTime": "09:30", "toTime": "10:30" },
+            "right": { "kind": "time_range", "fromTime": "15:00", "toTime": "16:00" }
+          },
+          "tolerance": { "absolute": 0.01, "relative": 0.001 }
+        }
+      ],
+      "consumerResponseExpectations": {
+        "mustContain": ["last hour", "15:00"],
+        "mustMatch": ["15:59"],
+        "forbiddenTopics": ["whole session"]
+      }
+    }
+  ]
+}

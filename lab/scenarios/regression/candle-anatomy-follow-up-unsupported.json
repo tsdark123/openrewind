@@ -1,0 +1,86 @@
+{
+  "id": "candle-anatomy-follow-up-unsupported",
+  "name": "Candle anatomy follow-up",
+  "description": "User asks for the 11:30 candle, then asks 'What can we do with that?'. The follow-up is known unsupported until Phase 6B. No new analysis, session, playback or timeframe capability may run, and prior context must remain unchanged.",
+  "version": "2.0.0",
+  "familyId": "context-inheritance-unsupported",
+  "seedId": "candle-anatomy-follow-up-unsupported",
+  "tags": ["regression", "unsupported", "context-inheritance"],
+  "dataSet": { "symbol": "SYNTH", "date": "2026-08-05", "timeframe": 1 },
+  "initialWorldState": {
+    "session": {
+      "symbol": "SYNTH",
+      "date": "2026-08-05",
+      "timeframe": 1,
+      "cursor": 389,
+      "totalCandles": 390,
+      "isPlaying": false,
+      "speed": 1,
+      "direction": "forward",
+      "currentPrice": 103.89,
+      "sessionActive": true
+    },
+    "availableTickers": ["SYNTH"],
+    "recentCandles": [],
+    "groundTruth": { "source": "fixture", "fixture": "synthetic-session-1m" }
+  },
+  "exactInvariants": { "symbol": "SYNTH", "date": "2026-08-05", "timeframe": 1 },
+  "knownUnsupportedBehavior": [
+    {
+      "utterance": "What can we do with that?",
+      "expectedRoute": "unsupported",
+      "mustNotExecuteCapabilities": true
+    }
+  ],
+  "latencyLimits": { "maxMsPerTurn": 5000 },
+  "turns": [
+    {
+      "id": "t1",
+      "utterance": "Describe the candle at eleven thirty.",
+      "expectedRoute": "deterministic",
+      "assertExactRoute": false,
+      "expectedCapabilities": ["analysis.candle_shape"],
+      "exactInvariants": {
+        "symbol": "SYNTH",
+        "date": "2026-08-05",
+        "timeframe": 1,
+        "marketTime": "11:30"
+      },
+      "expectedContextAfter": {
+        "kind": "chart_action",
+        "symbol": "SYNTH",
+        "date": { "kind": "absolute", "value": "2026-08-05" },
+        "timeframeMinutes": 1,
+        "analysisRequests": [
+          { "kind": "candle_shape", "source": "market_time", "marketTime": "11:30" }
+        ]
+      },
+      "numericalTruthChecks": [
+        {
+          "receiptCapability": "analysis.candle_shape",
+          "computed": {
+            "capability": "analysis.candle_shape",
+            "marketTime": "11:30"
+          },
+          "tolerance": { "absolute": 0.005, "relative": 0.001 }
+        }
+      ],
+      "consumerResponseExpectations": {
+        "mustContain": ["11:30"]
+      }
+    },
+    {
+      "id": "t2",
+      "utterance": "What can we do with that?",
+      "expectedRoute": "unsupported",
+      "assertExactRoute": false,
+      "expectedCapabilities": [],
+      "forbiddenActions": ["analysis.*", "session.*", "playback.*", "timeframe.*"],
+      "expectedContextUnchanged": true,
+      "consumerResponseExpectations": {
+        "mustMatch": ["don't|do not|not (?:yet |currently )?support|unsupported|can't|cannot"],
+        "mustNotContain": ["trade", "buy", "sell", "order"]
+      }
+    }
+  ]
+}
