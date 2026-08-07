@@ -46,7 +46,7 @@ function makeProfile(overrides: Partial<CertifiedModelProfile> = {}): CertifiedM
     benchmarkSuiteVersion: 'v2.1.0-22-prompts',
     certified: true,
     certificationDate: '2026-08-07',
-    certificationIdentity: DEFAULT_CERTIFICATION_IDENTITY,
+    certificationIdentity: makeCertificationIdentity(),
     controlledContextSize: 4096,
     thinking: false,
     keepAlive: '10m',
@@ -954,5 +954,296 @@ describe('runRuntimeValidation', () => {
     const _badDeps4: RuntimeValidationDependencies = { ...deps, unloadModel: vi.fn() };
 
     expect(deps).toBeDefined();
+  });
+});
+
+describe('deep immutability and snapshot isolation', () => {
+  // ---------------------------------------------------------------------------
+  // Compile-time public-contract tests
+  // ---------------------------------------------------------------------------
+
+  it('prevents compile-time mutation of nested registry profiles in run input', () => {
+    const input: RuntimeValidationRunInput = makeRunInput();
+
+    // @ts-expect-error modelId must be deeply readonly
+    const _ = () => { input.registry[0].modelId = 'mutated'; };
+
+    expect(_).toBeDefined();
+  });
+
+  it('prevents compile-time push into supported runtime and OS arrays', () => {
+    const input: RuntimeValidationRunInput = makeRunInput();
+
+    // @ts-expect-error supportedRuntimes must be deeply readonly
+    const _ = () => { input.registry[0].supportedRuntimes.push('new-runtime'); };
+
+    // @ts-expect-error supportedOperatingSystems must be deeply readonly
+    const _2 = () => { input.registry[0].supportedOperatingSystems.push('new-os'); };
+
+    expect(_).toBeDefined();
+    expect(_2).toBeDefined();
+  });
+
+  it('prevents compile-time mutation of nested hardware profile values', () => {
+    const input: RuntimeValidationRunInput = makeRunInput();
+
+    // @ts-expect-error cpu logicalCores.value must be deeply readonly
+    const _ = () => { input.hardwareProfile.cpu.logicalCores.value = 0; };
+
+    // @ts-expect-error gpu device available VRAM must be deeply readonly
+    const _2 = () => { input.hardwareProfile.gpuInventory.devices[0].availableVramMib.value = 0; };
+
+    expect(_).toBeDefined();
+    expect(_2).toBeDefined();
+  });
+
+  it('prevents compile-time mutation of certification identity in observation', () => {
+    const observation: RuntimeValidationObservation = makeObservation(makeProfile());
+
+    // @ts-expect-error certificationIdentity must be deeply readonly
+    const _ = () => { observation.certificationIdentity.modelDigest = 'mutated'; };
+
+    expect(_).toBeDefined();
+  });
+
+  it('prevents compile-time mutation of candidate input snapshots', async () => {
+    const profile = makeProfile();
+    const validateSpy = vi.fn().mockImplementation((candidateInput: RuntimeValidationCandidateInput) => {
+      // @ts-expect-error profile modelId must be deeply readonly
+      const _ = () => { candidateInput.profile.modelId = 'mutated'; };
+
+      // @ts-expect-error supportedRuntimes must be deeply readonly
+      const _2 = () => { candidateInput.profile.supportedRuntimes.push('new-runtime'); };
+
+      // @ts-expect-error certificationIdentity must be deeply readonly
+      const _3 = () => { candidateInput.certificationIdentity.modelDigest = 'mutated'; };
+
+      // @ts-expect-error hardwareProfile cpu must be deeply readonly
+      const _4 = () => { candidateInput.hardwareProfile.cpu.logicalCores.value = 0; };
+
+      // @ts-expect-error smoothnessPolicy must be deeply readonly
+      const _5 = () => { candidateInput.smoothnessPolicy.warmSampleCount = 99; };
+
+      expect(_).toBeDefined();
+      expect(_2).toBeDefined();
+      expect(_3).toBeDefined();
+      expect(_4).toBeDefined();
+      expect(_5).toBeDefined();
+
+      return makeValidatedAttempt(candidateInput.profile);
+    });
+
+    const deps = makeDependencies({ validateCandidate: validateSpy });
+    await runRuntimeValidation(makeRunInput({ registry: [profile] }), deps);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Runtime alias-isolation tests
+  // ---------------------------------------------------------------------------
+
+  it('isolates the registry snapshot from caller mutation', async () => {
+    const profile = makeProfile();
+    const registry = [profile];
+    const deferredValidate = createDeferred<RuntimeValidationAttempt>();
+    const selectSpy = vi.fn(selectCertifiedModel);
+    const validateSpy = vi.fn().mockReturnValue(deferredValidate.promise);
+
+    const deps = makeDependencies({
+      selectCertifiedModel: selectSpy,
+      validateCandidate: validateSpy,
+    });
+
+    const run = runRuntimeValidation(makeRunInput({ registry }), deps);
+
+    await Promise.resolve();
+
+    // Mutate the caller's original registry while the run is paused.
+    registry[0].modelId = 'mutated';
+    (registry[0].certificationIdentity as CertificationIdentity).modelDigest = 'mutated';
+
+    const seenCandidate = validateSpy.mock.calls[0][0] as RuntimeValidationCandidateInput;
+    expect(seenCandidate.profile.modelId).toBe('qwen3:8b');
+    expect(seenCandidate.certificationIdentity.modelDigest).toBe(DEFAULT_CERTIFICATION_IDENTITY.modelDigest);
+
+    deferredValidate.resolve(makeValidatedAttempt(seenCandidate.profile));
+    const result = await run;
+
+    expect(result.kind).toBe('selected');
+    expect(selectSpy).toHaveBeenCalledTimes(2);
+    const secondCall = selectSpy.mock.calls[1][0];
+    expect(secondCall.runtimeValidationEvidence['qwen3:8b'].modelId).toBe('qwen3:8b');
+  });
+
+  it('isolates nested profile arrays from caller mutation', async () => {
+    const profile = makeProfile();
+    const registry = [profile];
+    const deferred = createDeferred<RuntimeValidationAttempt>();
+    const validateSpy = vi.fn().mockReturnValue(deferred.promise);
+
+    const deps = makeDependencies({ validateCandidate: validateSpy });
+    const run = runRuntimeValidation(makeRunInput({ registry }), deps);
+
+    await Promise.resolve();
+
+    profile.supportedRuntimes.push('new-runtime');
+    profile.measuredHardwareReferences[0] = 'mutated';
+
+    const seen = validateSpy.mock.calls[0][0] as RuntimeValidationCandidateInput;
+    expect(seen.profile.supportedRuntimes).toEqual(['ollama']);
+    expect(seen.profile.measuredHardwareReferences).toEqual([
+      'NVIDIA GeForce RTX 3070 Ti 8 GB, WDDM, 8192 MiB VRAM, Ollama local runtime',
+    ]);
+
+    deferred.resolve(makeValidatedAttempt(seen.profile));
+    await run;
+  });
+
+  it('isolates the hardware profile snapshot from caller mutation', async () => {
+    const profile = makeProfile();
+    const hardware = makeHardwareProfile();
+    const deferred = createDeferred<RuntimeValidationAttempt>();
+    const validateSpy = vi.fn().mockReturnValue(deferred.promise);
+
+    const deps = makeDependencies({ validateCandidate: validateSpy });
+    const run = runRuntimeValidation(makeRunInput({ registry: [profile], hardwareProfile: hardware }), deps);
+
+    await Promise.resolve();
+
+    hardware.cpu.logicalCores.value = 0;
+    hardware.gpuInventory.devices[0].availableVramMib.value = 0;
+
+    const seen = validateSpy.mock.calls[0][0] as RuntimeValidationCandidateInput;
+    expect(seen.hardwareProfile.cpu.logicalCores.value).toBe(8);
+    expect(seen.hardwareProfile.gpuInventory.devices[0].availableVramMib.value).toBe(4096);
+
+    deferred.resolve(makeValidatedAttempt(seen.profile));
+    await run;
+  });
+
+  it('progress observer mutation during run-started cannot alter internal snapshots', async () => {
+    const profile = makeProfile();
+    const registry = [profile];
+    const deferred = createDeferred<RuntimeValidationAttempt>();
+    const validateSpy = vi.fn().mockReturnValue(deferred.promise);
+    const input = makeRunInput({
+      registry,
+      onProgress: (event) => {
+        if (event.kind === 'run-started') {
+          registry[0].modelId = 'mutated-by-observer';
+          registry[0].supportedRuntimes.push('observer-runtime');
+        }
+      },
+    });
+
+    const deps = makeDependencies({ validateCandidate: validateSpy });
+    const run = runRuntimeValidation(input, deps);
+
+    await Promise.resolve();
+
+    const seen = validateSpy.mock.calls[0][0] as RuntimeValidationCandidateInput;
+    expect(seen.profile.modelId).toBe('qwen3:8b');
+    expect(seen.profile.supportedRuntimes).toEqual(['ollama']);
+
+    deferred.resolve(makeValidatedAttempt(seen.profile));
+    const result = await run;
+
+    expect(result.kind).toBe('selected');
+  });
+
+  it('freezes candidate input snapshots so the validator cannot mutate them at runtime', async () => {
+    const profile = makeProfile();
+    const validateSpy = vi.fn().mockImplementation((candidateInput: RuntimeValidationCandidateInput) => {
+      expect(Object.isFrozen(candidateInput.profile)).toBe(true);
+      expect(Object.isFrozen(candidateInput.certificationIdentity)).toBe(true);
+      expect(Object.isFrozen(candidateInput.hardwareProfile)).toBe(true);
+      expect(Object.isFrozen(candidateInput.smoothnessPolicy)).toBe(true);
+      expect(Object.isFrozen(candidateInput.profile.supportedRuntimes)).toBe(true);
+
+      expect(() => { (candidateInput as any).profile.modelId = 'mutated'; }).toThrow();
+      expect(() => { (candidateInput as any).certificationIdentity.modelDigest = 'mutated'; }).toThrow();
+      expect(() => { (candidateInput as any).profile.supportedRuntimes.push('new-runtime'); }).toThrow();
+      expect(() => { (candidateInput as any).hardwareProfile.cpu.logicalCores.value = 0; }).toThrow();
+      expect(() => { (candidateInput as any).smoothnessPolicy.warmSampleCount = 99; }).toThrow();
+
+      return makeValidatedAttempt(candidateInput.profile);
+    });
+
+    const deps = makeDependencies({ validateCandidate: validateSpy });
+    await runRuntimeValidation(makeRunInput({ registry: [profile] }), deps);
+  });
+
+  it('does not freeze or mutate caller-owned inputs', async () => {
+    const profile = makeProfile();
+    const registry = [profile];
+    const hardware = makeHardwareProfile();
+    const policy: SmoothnessPolicy = { warmSampleCount: 5, maxP95TrueTTFTMs: 400, maxP95WallClockMs: 1800 };
+
+    await runRuntimeValidation(
+      makeRunInput({ registry, hardwareProfile: hardware, smoothnessPolicy: policy }),
+      makeDependencies()
+    );
+
+    expect(Object.isFrozen(registry)).toBe(false);
+    expect(Object.isFrozen(profile)).toBe(false);
+    expect(Object.isFrozen(hardware)).toBe(false);
+    expect(Object.isFrozen(hardware.cpu)).toBe(false);
+    expect(Object.isFrozen(policy)).toBe(false);
+  });
+
+  it('isolates validator-returned attempts from later mutation', async () => {
+    const profile = makeProfile();
+    const attempt = makeValidatedAttempt(profile);
+    const deferred = createDeferred<RuntimeValidationAttempt>();
+    const selectSpy = vi.fn(selectCertifiedModel);
+    const validateSpy = vi.fn().mockReturnValue(deferred.promise);
+
+    const deps = makeDependencies({
+      selectCertifiedModel: selectSpy,
+      validateCandidate: validateSpy,
+    });
+
+    const run = runRuntimeValidation(makeRunInput({ registry: [profile] }), deps);
+
+    await Promise.resolve();
+    deferred.resolve(attempt);
+    await Promise.resolve();
+
+    // Mutate the shared attempt after the orchestrator has received it.
+    (attempt as any).observation.modelId = 'mutated';
+    (attempt as any).observation.certificationIdentity.modelDigest = 'mutated';
+    (attempt as any).observation.smoothnessOk = false;
+
+    const result = await run;
+
+    expect(result.kind).toBe('selected');
+    expect(selectSpy).toHaveBeenCalledTimes(2);
+    const evidence = selectSpy.mock.calls[1][0].runtimeValidationEvidence['qwen3:8b'];
+    expect(evidence.modelId).toBe('qwen3:8b');
+    expect(evidence.smoothnessOk).toBe(true);
+  });
+
+  it('still uses original snapshot values for evidence when caller mutates originals', async () => {
+    const profile = makeProfile();
+    const registry = [profile];
+    const deferred = createDeferred<RuntimeValidationAttempt>();
+    const validateSpy = vi.fn().mockReturnValue(deferred.promise);
+
+    const deps = makeDependencies({ validateCandidate: validateSpy });
+    const run = runRuntimeValidation(makeRunInput({ registry }), deps);
+
+    await Promise.resolve();
+
+    // Mutate the original profile's identity-related fields while the run is paused.
+    profile.modelId = 'mutated';
+    (profile.certificationIdentity as CertificationIdentity).modelDigest = 'mutated';
+
+    const seen = validateSpy.mock.calls[0][0] as RuntimeValidationCandidateInput;
+    expect(seen.profile.modelId).toBe('qwen3:8b');
+    expect(seen.certificationIdentity.modelDigest).toBe(DEFAULT_CERTIFICATION_IDENTITY.modelDigest);
+
+    deferred.resolve(makeValidatedAttempt(seen.profile));
+    const result = await run;
+
+    expect(result.kind).toBe('selected');
   });
 });

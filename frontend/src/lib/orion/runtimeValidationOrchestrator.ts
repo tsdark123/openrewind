@@ -19,6 +19,12 @@
 //   The same lease provider must guard runtime validation, `warmOrionAgent`,
 //   `orionChat` and all other OpenRewind-controlled startup model work. It
 //   cannot exclude external Ollama clients that already hold the model.
+//
+// Immutability contract:
+//   All plain-data snapshots passed to or returned by the orchestrator are
+//   deeply readonly at the type level and deep-cloned + recursively frozen at
+//   runtime. The orchestrator never mutates, and never freezes, caller-owned
+//   inputs.
 // =============================================================================
 
 import type { CertifiedModelProfile, CertificationIdentity } from './certifiedModels';
@@ -29,6 +35,70 @@ import type {
   RuntimeValidationEvidence,
 } from './certifiedModelSelector';
 import type { HardwareProfile } from './hardwareProfile';
+
+// ---------------------------------------------------------------------------
+// Deep-readonly utility
+// ---------------------------------------------------------------------------
+
+type DeepReadonlyPrimitive = string | number | boolean | bigint | symbol | undefined | null;
+type DeepReadonlyBuiltin =
+  | Date
+  | RegExp
+  | Error
+  | Map<unknown, unknown>
+  | Set<unknown>
+  | WeakMap<object, unknown>
+  | WeakSet<object>
+  | AbortSignal;
+
+/**
+ * Recursively make arrays and plain objects readonly while leaving functions,
+ * primitives and built-in class instances untouched.
+ */
+export type DeepReadonly<T> =
+  T extends DeepReadonlyPrimitive ? T :
+  T extends DeepReadonlyBuiltin ? T :
+  T extends (...args: unknown[]) => unknown ? T :
+  T extends (infer U)[] ? readonly DeepReadonly<U>[] :
+  T extends object ? { readonly [K in keyof T]: DeepReadonly<T[K]> } :
+  T;
+
+/**
+ * Deep-clone a plain-data snapshot and recursively freeze the clone.
+ *
+ * - Arrays and plain objects are cloned and frozen.
+ * - `undefined` properties are preserved.
+ * - Built-ins (Date, RegExp, Map, Set, WeakMap, WeakSet, AbortSignal, etc.)
+ *   are returned by reference because Slice 1 data contains none of them.
+ * - Functions and primitives are returned as-is.
+ */
+function deepCloneAndFreeze<T>(value: T): DeepReadonly<T> {
+  if (value === null || typeof value !== 'object') {
+    return value as DeepReadonly<T>;
+  }
+
+  if (Array.isArray(value)) {
+    const clone = value.map((item) => deepCloneAndFreeze(item));
+    return Object.freeze(clone) as DeepReadonly<T>;
+  }
+
+  if (isPlainObject(value)) {
+    const clone: Record<string, unknown> = {};
+    for (const [key, val] of Object.entries(value)) {
+      clone[key] = deepCloneAndFreeze(val);
+    }
+    return Object.freeze(clone) as DeepReadonly<T>;
+  }
+
+  // Built-ins (Date, RegExp, Map, Set, WeakMap, WeakSet, AbortSignal, ...).
+  return value as DeepReadonly<T>;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== 'object' || value === null) return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
 
 // ---------------------------------------------------------------------------
 // Approved warm smoothness policy
@@ -48,7 +118,7 @@ export const APPROVED_WARM_SMOOTHNESS_POLICY = Object.freeze({
 
 export type ApprovedSmoothnessPolicy = typeof APPROVED_WARM_SMOOTHNESS_POLICY;
 
-export function isApprovedSmoothnessPolicy(policy: SmoothnessPolicy): policy is ApprovedSmoothnessPolicy {
+export function isApprovedSmoothnessPolicy(policy: DeepReadonly<SmoothnessPolicy>): policy is DeepReadonly<ApprovedSmoothnessPolicy> {
   return (
     policy.warmSampleCount === 5 &&
     policy.maxP95TrueTTFTMs === 400 &&
@@ -64,15 +134,15 @@ export interface RuntimeValidationRunInput {
   /** Deterministic, caller-supplied identifier. No time or randomness. */
   readonly runId: string;
   /** Snapshot of the certified-model registry at the start of the run. */
-  readonly registry: readonly CertifiedModelProfile[];
+  readonly registry: readonly DeepReadonly<CertifiedModelProfile>[];
   /** Snapshot of the local hardware profile. */
-  readonly hardwareProfile: HardwareProfile;
+  readonly hardwareProfile: DeepReadonly<HardwareProfile>;
   /** Target runtime for selector compatibility (e.g. 'ollama'). */
   readonly runtime: string;
   /** Target operating system for selector compatibility (e.g. 'win32'). */
   readonly platform: string;
   /** Approved warm smoothness budget for this run. */
-  readonly smoothnessPolicy: SmoothnessPolicy;
+  readonly smoothnessPolicy: DeepReadonly<SmoothnessPolicy>;
   /** External abort signal. */
   readonly signal: AbortSignal;
   /** Optional progress observer. Emissions are best-effort and non-mutating. */
@@ -85,12 +155,12 @@ export interface RuntimeValidationRunInput {
 
 export interface RuntimeValidationCandidateInput {
   readonly runId: string;
-  readonly profile: CertifiedModelProfile;
-  readonly certificationIdentity: CertificationIdentity;
-  readonly hardwareProfile: HardwareProfile;
+  readonly profile: DeepReadonly<CertifiedModelProfile>;
+  readonly certificationIdentity: DeepReadonly<CertificationIdentity>;
+  readonly hardwareProfile: DeepReadonly<HardwareProfile>;
   readonly runtime: string;
   readonly platform: string;
-  readonly smoothnessPolicy: ApprovedSmoothnessPolicy;
+  readonly smoothnessPolicy: DeepReadonly<ApprovedSmoothnessPolicy>;
   readonly signal: AbortSignal;
 }
 
@@ -149,7 +219,7 @@ export interface RuntimeValidationDiagnostics {
 export interface RuntimeValidationObservation {
   readonly modelId: string;
   readonly ollamaTag: string;
-  readonly certificationIdentity: CertificationIdentity;
+  readonly certificationIdentity: DeepReadonly<CertificationIdentity>;
   readonly loadSuccess: boolean;
   readonly loadFailureReason?: string;
   readonly oom: boolean;
@@ -317,27 +387,27 @@ export type RuntimeValidationOrchestratorResult =
   | {
       readonly kind: 'selected';
       readonly runId: string;
-      readonly selected: CertifiedModelProfile;
-      readonly fallbackOrder: readonly CertifiedModelProfile[];
-      readonly validationOrder: readonly CertifiedModelProfile[];
-      readonly remainingValidationOrder: readonly CertifiedModelProfile[];
-      readonly dispositions: readonly CandidateDisposition[];
+      readonly selected: DeepReadonly<CertifiedModelProfile>;
+      readonly fallbackOrder: readonly DeepReadonly<CertifiedModelProfile>[];
+      readonly validationOrder: readonly DeepReadonly<CertifiedModelProfile>[];
+      readonly remainingValidationOrder: readonly DeepReadonly<CertifiedModelProfile>[];
+      readonly dispositions: readonly DeepReadonly<CandidateDisposition>[];
       readonly reason: string;
     }
   | {
       readonly kind: 'runtime-validation-failed';
       readonly runId: string;
-      readonly dispositions: readonly CandidateDisposition[];
+      readonly dispositions: readonly DeepReadonly<CandidateDisposition>[];
       readonly reason: string;
-      readonly validationOrder: readonly CertifiedModelProfile[];
-      readonly remainingValidationOrder: readonly CertifiedModelProfile[];
+      readonly validationOrder: readonly DeepReadonly<CertifiedModelProfile>[];
+      readonly remainingValidationOrder: readonly DeepReadonly<CertifiedModelProfile>[];
     }
   | {
       readonly kind: 'no-certified-profiles' | 'no-compatible-certified' | 'invalid-input';
       readonly runId: string;
       readonly reason: string;
       readonly issues?: readonly string[];
-      readonly dispositions?: readonly CandidateDisposition[];
+      readonly dispositions?: readonly DeepReadonly<CandidateDisposition>[];
     }
   | {
       readonly kind: 'action-required';
@@ -346,8 +416,8 @@ export type RuntimeValidationOrchestratorResult =
       readonly ollamaTag: string;
       readonly reason: ActionRequiredReason;
       readonly action: ActionCategory;
-      readonly validationOrder?: readonly CertifiedModelProfile[];
-      readonly remainingValidationOrder?: readonly CertifiedModelProfile[];
+      readonly validationOrder?: readonly DeepReadonly<CertifiedModelProfile>[];
+      readonly remainingValidationOrder?: readonly DeepReadonly<CertifiedModelProfile>[];
     }
   | {
       readonly kind: 'inconclusive';
@@ -356,8 +426,8 @@ export type RuntimeValidationOrchestratorResult =
       readonly ollamaTag: string;
       readonly reason: InconclusiveReason;
       readonly detail?: string;
-      readonly validationOrder?: readonly CertifiedModelProfile[];
-      readonly remainingValidationOrder?: readonly CertifiedModelProfile[];
+      readonly validationOrder?: readonly DeepReadonly<CertifiedModelProfile>[];
+      readonly remainingValidationOrder?: readonly DeepReadonly<CertifiedModelProfile>[];
     }
   | {
       readonly kind: 'cancelled-stale';
@@ -365,8 +435,8 @@ export type RuntimeValidationOrchestratorResult =
       readonly reason: CancellationReason;
       readonly modelId?: string;
       readonly ollamaTag?: string;
-      readonly validationOrder?: readonly CertifiedModelProfile[];
-      readonly remainingValidationOrder?: readonly CertifiedModelProfile[];
+      readonly validationOrder?: readonly DeepReadonly<CertifiedModelProfile>[];
+      readonly remainingValidationOrder?: readonly DeepReadonly<CertifiedModelProfile>[];
     };
 
 // ---------------------------------------------------------------------------
@@ -406,29 +476,44 @@ function isOptionalNonNegativeFiniteNumber(v: unknown): boolean {
   return v === undefined || isNonNegativeFiniteNumber(v);
 }
 
+type EvidenceMap = Record<string, DeepReadonly<RuntimeValidationEvidence>>;
+
 function makeResultContext(
-  validationOrder: readonly CertifiedModelProfile[],
-  evidenceById: Readonly<Record<string, RuntimeValidationEvidence>>,
+  validationOrder: readonly DeepReadonly<CertifiedModelProfile>[],
+  evidenceById: Readonly<EvidenceMap>,
   selectedIndex: number
-): { validationOrder: readonly CertifiedModelProfile[]; remainingValidationOrder: readonly CertifiedModelProfile[] } {
-  const remaining = validationOrder
-    .slice(selectedIndex + 1)
-    .filter((p) => !Object.prototype.hasOwnProperty.call(evidenceById, p.modelId));
+): {
+  validationOrder: readonly DeepReadonly<CertifiedModelProfile>[];
+  remainingValidationOrder: readonly DeepReadonly<CertifiedModelProfile>[];
+} {
+  const remaining = Object.freeze(
+    validationOrder
+      .slice(selectedIndex + 1)
+      .filter((p) => !Object.prototype.hasOwnProperty.call(evidenceById, p.modelId))
+  );
   return { validationOrder, remainingValidationOrder: remaining };
 }
 
 function makeRemainingContext(
-  validationOrder: readonly CertifiedModelProfile[],
-  evidenceById: Readonly<Record<string, RuntimeValidationEvidence>>,
+  validationOrder: readonly DeepReadonly<CertifiedModelProfile>[],
+  evidenceById: Readonly<EvidenceMap>,
   stoppedIndex: number
-): { validationOrder: readonly CertifiedModelProfile[]; remainingValidationOrder: readonly CertifiedModelProfile[] } {
-  const remaining = validationOrder
-    .slice(stoppedIndex)
-    .filter((p) => !Object.prototype.hasOwnProperty.call(evidenceById, p.modelId));
+): {
+  validationOrder: readonly DeepReadonly<CertifiedModelProfile>[];
+  remainingValidationOrder: readonly DeepReadonly<CertifiedModelProfile>[];
+} {
+  const remaining = Object.freeze(
+    validationOrder
+      .slice(stoppedIndex)
+      .filter((p) => !Object.prototype.hasOwnProperty.call(evidenceById, p.modelId))
+  );
   return { validationOrder, remainingValidationOrder: remaining };
 }
 
-function certificationIdentityMatches(a: CertificationIdentity, b: CertificationIdentity): boolean {
+function certificationIdentityMatches(
+  a: DeepReadonly<CertificationIdentity>,
+  b: DeepReadonly<CertificationIdentity>
+): boolean {
   return (
     a.modelTag === b.modelTag &&
     a.modelDigest === b.modelDigest &&
@@ -447,11 +532,11 @@ function certificationIdentityMatches(a: CertificationIdentity, b: Certification
  * certified profile, never from the validator's observation.
  */
 function toRuntimeValidationEvidence(
-  input: RuntimeValidationRunInput,
-  profile: CertifiedModelProfile,
-  observation: RuntimeValidationObservation
-): RuntimeValidationEvidence {
-  return {
+  input: Pick<RuntimeValidationRunInput, 'runId' | 'runtime' | 'platform'>,
+  profile: DeepReadonly<CertifiedModelProfile>,
+  observation: DeepReadonly<RuntimeValidationObservation>
+): DeepReadonly<RuntimeValidationEvidence> {
+  return Object.freeze({
     modelId: profile.modelId,
     ollamaTag: profile.ollamaTag,
     certificationVersion: profile.certificationVersion,
@@ -472,7 +557,7 @@ function toRuntimeValidationEvidence(
     p95WallClockMs: observation.p95WallClockMs,
     p95TrueTTFTMs: observation.p95TrueTTFTMs,
     smoothnessOk: observation.smoothnessOk,
-  };
+  }) as DeepReadonly<RuntimeValidationEvidence>;
 }
 
 /**
@@ -481,8 +566,8 @@ function toRuntimeValidationEvidence(
  * reach the selector.
  */
 function verifyCompleteObservation(
-  candidate: CertifiedModelProfile,
-  attempt: RuntimeValidationAttemptValidated | RuntimeValidationAttemptFailed
+  candidate: DeepReadonly<CertifiedModelProfile>,
+  attempt: DeepReadonly<RuntimeValidationAttemptValidated | RuntimeValidationAttemptFailed>
 ): { ok: true } | { ok: false; reason: InconclusiveReason; detail: string } {
   const obs = attempt.observation;
   const detailPrefix = `${candidate.modelId}: `;
@@ -553,8 +638,8 @@ function verifyCompleteObservation(
 }
 
 function attemptIdentifiesCandidate(
-  candidate: CertifiedModelProfile,
-  attempt: RuntimeValidationAttempt
+  candidate: DeepReadonly<CertifiedModelProfile>,
+  attempt: DeepReadonly<RuntimeValidationAttempt>
 ): boolean {
   if (attempt.kind === 'validated' || attempt.kind === 'failed') {
     return (
@@ -566,8 +651,8 @@ function attemptIdentifiesCandidate(
 }
 
 function makeCandidateInput(
-  input: RuntimeValidationRunInput,
-  profile: CertifiedModelProfile
+  input: Pick<RuntimeValidationRunInput, 'runId' | 'runtime' | 'platform' | 'hardwareProfile' | 'smoothnessPolicy' | 'signal'>,
+  profile: DeepReadonly<CertifiedModelProfile>
 ): RuntimeValidationCandidateInput {
   if (!profile.certificationIdentity) {
     throw new Error(`Certified profile ${profile.modelId} is missing certificationIdentity`);
@@ -579,7 +664,9 @@ function makeCandidateInput(
     hardwareProfile: input.hardwareProfile,
     runtime: input.runtime,
     platform: input.platform,
-    smoothnessPolicy: input.smoothnessPolicy as ApprovedSmoothnessPolicy,
+    // `isApprovedSmoothnessPolicy` is always called before `makeCandidateInput`,
+    // so the policy has been verified to match the approved warm budget.
+    smoothnessPolicy: input.smoothnessPolicy as DeepReadonly<ApprovedSmoothnessPolicy>,
     signal: input.signal,
   };
 }
@@ -592,8 +679,23 @@ export async function runRuntimeValidation(
   input: RuntimeValidationRunInput,
   deps: RuntimeValidationDependencies
 ): Promise<RuntimeValidationOrchestratorResult> {
-  const { runId, signal } = input;
-  const emit = input.onProgress ?? (() => undefined);
+  // Owned, deep-cloned and frozen snapshots. These are taken before any async
+  // work and before `run-started` is emitted, so the progress observer cannot
+  // see or influence the internal run state through the caller's original
+  // references.
+  const runInput: RuntimeValidationRunInput = {
+    runId: input.runId,
+    registry: deepCloneAndFreeze(input.registry),
+    hardwareProfile: deepCloneAndFreeze(input.hardwareProfile),
+    runtime: input.runtime,
+    platform: input.platform,
+    smoothnessPolicy: deepCloneAndFreeze(input.smoothnessPolicy),
+    signal: input.signal,
+    onProgress: input.onProgress,
+  };
+
+  const { runId, signal } = runInput;
+  const emit = runInput.onProgress ?? (() => undefined);
 
   function emitEvent(event: RuntimeValidationProgressEvent) {
     try {
@@ -611,7 +713,7 @@ export async function runRuntimeValidation(
 
   emitEvent({ kind: 'run-started', runId });
 
-  if (!isApprovedSmoothnessPolicy(input.smoothnessPolicy)) {
+  if (!isApprovedSmoothnessPolicy(runInput.smoothnessPolicy)) {
     const reason = 'smoothness policy does not match the approved warm budget';
     emitEvent({ kind: 'run-completed', runId, resultKind: 'invalid-input' });
     return {
@@ -621,7 +723,7 @@ export async function runRuntimeValidation(
       issues: [
         'smoothnessPolicy must be the approved warm budget: warmSampleCount=5, maxP95TrueTTFTMs=400, maxP95WallClockMs=1800',
       ],
-      dispositions: [],
+      dispositions: Object.freeze([]),
     };
   }
 
@@ -676,12 +778,13 @@ export async function runRuntimeValidation(
 
     emitEvent({ kind: 'lock-acquired', runId });
 
-    const initialResult = deps.selectCertifiedModel({
-      registry: [...input.registry] as CertifiedModelProfile[],
-      runtime: input.runtime,
-      platform: input.platform,
+    const rawInitialResult = deps.selectCertifiedModel({
+      registry: runInput.registry as CertifiedModelProfile[],
+      runtime: runInput.runtime,
+      platform: runInput.platform,
       runtimeValidationEvidence: {},
     });
+    const initialResult = deepCloneAndFreeze(rawInitialResult);
 
     switch (initialResult.kind) {
       case 'no-certified-profiles':
@@ -695,8 +798,8 @@ export async function runRuntimeValidation(
           runId,
           dispositions: initialResult.dispositions,
           reason: initialResult.reason,
-          validationOrder: [],
-          remainingValidationOrder: [],
+          validationOrder: Object.freeze([]),
+          remainingValidationOrder: Object.freeze([]),
         };
       case 'invalid-input':
         emitEvent({ kind: 'run-completed', runId, resultKind: 'invalid-input' });
@@ -720,7 +823,7 @@ export async function runRuntimeValidation(
       }
     }
 
-    const validationOrder: readonly CertifiedModelProfile[] = initialResult.validationOrder;
+    const validationOrder: readonly DeepReadonly<CertifiedModelProfile>[] = initialResult.validationOrder;
 
     emitEvent({
       kind: 'validation-order-resolved',
@@ -729,7 +832,7 @@ export async function runRuntimeValidation(
       remainingValidationOrder: validationOrder.map((p) => p.modelId),
     });
 
-    const evidenceById: Record<string, RuntimeValidationEvidence> = {};
+    const evidenceById: EvidenceMap = {};
 
     for (let i = 0; i < validationOrder.length; i++) {
       const candidate = validationOrder[i];
@@ -758,8 +861,9 @@ export async function runRuntimeValidation(
 
       let attempt: RuntimeValidationAttempt;
       try {
-        const candidateInput = makeCandidateInput(input, candidate);
-        attempt = await deps.validateCandidate(candidateInput, deps.isCurrent);
+        const candidateInput = makeCandidateInput(runInput, candidate);
+        const rawAttempt = await deps.validateCandidate(candidateInput, deps.isCurrent);
+        attempt = deepCloneAndFreeze(rawAttempt);
       } catch (e) {
         const detail = `validator exception: ${e instanceof Error ? e.message : String(e)}`;
         const ctx = makeRemainingContext(validationOrder, evidenceById, i);
@@ -925,7 +1029,7 @@ export async function runRuntimeValidation(
         };
       }
 
-      const evidence = toRuntimeValidationEvidence(input, candidate, attempt.observation);
+      const evidence = toRuntimeValidationEvidence(runInput, candidate, attempt.observation);
 
       const preEvidenceCancel = isCancelled();
       if (preEvidenceCancel.cancelled) {
@@ -976,12 +1080,13 @@ export async function runRuntimeValidation(
         };
       }
 
-      const selectorResult = deps.selectCertifiedModel({
-        registry: [...input.registry] as CertifiedModelProfile[],
-        runtime: input.runtime,
-        platform: input.platform,
-        runtimeValidationEvidence: evidenceById,
+      const rawSelectorResult = deps.selectCertifiedModel({
+        registry: runInput.registry as CertifiedModelProfile[],
+        runtime: runInput.runtime,
+        platform: runInput.platform,
+        runtimeValidationEvidence: evidenceById as Record<string, RuntimeValidationEvidence>,
       });
+      const selectorResult = deepCloneAndFreeze(rawSelectorResult);
 
       const preReturnCancel = isCancelled();
       if (preReturnCancel.cancelled) {
@@ -1036,7 +1141,7 @@ export async function runRuntimeValidation(
           dispositions: selectorResult.dispositions,
           reason: selectorResult.reason,
           validationOrder,
-          remainingValidationOrder: [],
+          remainingValidationOrder: Object.freeze([]),
         };
       }
 
@@ -1062,12 +1167,13 @@ export async function runRuntimeValidation(
       return { kind: 'cancelled-stale', runId, reason: preFinalCancel.reason };
     }
 
-    const finalResult = deps.selectCertifiedModel({
-      registry: [...input.registry] as CertifiedModelProfile[],
-      runtime: input.runtime,
-      platform: input.platform,
-      runtimeValidationEvidence: evidenceById,
+    const rawFinalResult = deps.selectCertifiedModel({
+      registry: runInput.registry as CertifiedModelProfile[],
+      runtime: runInput.runtime,
+      platform: runInput.platform,
+      runtimeValidationEvidence: evidenceById as Record<string, RuntimeValidationEvidence>,
     });
+    const finalResult = deepCloneAndFreeze(rawFinalResult);
 
     const finalCancel = isCancelled();
     if (finalCancel.cancelled) {
@@ -1113,7 +1219,7 @@ export async function runRuntimeValidation(
         dispositions: finalResult.dispositions,
         reason: finalResult.reason,
         validationOrder,
-        remainingValidationOrder: [],
+        remainingValidationOrder: Object.freeze([]),
       };
     }
 
@@ -1135,7 +1241,7 @@ export async function runRuntimeValidation(
       reason: 'incomplete-observation',
       detail: `final selector returned unexpected kind: ${finalResult.kind}`,
       validationOrder,
-      remainingValidationOrder: [],
+      remainingValidationOrder: Object.freeze([]),
     };
   } finally {
     releaseLease();
