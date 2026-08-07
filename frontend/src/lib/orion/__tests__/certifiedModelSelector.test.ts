@@ -576,11 +576,58 @@ describe('selectCertifiedModel', () => {
     }
   });
 
-  it('accepts null fallbackPriority for uncertified profiles', () => {
-    const result = select({
-      registry: [makeProfile({ modelId: 'qwen3:4b-instruct', ollamaTag: 'qwen3:4b-instruct', certified: false, fallbackPriority: null as any })],
+  describe('fallbackPriority boundary values', () => {
+    it('accepts omitted/undefined fallbackPriority for certified and uncertified profiles', () => {
+      const certified = select({
+        registry: [makeProfile({ fallbackPriority: undefined })],
+      });
+      expect(certified.kind).toBe('validation-required');
+
+      const uncertified = select({
+        registry: [makeProfile({ modelId: 'qwen3:4b-instruct', ollamaTag: 'qwen3:4b-instruct', certified: false, fallbackPriority: undefined })],
+      });
+      expect(uncertified.kind).toBe('no-certified-profiles');
     });
-    expect(result.kind).toBe('no-certified-profiles');
+
+    it('rejects null fallbackPriority for certified profiles', () => {
+      const result = select({
+        registry: [makeProfile({ fallbackPriority: null as any })],
+      });
+      expect(result.kind).toBe('invalid-input');
+      if (result.kind === 'invalid-input') {
+        expect(result.issues.some((i) => i.includes('fallbackPriority'))).toBe(true);
+      }
+    });
+
+    it('rejects null fallbackPriority for uncertified profiles', () => {
+      const result = select({
+        registry: [makeProfile({ modelId: 'qwen3:4b-instruct', ollamaTag: 'qwen3:4b-instruct', certified: false, fallbackPriority: null as any })],
+      });
+      expect(result.kind).toBe('invalid-input');
+      if (result.kind === 'invalid-input') {
+        expect(result.issues.some((i) => i.includes('fallbackPriority'))).toBe(true);
+      }
+    });
+
+    const malformedCases: Array<{ value: unknown; label: string }> = [
+      { value: NaN, label: 'NaN' },
+      { value: Number.POSITIVE_INFINITY, label: 'Infinity' },
+      { value: -1, label: 'negative number' },
+      { value: 'zero', label: 'string' },
+      { value: true, label: 'boolean' },
+    ];
+
+    for (const { value, label } of malformedCases) {
+      it(`rejects ${label} fallbackPriority for certified profiles`, () => {
+        const result = select({
+          registry: [makeProfile({ fallbackPriority: value as any })],
+        });
+        expect(result.kind).toBe('invalid-input');
+        if (result.kind === 'invalid-input') {
+          expect(result.issues.some((i) => i.includes('fallbackPriority'))).toBe(true);
+        }
+      });
+    }
   });
 
 });

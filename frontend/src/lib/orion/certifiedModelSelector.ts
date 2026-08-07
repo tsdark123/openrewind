@@ -396,7 +396,7 @@ function validateProfileStructure(
   if (!isArrayOfNonBlankStrings(p.supportedRuntimes)) fieldIssues.push('supportedRuntimes must be an array of nonblank strings');
   if (!isArrayOfNonBlankStrings(p.supportedOperatingSystems)) fieldIssues.push('supportedOperatingSystems must be an array of nonblank strings');
 
-  if (p.fallbackPriority !== undefined && p.fallbackPriority !== null && !isNonNegativeFiniteNumber(p.fallbackPriority)) {
+  if (p.fallbackPriority !== undefined && !isNonNegativeFiniteNumber(p.fallbackPriority)) {
     fieldIssues.push('fallbackPriority must be a finite nonnegative number');
   }
 
