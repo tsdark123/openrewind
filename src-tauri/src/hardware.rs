@@ -41,9 +41,12 @@ pub enum Confidence {
 #[serde(rename_all = "camelCase")]
 pub struct ProbeValue<T> {
     pub status: ProbeStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<T>,
     pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confidence: Option<Confidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
 }
 
@@ -109,6 +112,7 @@ pub struct GpuDeviceProfile {
 pub struct GpuInventory {
     pub status: ProbeStatus,
     pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
     pub devices: Vec<GpuDeviceProfile>,
 }
@@ -178,12 +182,16 @@ fn probe_cpu() -> CpuProfile {
     }
 }
 
+fn bytes_to_mib(bytes: u64) -> u64 {
+    bytes / (1024 * 1024)
+}
+
 fn probe_ram() -> RamProfile {
     let mut sys = System::new_all();
     sys.refresh_all();
 
-    let total = sys.total_memory() / (1024 * 1024);
-    let available = sys.available_memory() / (1024 * 1024);
+    let total = bytes_to_mib(sys.total_memory());
+    let available = bytes_to_mib(sys.available_memory());
 
     RamProfile {
         total_mib: if total > 0 {
@@ -200,22 +208,28 @@ fn probe_ram() -> RamProfile {
 }
 
 fn nvidia_smi_candidates() -> Vec<String> {
-    let mut candidates = vec!["nvidia-smi".to_string()];
+    let mut candidates = Vec::new();
     #[cfg(target_os = "windows")]
     {
         candidates.push(r"C:\Windows\System32\nvidia-smi.exe".to_string());
         candidates.push(r"C:\Windows\SysWOW64\nvidia-smi.exe".to_string());
         candidates.push(r"C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe".to_string());
     }
+    // PATH fallback.  Command resolution is left to the OS at spawn time.
+    candidates.push("nvidia-smi".to_string());
     candidates
 }
 
 fn resolve_nvidia_smi_path(candidates: &[String]) -> Option<String> {
+    // Prefer the first candidate that points to an existing file.  The bare
+    // "nvidia-smi" name is not a file path, so it falls through to the second
+    // pass and is returned as a PATH-resolution fallback.
     for c in candidates {
         if Path::new(c).is_file() {
             return Some(c.clone());
         }
-        // Allow bare "nvidia-smi" to be resolved later by PATH.
+    }
+    for c in candidates {
         if c == "nvidia-smi" {
             return Some(c.clone());
         }
@@ -229,6 +243,7 @@ async fn run_nvidia_smi(exe: &str) -> Result<String, NvidiaSmiError> {
         "--query-gpu=index,name,memory.total,memory.free,compute_cap",
         "--format=csv,noheader,nounits",
     ])
+    .stdin(Stdio::null())
     .stdout(Stdio::piped())
     .stderr(Stdio::piped())
     .kill_on_drop(true);
@@ -358,6 +373,42 @@ fn parse_mib_field(token: &str, source: &str, field: &str) -> ProbeValue<u64> {
     }
 }
 
+fn classify_nvidia_smi_output(output: &str, warnings: &mut Vec<String>) -> GpuInventory {
+    let trimmed = output.trim();
+    if trimmed.is_empty() {
+        // nvidia-smi produced empty output -> no NVIDIA GPUs detected.
+        return GpuInventory {
+            status: ProbeStatus::Known,
+            source: "nvidia-smi".into(),
+            note: Some("nvidia-smi returned no GPU rows".into()),
+            devices: Vec::new(),
+        };
+    }
+
+    let devices = parse_nvidia_smi_output(output, warnings);
+    if devices.is_empty() {
+        // Output was not empty but parsing yielded nothing -> malformed.
+        let mut detail = String::from("nvidia-smi output contained no parseable GPU rows");
+        if !warnings.is_empty() {
+            detail.push_str("; ");
+            detail.push_str(&warnings.join("; "));
+        }
+        GpuInventory {
+            status: ProbeStatus::Error,
+            source: "nvidia-smi".into(),
+            note: Some(detail),
+            devices,
+        }
+    } else {
+        GpuInventory {
+            status: ProbeStatus::Known,
+            source: "nvidia-smi".into(),
+            note: None,
+            devices,
+        }
+    }
+}
+
 async fn probe_gpu_inventory(warnings: &mut Vec<String>) -> GpuInventory {
     #[cfg(not(target_os = "windows"))]
     {
@@ -382,24 +433,7 @@ async fn probe_gpu_inventory(warnings: &mut Vec<String>) -> GpuInventory {
         };
 
         match run_nvidia_smi(&exe).await {
-            Ok(output) => {
-                let devices = parse_nvidia_smi_output(&output, warnings);
-                if devices.is_empty() {
-                    GpuInventory {
-                        status: ProbeStatus::Known,
-                        source: "nvidia-smi".into(),
-                        note: Some("nvidia-smi returned no GPU rows".into()),
-                        devices,
-                    }
-                } else {
-                    GpuInventory {
-                        status: ProbeStatus::Known,
-                        source: "nvidia-smi".into(),
-                        note: None,
-                        devices,
-                    }
-                }
-            }
+            Ok(output) => classify_nvidia_smi_output(&output, warnings),
             Err(NvidiaSmiError::NotFound) => GpuInventory {
                 status: ProbeStatus::Unknown,
                 source: "nvidia-smi".into(),
@@ -506,25 +540,73 @@ mod tests {
     }
 
     #[test]
-    fn parse_empty_output() {
+    fn classify_empty_nvidia_smi_output_is_known_no_gpus() {
         let output = "";
         let mut warnings = Vec::new();
-        let devices = parse_nvidia_smi_output(output, &mut warnings);
-        assert!(devices.is_empty());
+        let inventory = classify_nvidia_smi_output(output, &mut warnings);
+        assert_eq!(inventory.status, ProbeStatus::Known);
+        assert!(inventory.devices.is_empty());
+        assert_eq!(inventory.note.as_deref().unwrap(), "nvidia-smi returned no GPU rows");
     }
 
     #[test]
-    fn resolve_nvidia_smi_prefers_existing_file() {
-        let candidates = vec!["should_not_exist.exe".into(), r"C:\Windows\System32\nvidia-smi.exe".into()];
-        let resolved = resolve_nvidia_smi_path(&candidates);
+    fn classify_valid_nvidia_smi_output_is_known_with_devices() {
+        let output = "0, NVIDIA GeForce RTX 3070 Ti, 8192, 6650, 8.6\n";
+        let mut warnings = Vec::new();
+        let inventory = classify_nvidia_smi_output(output, &mut warnings);
+        assert_eq!(inventory.status, ProbeStatus::Known);
+        assert_eq!(inventory.devices.len(), 1);
+        assert!(inventory.note.is_none());
+    }
+
+    #[test]
+    fn classify_non_empty_malformed_output_is_error() {
+        // Output is not empty but contains no parseable GPU rows.
+        let output = "this is not a csv row\nanother bad line\n";
+        let mut warnings = Vec::new();
+        let inventory = classify_nvidia_smi_output(output, &mut warnings);
+        assert_eq!(inventory.status, ProbeStatus::Error);
+        assert!(inventory.devices.is_empty());
+        let note = inventory.note.as_deref().unwrap();
+        assert!(note.contains("no parseable GPU rows"));
+        assert!(!warnings.is_empty(), "parser warnings should be retained");
+    }
+
+    #[test]
+    fn resolve_nvidia_smi_prefers_existing_file_over_path_name() {
+        // Production candidate list puts explicit Windows paths first and the
+        // bare "nvidia-smi" PATH fallback last.  The resolver must select the
+        // first existing file, not the bare name.
+        let candidates = nvidia_smi_candidates();
+        assert_eq!(candidates.first().cloned().as_deref(), Some(r"C:\Windows\System32\nvidia-smi.exe"));
+        assert_eq!(candidates.last().cloned().as_deref(), Some("nvidia-smi"));
+
+        // Synthetic list where only the System32 path exists and "nvidia-smi"
+        // is present as a fallback.
+        let synthetic = vec![
+            "does_not_exist.exe".into(),
+            r"C:\Windows\System32\nvidia-smi.exe".into(),
+            "nvidia-smi".into(),
+        ];
+        let resolved = resolve_nvidia_smi_path(&synthetic);
         assert_eq!(resolved.as_deref(), Some(r"C:\Windows\System32\nvidia-smi.exe"));
     }
 
     #[test]
-    fn resolve_nvidia_smi_falls_back_to_path_name() {
-        let candidates = vec!["nvidia-smi".into()];
-        let resolved = resolve_nvidia_smi_path(&candidates);
+    fn resolve_nvidia_smi_falls_back_to_path_name_when_no_explicit_file_exists() {
+        let synthetic = vec![
+            "does_not_exist.exe".into(),
+            "also_missing.exe".into(),
+            "nvidia-smi".into(),
+        ];
+        let resolved = resolve_nvidia_smi_path(&synthetic);
         assert_eq!(resolved.as_deref(), Some("nvidia-smi"));
+    }
+
+    #[test]
+    fn resolve_nvidia_smi_returns_none_when_no_candidates_available() {
+        let resolved = resolve_nvidia_smi_path(&[]);
+        assert!(resolved.is_none());
     }
 
     #[test]
@@ -536,17 +618,35 @@ mod tests {
     }
 
     #[test]
-    fn mib_conversion_from_bytes() {
-        // 4 GiB in bytes -> 4096 MiB
-        let bytes: u64 = 4 * 1024 * 1024 * 1024;
-        let mib = bytes / (1024 * 1024);
-        assert_eq!(mib, 4096);
+    fn bytes_to_mib_conversion_is_exact() {
+        assert_eq!(bytes_to_mib(0), 0);
+        assert_eq!(bytes_to_mib(1024 * 1024), 1);
+        assert_eq!(bytes_to_mib(4 * 1024 * 1024 * 1024), 4096);
+    }
+
+    #[test]
+    fn probe_ram_reports_ram_in_mib() {
+        let ram = probe_ram();
+        let mut sys = System::new_all();
+        sys.refresh_all();
+
+        // Values are dynamic, so compare within a small tolerance rather than
+        // exact equality.  The important property is the conversion path used.
+        let expected_total = bytes_to_mib(sys.total_memory());
+        let total = ram.total_mib.value.expect("total RAM should be known");
+        assert!(
+            total.abs_diff(expected_total) <= 2,
+            "probe_ram total_mib {total} should be within 2 MiB of expected {expected_total}"
+        );
+
+        let available = ram.available_mib.value.expect("available RAM should be known");
+        assert!(available > 0, "available RAM should be positive");
+        assert_eq!(ram.total_mib.status, ProbeStatus::Known);
+        assert_eq!(ram.available_mib.status, ProbeStatus::Known);
     }
 
     #[test]
     fn missing_cpu_details_does_not_panic() {
-        // probe_cpu uses live sysinfo; this test simply verifies it returns a
-        // profile without panicking and that every field has a status.
         let cpu = probe_cpu();
         assert!(!cpu.brand.source.is_empty());
         assert!(!cpu.logical_cores.source.is_empty());
@@ -554,16 +654,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_ram_details_does_not_panic() {
-        let ram = probe_ram();
-        assert!(!ram.total_mib.source.is_empty());
-        assert!(!ram.available_mib.source.is_empty());
-    }
-
-    #[test]
     fn gpu_inventory_unsupported_on_non_windows() {
-        // This test documents that the non-windows cfg path is structured.
-        // On a Windows runner it will not exercise the non-windows branch.
         let mut warnings = Vec::new();
         if !cfg!(target_os = "windows") {
             let inv = tokio::runtime::Runtime::new().unwrap().block_on(probe_gpu_inventory(&mut warnings));
@@ -573,10 +664,33 @@ mod tests {
     }
 
     #[test]
-    fn probe_value_status_variants_serialize() {
-        let v: ProbeValue<u64> = ProbeValue::known(100, "test", Confidence::High);
-        let json = serde_json::to_string(&v).unwrap();
+    fn probe_value_serialization_omits_null_optionals() {
+        let known: ProbeValue<u64> = ProbeValue::known(100, "test", Confidence::High);
+        let known_json = serde_json::to_string(&known).unwrap();
+        assert!(known_json.contains("\"status\":\"known\""));
+        assert!(known_json.contains("\"value\":100"));
+        assert!(known_json.contains("\"source\":\"test\""));
+        assert!(known_json.contains("\"confidence\":\"high\""));
+        assert!(!known_json.contains("\"note\""));
+
+        let unknown: ProbeValue<u64> = ProbeValue::unknown("test", "missing");
+        let unknown_json = serde_json::to_string(&unknown).unwrap();
+        assert!(unknown_json.contains("\"status\":\"unknown\""));
+        assert!(!unknown_json.contains("\"value\""));
+        assert!(!unknown_json.contains("\"confidence\""));
+        assert!(unknown_json.contains("\"note\":\"missing\""));
+    }
+
+    #[test]
+    fn gpu_inventory_note_omitted_when_none() {
+        let inv = GpuInventory {
+            status: ProbeStatus::Known,
+            source: "nvidia-smi".into(),
+            note: None,
+            devices: Vec::new(),
+        };
+        let json = serde_json::to_string(&inv).unwrap();
+        assert!(!json.contains("\"note\":null"));
         assert!(json.contains("\"status\":\"known\""));
-        assert!(json.contains("\"source\":\"test\""));
     }
 }

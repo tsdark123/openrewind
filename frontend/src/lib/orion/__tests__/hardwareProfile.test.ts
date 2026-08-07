@@ -9,6 +9,14 @@ function tauriWindow(invoke: (cmd: string) => Promise<unknown>) {
   } as unknown as Window & typeof globalThis;
 }
 
+function tauriInternalsWindow(invoke: (cmd: string) => Promise<unknown>) {
+  return {
+    __TAURI_INTERNALS__: {
+      invoke,
+    },
+  } as unknown as Window & typeof globalThis;
+}
+
 function noTauriWindow() {
   return {} as unknown as Window & typeof globalThis;
 }
@@ -72,6 +80,39 @@ describe('hardwareProfile', () => {
     expect(profile.platform).toBe('win32');
     expect(profile.gpuInventory.devices).toHaveLength(1);
     expect(profile.gpuInventory.devices[0].model.value).toBe('NVIDIA GeForce RTX 3070 Ti');
+  });
+
+  it('uses the __TAURI_INTERNALS__ invoke fallback when __TAURI__ is absent', async () => {
+    const mockProfile: HardwareProfile = {
+      platform: 'win32',
+      timestamp: '2026-08-07T01:00:00Z',
+      cpu: {
+        logicalCores: { status: 'known', value: 16, source: 'sysinfo', confidence: 'high' },
+        physicalCores: { status: 'known', value: 8, source: 'sysinfo', confidence: 'high' },
+        brand: { status: 'known', value: 'Intel', source: 'sysinfo', confidence: 'high' },
+      },
+      ram: {
+        totalMib: { status: 'known', value: 32768, source: 'sysinfo', confidence: 'high' },
+        availableMib: { status: 'known', value: 16384, source: 'sysinfo', confidence: 'high' },
+      },
+      gpuInventory: {
+        status: 'known',
+        source: 'nvidia-smi',
+        devices: [],
+      },
+      warnings: [],
+    };
+
+    vi.stubGlobal(
+      'window',
+      tauriInternalsWindow((cmd) => {
+        expect(cmd).toBe('probe_hardware');
+        return Promise.resolve(mockProfile);
+      })
+    );
+
+    const profile = await getHardwareProfile();
+    expect(profile.platform).toBe('win32');
   });
 
   it('preserves multiple GPUs in the inventory', async () => {

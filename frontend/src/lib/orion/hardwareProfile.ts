@@ -111,9 +111,12 @@ export async function getHardwareProfile(): Promise<HardwareProfile> {
   }
 
   const win = typeof window !== 'undefined' ? (window as any) : undefined;
-  const invoke = win?.__TAURI__?.core?.invoke;
+  const invoke =
+    win?.__TAURI__?.core?.invoke ??
+    win?.__TAURI_INTERNALS__?.invoke ??
+    win?.__TAURI_INTERNALS__?.core?.invoke;
   if (typeof invoke !== 'function') {
-    return errorProfile('Tauri core.invoke is not available despite isTauri() returning true.');
+    return errorProfile('Tauri invoke is not available despite isTauri() returning true.');
   }
 
   try {
