@@ -111,9 +111,9 @@ describe('compileChartActionIntent', () => {
     expect(plan.steps[1].args.symbol).toBe('AAPL');
   });
 
-  it('keeps an inherited/repeated timeframe across a symbol or date boundary', () => {
-    // Switching symbol while carrying an inherited timeframe must keep
-    // chart.set_timeframe so the new session is set up correctly.
+  it('keeps an inherited timeframe across a session boundary only when chart state is needed', () => {
+    // A cross-symbol analysis-only repeat does not need a redundant set_timeframe
+    // when the value already matches the current state.
     const crossSymbol = compileChartActionIntent(
       {
         kind: 'chart_action',
@@ -123,7 +123,22 @@ describe('compileChartActionIntent', () => {
       },
       { stateSymbol: 'MSFT', stateDate: '2026-07-31', stateTimeframe: 15, availableTickers: ['AAPL'] }
     );
-    expect(crossSymbol.steps.some((s) => s.capability === 'chart.set_timeframe')).toBe(true);
+    expect(crossSymbol.steps.some((s) => s.capability === 'chart.set_timeframe')).toBe(false);
+
+    // A cross-symbol repeat that reconstructs chart state (seek + candle query)
+    // keeps the inherited timeframe so the target session is set up correctly.
+    const crossSymbolNav = compileChartActionIntent(
+      {
+        kind: 'chart_action',
+        symbol: 'AAPL',
+        date: { kind: 'absolute', value: '2026-07-31' },
+        seekTime: '11:15',
+        finalQuery: 'current_candle',
+        timeframeMinutes: 15,
+      },
+      { stateSymbol: 'MSFT', stateDate: '2026-07-31', stateTimeframe: 15, availableTickers: ['AAPL'] }
+    );
+    expect(crossSymbolNav.steps.some((s) => s.capability === 'chart.set_timeframe')).toBe(true);
 
     // Changing date while carrying an inherited timeframe must also keep it.
     const dateOnly = compileChartActionIntent(
@@ -207,5 +222,63 @@ describe('compileChartActionIntent', () => {
       'playback.seek_to_time',
       'chart.get_current_candle',
     ]);
+  });
+
+  it('does not emit set_timeframe for a cross-symbol analysis-only transfer with the same timeframe', () => {
+    const plan = compileChartActionIntent(
+      {
+        kind: 'chart_action',
+        symbol: 'NVDA',
+        timeframeMinutes: 15,
+        analysisRequests: [
+          { kind: 'window_volume', window: { kind: 'time_range', fromTime: '09:30', toTime: '10:30' } },
+        ],
+      },
+      { stateSymbol: 'AAPL', stateDate: '2026-07-31', stateTimeframe: 15, availableTickers: ['AAPL', 'NVDA'] }
+    );
+    const caps = plan.steps.map((s) => s.capability);
+    expect(caps).toEqual([
+      'session.switch_symbol',
+      'analysis.window_volume',
+    ]);
+    expect(caps).not.toContain('chart.set_timeframe');
+    expect(caps).not.toContain('playback.seek_to_time');
+    expect(caps).not.toContain('chart.seek');
+  });
+
+  it('emits set_timeframe for a cross-symbol analysis-only transfer when the timeframe differs', () => {
+    const plan = compileChartActionIntent(
+      {
+        kind: 'chart_action',
+        symbol: 'NVDA',
+        timeframeMinutes: 5,
+        analysisRequests: [
+          { kind: 'window_volume', window: { kind: 'time_range', fromTime: '09:30', toTime: '10:30' } },
+        ],
+      },
+      { stateSymbol: 'AAPL', stateDate: '2026-07-31', stateTimeframe: 15, availableTickers: ['AAPL', 'NVDA'] }
+    );
+    const caps = plan.steps.map((s) => s.capability);
+    expect(caps).toEqual([
+      'session.switch_symbol',
+      'chart.set_timeframe',
+      'analysis.window_volume',
+    ]);
+  });
+
+  it('generalizes the analysis-only transfer behavior to any ticker and analysis request', () => {
+    const plan = compileChartActionIntent(
+      {
+        kind: 'chart_action',
+        symbol: 'MSFT',
+        timeframeMinutes: 15,
+        analysisRequests: [
+          { kind: 'window_ohlc', window: { kind: 'whole_session' } },
+        ],
+      },
+      { stateSymbol: 'AAPL', stateDate: '2026-07-31', stateTimeframe: 15, availableTickers: ['AAPL', 'MSFT', 'NVDA'] }
+    );
+    const caps = plan.steps.map((s) => s.capability);
+    expect(caps).toEqual(['session.switch_symbol', 'analysis.window_ohlc']);
   });
 });

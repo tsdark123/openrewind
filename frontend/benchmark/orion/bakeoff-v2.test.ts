@@ -112,10 +112,6 @@ describe('Orion Chapter 2A V2 certification contract', () => {
     for (const prompt of ALL_PROMPTS_V2) {
       if (prompt.expected !== 'chart_action') continue;
       const result = makeV2ResultFromGold(prompt);
-      if (prompt.id === 14 && !result.v2Score.pass) {
-        // eslint-disable-next-line no-console
-        console.log('prompt 14 diagnostics', JSON.stringify(result.v2Score.diagnostics, null, 2));
-      }
       expect(result.v2Score.pass, `prompt #${prompt.id} should pass on its own gold`).toBe(true);
       expect(result.v2Score.diagnostics.capabilitySetMatch, `prompt #${prompt.id} capability set`).toBe(true);
     }

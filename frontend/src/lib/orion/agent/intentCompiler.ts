@@ -978,7 +978,6 @@ export function compileChartActionIntent(
   // 3. Resolve trading date when present, unless the date is an explicit
   // absolute date that matches the active session *and* the target symbol.
   let resolveDateId: string | undefined;
-  let willChangeDate = false;
   if (intent.date) {
     if (intent.previousSymbol) {
       throw new Error('compileChartActionIntent: date cannot be combined with previousSymbol.');
@@ -998,8 +997,6 @@ export function compileChartActionIntent(
       switchSymbolValue = options.stateSymbol;
       symbolForDate = switchSymbolValue;
     }
-
-    willChangeDate = !isKnownDate;
 
     if (!isKnownDate) {
       resolveDateId = 'step-resolve-date';
@@ -1084,9 +1081,11 @@ export function compileChartActionIntent(
   }
 
   // 5. Set timeframe when it changes, when this is a pure timeframe request
-  // (e.g. "Use the same timeframe."), or when the plan is crossing a
-  // symbol/session boundary (so an inherited/repeated timeframe stays
-  // represented in the compiled plan even if its value matches the state).
+  // (e.g. "Use the same timeframe."), when the session date actually changes
+  // (a new session needs its timeframe represented), or when the plan will
+  // reconstruct chart state for a candle query, seek or playback. A symbol
+  // change alone (e.g. an analysis-only "do that analysis on NVDA") does not
+  // emit a redundant same-value set_timeframe.
   const hasNonTimeframeWork =
     intent.previousSymbol ||
     intent.symbol ||
@@ -1096,12 +1095,26 @@ export function compileChartActionIntent(
     intent.seekTime !== undefined ||
     intent.relativeSeekMinutes !== undefined ||
     intent.playback;
+
+  const dateChanges =
+    intent.date !== undefined &&
+    (intent.date.kind !== 'absolute' || intent.date.value !== options.stateDate);
+
+  const sessionTransition =
+    willChangeSymbol || intent.previousSymbol || dateChanges;
+
+  const requiresChartState =
+    intent.finalQuery !== undefined ||
+    intent.seekTime !== undefined ||
+    intent.relativeSeekMinutes !== undefined ||
+    intent.playback !== undefined;
+
   const shouldSetTimeframe =
     intent.timeframeMinutes !== undefined &&
     (intent.timeframeMinutes !== options.stateTimeframe ||
       !hasNonTimeframeWork ||
-      willChangeSymbol ||
-      willChangeDate);
+      dateChanges ||
+      (sessionTransition && requiresChartState));
   if (shouldSetTimeframe) {
     pushStep({
       id: 'step-timeframe',
