@@ -807,7 +807,7 @@ export async function runRuntimeValidation(
       case 'selected': {
         // A selected result with no evidence cannot be produced by the signed-off
         // selector, but we defensively treat it as terminal.
-        const fullOrder = [initialResult.selected, ...initialResult.validationOrder];
+        const fullOrder = Object.freeze([initialResult.selected, ...initialResult.validationOrder]);
         const ctx = makeResultContext(fullOrder, {}, 0);
         emitEvent({ kind: 'candidate-selected', runId, modelId: initialResult.selected.modelId });
         emitEvent({ kind: 'run-completed', runId, resultKind: 'selected' });

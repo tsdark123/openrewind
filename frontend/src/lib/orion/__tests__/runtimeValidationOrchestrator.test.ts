@@ -1246,4 +1246,63 @@ describe('deep immutability and snapshot isolation', () => {
 
     expect(result.kind).toBe('selected');
   });
+
+  it('freezes validationOrder in the defensive initial-selected return path', async () => {
+    const selected = makeProfile({ modelId: 'qwen3:8b', ollamaTag: 'qwen3:8b' });
+    const pending = makeProfile({
+      modelId: 'fallback:8b',
+      ollamaTag: 'fallback:8b',
+      fallbackPriority: 2,
+    });
+
+    const selectedResult: ModelSelectionResult = {
+      kind: 'selected',
+      selected,
+      fallbackOrder: [],
+      validationOrder: [pending],
+      dispositions: [],
+      reason: 'defensive initial selection with no evidence',
+    };
+
+    const validateSpy = vi.fn();
+    const selectSpy = vi.fn().mockReturnValue(selectedResult);
+    const deps = makeDependencies({
+      selectCertifiedModel: selectSpy,
+      validateCandidate: validateSpy,
+    });
+
+    const result = await runRuntimeValidation(
+      makeRunInput({ registry: [selected, pending] }),
+      deps
+    );
+
+    expect(result.kind).toBe('selected');
+    expect(validateSpy).not.toHaveBeenCalled();
+    if (result.kind === 'selected') {
+      expect(result.selected.modelId).toBe('qwen3:8b');
+      expect(result.validationOrder.map((p) => p.modelId)).toEqual([
+        'qwen3:8b',
+        'fallback:8b',
+      ]);
+      expect(result.validationOrder).toHaveLength(2);
+
+      expect(Object.isFrozen(result.validationOrder)).toBe(true);
+
+      expect(() => {
+        (result.validationOrder as any).push(
+          makeProfile({ modelId: 'extra:8b', ollamaTag: 'extra:8b' })
+        );
+      }).toThrow();
+
+      expect(() => {
+        (result.validationOrder as any)[0].modelId = 'mutated';
+      }).toThrow();
+
+      expect(result.validationOrder.map((p) => p.modelId)).toEqual([
+        'qwen3:8b',
+        'fallback:8b',
+      ]);
+      expect(result.validationOrder).toHaveLength(2);
+    }
+  });
 });
