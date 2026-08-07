@@ -13,6 +13,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::time::{sleep, timeout};
 
+pub mod hardware;
 mod local_data;
 
 #[allow(dead_code)]
@@ -430,6 +431,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             fetch_market_data, read_journal, write_journal, read_orion_threads,
             write_orion_threads, ensure_ollama_running, download_ollama,
+            hardware::probe_hardware,
             local_data::get_local_data_dir, local_data::list_local_tickers,
             local_data::pick_csv_file, local_data::inspect_local_csv,
             local_data::import_local_csv,
