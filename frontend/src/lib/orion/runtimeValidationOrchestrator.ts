@@ -2,17 +2,28 @@
 // runtimeValidationOrchestrator.ts — pure, I/O-free orchestration for
 // Chapter 2B runtime validation (Slice 1).
 //
-// This module decides which certified candidate to test, coordinates the
+// This module decides which certified candidate to test, coordinates one
 // OpenRewind model-work lease, accepts only complete identity-bound evidence,
 // and repeatedly calls the signed-off `selectCertifiedModel` until a candidate
 // is positively selected or the run terminates.
 //
-// It does not contact Ollama, Tauri, the network, timers or browser APIs. The
-// actual model-scoped validator is injected and will be implemented in Slice 2.
+// The orchestrator, not the validator, owns the `RuntimeValidationEvidence`
+// contract. The validator returns a raw, candidate-scoped observation; the
+// orchestrator converts it into evidence using trusted run and profile fields.
+//
+// Slice 1 is intentionally incomplete: it does not contact Ollama, Tauri, the
+// network, timers or browser APIs. The actual model-scoped validator, residency
+// inspection, streaming and percentile computation are Slice 2 concerns.
+//
+// Lease contract (future integration):
+//   The same lease provider must guard runtime validation, `warmOrionAgent`,
+//   `orionChat` and all other OpenRewind-controlled startup model work. It
+//   cannot exclude external Ollama clients that already hold the model.
 // =============================================================================
 
 import type { CertifiedModelProfile, CertificationIdentity } from './certifiedModels';
 import type {
+  CandidateDisposition,
   CertifiedModelSelectorInput,
   ModelSelectionResult,
   RuntimeValidationEvidence,
@@ -20,13 +31,29 @@ import type {
 import type { HardwareProfile } from './hardwareProfile';
 
 // ---------------------------------------------------------------------------
-// Smoothness policy
+// Approved warm smoothness policy
 // ---------------------------------------------------------------------------
 
 export interface SmoothnessPolicy {
-  warmSampleCount: number;
-  maxP95TrueTTFTMs: number;
-  maxP95WallClockMs: number;
+  readonly warmSampleCount: number;
+  readonly maxP95TrueTTFTMs: number;
+  readonly maxP95WallClockMs: number;
+}
+
+export const APPROVED_WARM_SMOOTHNESS_POLICY = Object.freeze({
+  warmSampleCount: 5,
+  maxP95TrueTTFTMs: 400,
+  maxP95WallClockMs: 1800,
+} as const) satisfies SmoothnessPolicy;
+
+export type ApprovedSmoothnessPolicy = typeof APPROVED_WARM_SMOOTHNESS_POLICY;
+
+export function isApprovedSmoothnessPolicy(policy: SmoothnessPolicy): policy is ApprovedSmoothnessPolicy {
+  return (
+    policy.warmSampleCount === 5 &&
+    policy.maxP95TrueTTFTMs === 400 &&
+    policy.maxP95WallClockMs === 1800
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -35,75 +62,161 @@ export interface SmoothnessPolicy {
 
 export interface RuntimeValidationRunInput {
   /** Deterministic, caller-supplied identifier. No time or randomness. */
-  runId: string;
+  readonly runId: string;
   /** Snapshot of the certified-model registry at the start of the run. */
-  registry: CertifiedModelProfile[];
+  readonly registry: readonly CertifiedModelProfile[];
   /** Snapshot of the local hardware profile. */
-  hardwareProfile: HardwareProfile;
+  readonly hardwareProfile: HardwareProfile;
   /** Target runtime for selector compatibility (e.g. 'ollama'). */
-  runtime: string;
+  readonly runtime: string;
   /** Target operating system for selector compatibility (e.g. 'win32'). */
-  platform: string;
+  readonly platform: string;
   /** Approved warm smoothness budget for this run. */
-  smoothnessPolicy: SmoothnessPolicy;
+  readonly smoothnessPolicy: SmoothnessPolicy;
   /** External abort signal. */
-  signal: AbortSignal;
+  readonly signal: AbortSignal;
   /** Optional progress observer. Emissions are best-effort and non-mutating. */
-  onProgress?: (event: RuntimeValidationProgressEvent) => void;
+  readonly onProgress?: (event: RuntimeValidationProgressEvent) => void;
 }
 
 // ---------------------------------------------------------------------------
-// Dependencies
+// Candidate input for the validator
 // ---------------------------------------------------------------------------
 
+export interface RuntimeValidationCandidateInput {
+  readonly runId: string;
+  readonly profile: CertifiedModelProfile;
+  readonly certificationIdentity: CertificationIdentity;
+  readonly hardwareProfile: HardwareProfile;
+  readonly runtime: string;
+  readonly platform: string;
+  readonly smoothnessPolicy: ApprovedSmoothnessPolicy;
+  readonly signal: AbortSignal;
+}
+
+// ---------------------------------------------------------------------------
+// Model-work lease
+// ---------------------------------------------------------------------------
+
+/** Opaque lease. The only operation is release. */
 export interface ModelWorkLease {
   release(): void;
 }
 
-export interface RuntimeValidationDiagnostics {
-  modelId: string;
-  ollamaTag: string;
-  runId: string;
-  startedAt?: string;
-  completedAt?: string;
-  stages?: string[];
-  error?: string;
+export interface LeaseAcquired {
+  readonly kind: 'acquired';
+  readonly lease: ModelWorkLease;
 }
 
+export interface LeaseBusy {
+  readonly kind: 'busy';
+  readonly reason: string;
+}
+
+export interface LeaseInconclusive {
+  readonly kind: 'inconclusive';
+  readonly reason: string;
+}
+
+export type LeaseAcquisition = LeaseAcquired | LeaseBusy | LeaseInconclusive;
+
+// ---------------------------------------------------------------------------
+// Diagnostics
+// ---------------------------------------------------------------------------
+
+export interface RuntimeValidationDiagnostics {
+  readonly modelId: string;
+  readonly ollamaTag: string;
+  readonly runId: string;
+  readonly startedAt?: string;
+  readonly completedAt?: string;
+  readonly stages?: readonly string[];
+  readonly error?: string;
+  readonly detail?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Raw candidate observation from the validator
+// ---------------------------------------------------------------------------
+
+/**
+ * A complete candidate observation. It must not carry selector-owned
+ * identity/context fields (runtime, platform, comparisonGroupId,
+ * certificationVersion, benchmarkSuiteVersion, controlledContextSize,
+ * thinking, keepAlive). Those are added by the orchestrator when constructing
+ * `RuntimeValidationEvidence`.
+ */
+export interface RuntimeValidationObservation {
+  readonly modelId: string;
+  readonly ollamaTag: string;
+  readonly certificationIdentity: CertificationIdentity;
+  readonly loadSuccess: boolean;
+  readonly loadFailureReason?: string;
+  readonly oom: boolean;
+  readonly cpuOffload: boolean;
+  readonly evicted: boolean;
+  readonly smoothnessOk: boolean;
+  readonly measuredWholeAppPeakMemoryMiB?: number;
+  readonly avgTokensPerSecond?: number;
+  readonly p95WallClockMs?: number;
+  readonly p95TrueTTFTMs?: number;
+}
+
+// ---------------------------------------------------------------------------
+// Attempts returned by the validator
+// ---------------------------------------------------------------------------
+
+export type ActionRequiredReason =
+  | 'not-installed'
+  | 'wrong-digest'
+  | 'certified-digest-unavailable'
+  | 'unsupported-ollama-version';
+
+export type InconclusiveReason =
+  | 'ambiguous-engine-failure'
+  | 'unavailable-residency-observation'
+  | 'malformed-residency-observation'
+  | 'resource-conflict'
+  | 'incomplete-observation'
+  | 'validator-exception';
+
+export type CancellationReason = 'aborted' | 'stale';
+
 export interface RuntimeValidationAttemptValidated {
-  kind: 'validated';
-  evidence: RuntimeValidationEvidence;
-  certificationIdentity: CertificationIdentity;
-  diagnostics?: RuntimeValidationDiagnostics;
+  readonly kind: 'validated';
+  readonly observation: RuntimeValidationObservation;
+  readonly diagnostics?: RuntimeValidationDiagnostics;
 }
 
 export interface RuntimeValidationAttemptFailed {
-  kind: 'failed';
-  evidence: RuntimeValidationEvidence;
-  certificationIdentity: CertificationIdentity;
-  diagnostics?: RuntimeValidationDiagnostics;
+  readonly kind: 'failed';
+  readonly observation: RuntimeValidationObservation;
+  readonly diagnostics?: RuntimeValidationDiagnostics;
 }
 
 export interface RuntimeValidationAttemptActionRequired {
-  kind: 'action-required';
-  reason:
-    | 'not-installed'
-    | 'wrong-digest'
-    | 'certified-digest-unavailable'
-    | 'unsupported-ollama-version';
-  diagnostics: RuntimeValidationDiagnostics;
+  readonly kind: 'action-required';
+  readonly reason: ActionRequiredReason;
+  readonly modelId: string;
+  readonly ollamaTag: string;
+  readonly diagnostics?: RuntimeValidationDiagnostics;
 }
 
 export interface RuntimeValidationAttemptInconclusive {
-  kind: 'inconclusive';
-  reason: string;
-  diagnostics: RuntimeValidationDiagnostics;
+  readonly kind: 'inconclusive';
+  readonly reason: InconclusiveReason;
+  readonly modelId: string;
+  readonly ollamaTag: string;
+  readonly detail?: string;
+  readonly diagnostics?: RuntimeValidationDiagnostics;
 }
 
 export interface RuntimeValidationAttemptCancelled {
-  kind: 'cancelled';
-  reason: 'aborted' | 'stale' | string;
-  diagnostics: RuntimeValidationDiagnostics;
+  readonly kind: 'cancelled';
+  readonly reason: CancellationReason;
+  readonly modelId: string;
+  readonly ollamaTag: string;
+  readonly diagnostics?: RuntimeValidationDiagnostics;
 }
 
 export type RuntimeValidationAttempt =
@@ -113,21 +226,28 @@ export type RuntimeValidationAttempt =
   | RuntimeValidationAttemptInconclusive
   | RuntimeValidationAttemptCancelled;
 
+// ---------------------------------------------------------------------------
+// Validator dependency
+// ---------------------------------------------------------------------------
+
 export type ValidateCandidate = (
-  profile: CertifiedModelProfile,
-  runInput: RuntimeValidationRunInput,
+  candidateInput: RuntimeValidationCandidateInput,
   isCurrent: () => boolean
 ) => Promise<RuntimeValidationAttempt>;
 
+// ---------------------------------------------------------------------------
+// Orchestrator dependencies
+// ---------------------------------------------------------------------------
+
 export interface RuntimeValidationDependencies {
   /** The signed-off pure selector. */
-  selectCertifiedModel: (input: CertifiedModelSelectorInput) => ModelSelectionResult;
+  readonly selectCertifiedModel: (input: CertifiedModelSelectorInput) => ModelSelectionResult;
   /** Future Slice 2 validator. In Slice 1 this is fakeable. */
-  validateCandidate: ValidateCandidate;
-  /** Yields a lease or 'busy'. No real implementation in Slice 1. */
-  acquireLease: () => Promise<ModelWorkLease | 'busy'>;
+  readonly validateCandidate: ValidateCandidate;
+  /** Yields a typed lease acquisition. No real implementation in Slice 1. */
+  readonly acquireLease: () => Promise<LeaseAcquisition>;
   /** Returns true only while this run is still the current one. */
-  isCurrent: () => boolean;
+  readonly isCurrent: () => boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -135,43 +255,125 @@ export interface RuntimeValidationDependencies {
 // ---------------------------------------------------------------------------
 
 export type RuntimeValidationProgressEvent =
-  | { kind: 'run-started'; runId: string }
-  | { kind: 'lock-acquired'; runId: string }
-  | { kind: 'validation-order-resolved'; runId: string; validationOrder: string[] }
-  | { kind: 'candidate-started'; runId: string; modelId: string }
-  | { kind: 'action-required'; runId: string; modelId: string; reason: string }
-  | { kind: 'candidate-completed'; runId: string; modelId: string; attemptKind: 'validated' | 'failed' }
-  | { kind: 'candidate-rejected-by-selector'; runId: string; modelId: string; resultKind: string }
-  | { kind: 'candidate-selected'; runId: string; modelId: string }
-  | { kind: 'inconclusive'; runId: string; modelId?: string; reason: string }
-  | { kind: 'cancelled-stale'; runId: string; modelId?: string; reason: string }
-  | { kind: 'run-completed'; runId: string; resultKind: string };
+  | { readonly kind: 'run-started'; readonly runId: string }
+  | { readonly kind: 'lock-acquired'; readonly runId: string }
+  | {
+      readonly kind: 'validation-order-resolved';
+      readonly runId: string;
+      readonly validationOrder: readonly string[];
+      readonly remainingValidationOrder: readonly string[];
+    }
+  | { readonly kind: 'candidate-started'; readonly runId: string; readonly modelId: string }
+  | {
+      readonly kind: 'action-required';
+      readonly runId: string;
+      readonly modelId: string;
+      readonly reason: ActionRequiredReason;
+    }
+  | {
+      readonly kind: 'candidate-completed';
+      readonly runId: string;
+      readonly modelId: string;
+      readonly attemptKind: 'validated' | 'failed';
+    }
+  | {
+      readonly kind: 'candidate-rejected-by-selector';
+      readonly runId: string;
+      readonly modelId: string;
+      readonly resultKind: string;
+    }
+  | { readonly kind: 'candidate-selected'; readonly runId: string; readonly modelId: string }
+  | {
+      readonly kind: 'inconclusive';
+      readonly runId: string;
+      readonly modelId?: string;
+      readonly reason: InconclusiveReason;
+      readonly detail?: string;
+    }
+  | {
+      readonly kind: 'cancelled-stale';
+      readonly runId: string;
+      readonly modelId?: string;
+      readonly reason: CancellationReason;
+    }
+  | {
+      readonly kind: 'run-completed';
+      readonly runId: string;
+      readonly resultKind: string;
+      readonly modelId?: string;
+    };
 
 // ---------------------------------------------------------------------------
 // Result
 // ---------------------------------------------------------------------------
 
+export type ActionCategory =
+  | 'install-consent'
+  | 're-pull-consent'
+  | 'update-ollama'
+  | 'registry-identity-missing';
+
 export type RuntimeValidationOrchestratorResult =
-  | (ModelSelectionResult & { runId: string })
   | {
-      kind: 'action-required';
-      runId: string;
-      modelId: string;
-      reason: string;
-      action: 'install-consent' | 're-pull-consent' | 'update-ollama' | 'registry-identity-missing';
+      readonly kind: 'selected';
+      readonly runId: string;
+      readonly selected: CertifiedModelProfile;
+      readonly fallbackOrder: readonly CertifiedModelProfile[];
+      readonly validationOrder: readonly CertifiedModelProfile[];
+      readonly remainingValidationOrder: readonly CertifiedModelProfile[];
+      readonly dispositions: readonly CandidateDisposition[];
+      readonly reason: string;
     }
-  | { kind: 'inconclusive'; runId: string; reason: string }
-  | { kind: 'cancelled-stale'; runId: string; reason: string };
+  | {
+      readonly kind: 'runtime-validation-failed';
+      readonly runId: string;
+      readonly dispositions: readonly CandidateDisposition[];
+      readonly reason: string;
+      readonly validationOrder: readonly CertifiedModelProfile[];
+      readonly remainingValidationOrder: readonly CertifiedModelProfile[];
+    }
+  | {
+      readonly kind: 'no-certified-profiles' | 'no-compatible-certified' | 'invalid-input';
+      readonly runId: string;
+      readonly reason: string;
+      readonly issues?: readonly string[];
+      readonly dispositions?: readonly CandidateDisposition[];
+    }
+  | {
+      readonly kind: 'action-required';
+      readonly runId: string;
+      readonly modelId: string;
+      readonly ollamaTag: string;
+      readonly reason: ActionRequiredReason;
+      readonly action: ActionCategory;
+      readonly validationOrder?: readonly CertifiedModelProfile[];
+      readonly remainingValidationOrder?: readonly CertifiedModelProfile[];
+    }
+  | {
+      readonly kind: 'inconclusive';
+      readonly runId: string;
+      readonly modelId: string;
+      readonly ollamaTag: string;
+      readonly reason: InconclusiveReason;
+      readonly detail?: string;
+      readonly validationOrder?: readonly CertifiedModelProfile[];
+      readonly remainingValidationOrder?: readonly CertifiedModelProfile[];
+    }
+  | {
+      readonly kind: 'cancelled-stale';
+      readonly runId: string;
+      readonly reason: CancellationReason;
+      readonly modelId?: string;
+      readonly ollamaTag?: string;
+      readonly validationOrder?: readonly CertifiedModelProfile[];
+      readonly remainingValidationOrder?: readonly CertifiedModelProfile[];
+    };
 
 // ---------------------------------------------------------------------------
-// Orchestrator
+// Helpers
 // ---------------------------------------------------------------------------
 
-type ActionCategory = 'install-consent' | 're-pull-consent' | 'update-ollama' | 'registry-identity-missing';
-
-function mapActionRequiredReason(
-  reason: RuntimeValidationAttemptActionRequired['reason']
-): ActionCategory {
+function mapActionRequiredReason(reason: ActionRequiredReason): ActionCategory {
   switch (reason) {
     case 'not-installed':
       return 'install-consent';
@@ -181,8 +383,6 @@ function mapActionRequiredReason(
       return 'registry-identity-missing';
     case 'unsupported-ollama-version':
       return 'update-ollama';
-    default:
-      return 'install-consent';
   }
 }
 
@@ -198,71 +398,195 @@ function isNonNegativeFiniteNumber(v: unknown): v is number {
   return typeof v === 'number' && Number.isFinite(v) && v >= 0;
 }
 
+function isOptionalNonBlankString(v: unknown): boolean {
+  return v === undefined || isNonBlankString(v);
+}
+
+function isOptionalNonNegativeFiniteNumber(v: unknown): boolean {
+  return v === undefined || isNonNegativeFiniteNumber(v);
+}
+
+function makeResultContext(
+  validationOrder: readonly CertifiedModelProfile[],
+  evidenceById: Readonly<Record<string, RuntimeValidationEvidence>>,
+  selectedIndex: number
+): { validationOrder: readonly CertifiedModelProfile[]; remainingValidationOrder: readonly CertifiedModelProfile[] } {
+  const remaining = validationOrder
+    .slice(selectedIndex + 1)
+    .filter((p) => !Object.prototype.hasOwnProperty.call(evidenceById, p.modelId));
+  return { validationOrder, remainingValidationOrder: remaining };
+}
+
+function makeRemainingContext(
+  validationOrder: readonly CertifiedModelProfile[],
+  evidenceById: Readonly<Record<string, RuntimeValidationEvidence>>,
+  stoppedIndex: number
+): { validationOrder: readonly CertifiedModelProfile[]; remainingValidationOrder: readonly CertifiedModelProfile[] } {
+  const remaining = validationOrder
+    .slice(stoppedIndex)
+    .filter((p) => !Object.prototype.hasOwnProperty.call(evidenceById, p.modelId));
+  return { validationOrder, remainingValidationOrder: remaining };
+}
+
+function certificationIdentityMatches(a: CertificationIdentity, b: CertificationIdentity): boolean {
+  return (
+    a.modelTag === b.modelTag &&
+    a.modelDigest === b.modelDigest &&
+    a.ollamaVersion === b.ollamaVersion &&
+    a.productionHead === b.productionHead &&
+    a.certificationContractVersion === b.certificationContractVersion &&
+    a.promptSuiteVersion === b.promptSuiteVersion &&
+    a.scorerVersion === b.scorerVersion &&
+    a.schemaVersion === b.schemaVersion
+  );
+}
+
 /**
- * Verify that a complete attempt's evidence carries every mandatory selector
- * field and that its identity matches the registry profile. Incomplete or
- * mismatched evidence must not reach the selector.
+ * Convert a trusted, complete observation into the evidence the signed-off
+ * selector expects. Selector-owned fields come from the run input and the
+ * certified profile, never from the validator's observation.
  */
-function verifyEvidenceForProfile(
+function toRuntimeValidationEvidence(
+  input: RuntimeValidationRunInput,
   profile: CertifiedModelProfile,
+  observation: RuntimeValidationObservation
+): RuntimeValidationEvidence {
+  return {
+    modelId: profile.modelId,
+    ollamaTag: profile.ollamaTag,
+    certificationVersion: profile.certificationVersion,
+    benchmarkSuiteVersion: profile.benchmarkSuiteVersion,
+    controlledContextSize: profile.controlledContextSize,
+    thinking: profile.thinking,
+    keepAlive: profile.keepAlive,
+    runtime: input.runtime,
+    platform: input.platform,
+    comparisonGroupId: input.runId,
+    loadSuccess: observation.loadSuccess,
+    loadFailureReason: observation.loadFailureReason,
+    oom: observation.oom,
+    cpuOffload: observation.cpuOffload,
+    evicted: observation.evicted,
+    measuredWholeAppPeakMemoryMiB: observation.measuredWholeAppPeakMemoryMiB,
+    avgTokensPerSecond: observation.avgTokensPerSecond,
+    p95WallClockMs: observation.p95WallClockMs,
+    p95TrueTTFTMs: observation.p95TrueTTFTMs,
+    smoothnessOk: observation.smoothnessOk,
+  };
+}
+
+/**
+ * Verify that a complete observation is internally consistent and matches the
+ * candidate. Any failure is treated as inconclusive and the evidence must not
+ * reach the selector.
+ */
+function verifyCompleteObservation(
+  candidate: CertifiedModelProfile,
   attempt: RuntimeValidationAttemptValidated | RuntimeValidationAttemptFailed
-): { ok: true } | { ok: false; reason: string } {
-  const ev = attempt.evidence;
+): { ok: true } | { ok: false; reason: InconclusiveReason; detail: string } {
+  const obs = attempt.observation;
+  const detailPrefix = `${candidate.modelId}: `;
 
-  if (ev.modelId !== profile.modelId) return { ok: false, reason: 'evidence modelId mismatch' };
-  if (ev.ollamaTag !== profile.ollamaTag) return { ok: false, reason: 'evidence ollamaTag mismatch' };
-  if (ev.certificationVersion !== profile.certificationVersion)
-    return { ok: false, reason: 'evidence certificationVersion mismatch' };
-  if (ev.benchmarkSuiteVersion !== profile.benchmarkSuiteVersion)
-    return { ok: false, reason: 'evidence benchmarkSuiteVersion mismatch' };
-  if (ev.controlledContextSize !== profile.controlledContextSize)
-    return { ok: false, reason: 'evidence controlledContextSize mismatch' };
-  if (ev.thinking !== profile.thinking) return { ok: false, reason: 'evidence thinking mismatch' };
-  if (ev.keepAlive !== profile.keepAlive) return { ok: false, reason: 'evidence keepAlive mismatch' };
-
-  if (!isNonBlankString(ev.runtime)) return { ok: false, reason: 'evidence runtime missing or blank' };
-  if (!isNonBlankString(ev.platform)) return { ok: false, reason: 'evidence platform missing or blank' };
-  if (!isNonBlankString(ev.comparisonGroupId))
-    return { ok: false, reason: 'evidence comparisonGroupId missing or blank' };
-
-  if (!isBoolean(ev.loadSuccess)) return { ok: false, reason: 'evidence loadSuccess is not a boolean' };
-  if (!isBoolean(ev.oom)) return { ok: false, reason: 'evidence oom is not a boolean' };
-  if (!isBoolean(ev.cpuOffload)) return { ok: false, reason: 'evidence cpuOffload is not a boolean' };
-  if (!isBoolean(ev.evicted)) return { ok: false, reason: 'evidence evicted is not a boolean' };
-  if (!isBoolean(ev.smoothnessOk)) return { ok: false, reason: 'evidence smoothnessOk is not a boolean' };
-
-  if (ev.loadFailureReason !== undefined && !isNonBlankString(ev.loadFailureReason))
-    return { ok: false, reason: 'evidence loadFailureReason must be a nonblank string when present' };
-
-  if (ev.measuredWholeAppPeakMemoryMiB !== undefined && !isNonNegativeFiniteNumber(ev.measuredWholeAppPeakMemoryMiB))
-    return { ok: false, reason: 'evidence measuredWholeAppPeakMemoryMiB must be a nonnegative finite number when present' };
-  if (ev.avgTokensPerSecond !== undefined && !isNonNegativeFiniteNumber(ev.avgTokensPerSecond))
-    return { ok: false, reason: 'evidence avgTokensPerSecond must be a nonnegative finite number when present' };
-  if (ev.p95WallClockMs !== undefined && !isNonNegativeFiniteNumber(ev.p95WallClockMs))
-    return { ok: false, reason: 'evidence p95WallClockMs must be a nonnegative finite number when present' };
-  if (ev.p95TrueTTFTMs !== undefined && !isNonNegativeFiniteNumber(ev.p95TrueTTFTMs))
-    return { ok: false, reason: 'evidence p95TrueTTFTMs must be a nonnegative finite number when present' };
-
-  const expectedId = profile.certificationIdentity;
-  if (profile.certified) {
-    if (!expectedId) return { ok: false, reason: 'certified profile missing certificationIdentity' };
-    const actualId = attempt.certificationIdentity;
-    if (
-      actualId.modelTag !== expectedId.modelTag ||
-      actualId.modelDigest !== expectedId.modelDigest ||
-      actualId.ollamaVersion !== expectedId.ollamaVersion ||
-      actualId.productionHead !== expectedId.productionHead ||
-      actualId.certificationContractVersion !== expectedId.certificationContractVersion ||
-      actualId.promptSuiteVersion !== expectedId.promptSuiteVersion ||
-      actualId.scorerVersion !== expectedId.scorerVersion ||
-      actualId.schemaVersion !== expectedId.schemaVersion
-    ) {
-      return { ok: false, reason: 'certificationIdentity tuple mismatch' };
+  if (obs.modelId !== candidate.modelId) {
+    return { ok: false, reason: 'incomplete-observation', detail: `${detailPrefix}observation modelId mismatch` };
+  }
+  if (obs.ollamaTag !== candidate.ollamaTag) {
+    return { ok: false, reason: 'incomplete-observation', detail: `${detailPrefix}observation ollamaTag mismatch` };
+  }
+  if (candidate.certified && candidate.certificationIdentity) {
+    if (!certificationIdentityMatches(obs.certificationIdentity, candidate.certificationIdentity)) {
+      return { ok: false, reason: 'incomplete-observation', detail: `${detailPrefix}certification identity mismatch` };
     }
+  }
+
+  if (!isBoolean(obs.loadSuccess)) {
+    return { ok: false, reason: 'incomplete-observation', detail: `${detailPrefix}loadSuccess is not a boolean` };
+  }
+  if (!isBoolean(obs.oom)) {
+    return { ok: false, reason: 'incomplete-observation', detail: `${detailPrefix}oom is not a boolean` };
+  }
+  if (!isBoolean(obs.cpuOffload)) {
+    return { ok: false, reason: 'incomplete-observation', detail: `${detailPrefix}cpuOffload is not a boolean` };
+  }
+  if (!isBoolean(obs.evicted)) {
+    return { ok: false, reason: 'incomplete-observation', detail: `${detailPrefix}evicted is not a boolean` };
+  }
+  if (!isBoolean(obs.smoothnessOk)) {
+    return { ok: false, reason: 'incomplete-observation', detail: `${detailPrefix}smoothnessOk is not a boolean` };
+  }
+  if (!isOptionalNonBlankString(obs.loadFailureReason)) {
+    return { ok: false, reason: 'incomplete-observation', detail: `${detailPrefix}loadFailureReason must be a nonblank string when present` };
+  }
+  if (!isOptionalNonNegativeFiniteNumber(obs.measuredWholeAppPeakMemoryMiB)) {
+    return { ok: false, reason: 'incomplete-observation', detail: `${detailPrefix}measuredWholeAppPeakMemoryMiB must be a nonnegative finite number when present` };
+  }
+  if (!isOptionalNonNegativeFiniteNumber(obs.avgTokensPerSecond)) {
+    return { ok: false, reason: 'incomplete-observation', detail: `${detailPrefix}avgTokensPerSecond must be a nonnegative finite number when present` };
+  }
+  if (!isOptionalNonNegativeFiniteNumber(obs.p95WallClockMs)) {
+    return { ok: false, reason: 'incomplete-observation', detail: `${detailPrefix}p95WallClockMs must be a nonnegative finite number when present` };
+  }
+  if (!isOptionalNonNegativeFiniteNumber(obs.p95TrueTTFTMs)) {
+    return { ok: false, reason: 'incomplete-observation', detail: `${detailPrefix}p95TrueTTFTMs must be a nonnegative finite number when present` };
+  }
+
+  const isPositive = attempt.kind === 'validated';
+  const positiveFlags = obs.loadSuccess && !obs.oom && !obs.evicted && obs.smoothnessOk;
+  if (isPositive && !positiveFlags) {
+    return {
+      ok: false,
+      reason: 'incomplete-observation',
+      detail: `${detailPrefix}validated observation contains failed load, OOM, eviction or failed smoothness`,
+    };
+  }
+
+  const negativeFlags = !obs.loadSuccess || obs.oom || obs.evicted || !obs.smoothnessOk;
+  if (!isPositive && !negativeFlags) {
+    return {
+      ok: false,
+      reason: 'incomplete-observation',
+      detail: `${detailPrefix}failed observation contains all success flags without a negative cause`,
+    };
   }
 
   return { ok: true };
 }
+
+function attemptIdentifiesCandidate(
+  candidate: CertifiedModelProfile,
+  attempt: RuntimeValidationAttempt
+): boolean {
+  if (attempt.kind === 'validated' || attempt.kind === 'failed') {
+    return (
+      attempt.observation.modelId === candidate.modelId &&
+      attempt.observation.ollamaTag === candidate.ollamaTag
+    );
+  }
+  return attempt.modelId === candidate.modelId && attempt.ollamaTag === candidate.ollamaTag;
+}
+
+function makeCandidateInput(
+  input: RuntimeValidationRunInput,
+  profile: CertifiedModelProfile
+): RuntimeValidationCandidateInput {
+  if (!profile.certificationIdentity) {
+    throw new Error(`Certified profile ${profile.modelId} is missing certificationIdentity`);
+  }
+  return {
+    runId: input.runId,
+    profile,
+    certificationIdentity: profile.certificationIdentity,
+    hardwareProfile: input.hardwareProfile,
+    runtime: input.runtime,
+    platform: input.platform,
+    smoothnessPolicy: input.smoothnessPolicy as ApprovedSmoothnessPolicy,
+    signal: input.signal,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Orchestrator
+// ---------------------------------------------------------------------------
 
 export async function runRuntimeValidation(
   input: RuntimeValidationRunInput,
@@ -279,42 +603,58 @@ export async function runRuntimeValidation(
     }
   }
 
-  function isCancelledOrStale(): { cancelled: true; reason: 'aborted' | 'stale' } | { cancelled: false } {
+  function isCancelled(): { cancelled: true; reason: CancellationReason } | { cancelled: false } {
     if (signal.aborted) return { cancelled: true, reason: 'aborted' };
     if (!deps.isCurrent()) return { cancelled: true, reason: 'stale' };
     return { cancelled: false };
   }
 
-  function cancelCheck(modelId?: string): RuntimeValidationOrchestratorResult | undefined {
-    const c = isCancelledOrStale();
-    if (c.cancelled) {
-      emitEvent({ kind: 'cancelled-stale', runId, modelId, reason: c.reason });
-      return { kind: 'cancelled-stale', runId, reason: c.reason };
-    }
-    return undefined;
-  }
-
   emitEvent({ kind: 'run-started', runId });
 
-  const initialCancel = cancelCheck();
-  if (initialCancel) return initialCancel;
+  if (!isApprovedSmoothnessPolicy(input.smoothnessPolicy)) {
+    const reason = 'smoothness policy does not match the approved warm budget';
+    emitEvent({ kind: 'run-completed', runId, resultKind: 'invalid-input' });
+    return {
+      kind: 'invalid-input',
+      runId,
+      reason,
+      issues: [
+        'smoothnessPolicy must be the approved warm budget: warmSampleCount=5, maxP95TrueTTFTMs=400, maxP95WallClockMs=1800',
+      ],
+      dispositions: [],
+    };
+  }
 
-  let lease: ModelWorkLease | 'busy';
+  const cancelledBeforeLease = isCancelled();
+  if (cancelledBeforeLease.cancelled) {
+    emitEvent({ kind: 'cancelled-stale', runId, reason: cancelledBeforeLease.reason });
+    emitEvent({ kind: 'run-completed', runId, resultKind: 'cancelled-stale' });
+    return { kind: 'cancelled-stale', runId, reason: cancelledBeforeLease.reason };
+  }
+
+  let leaseResult: LeaseAcquisition;
   try {
-    lease = await deps.acquireLease();
+    leaseResult = await deps.acquireLease();
   } catch (e) {
     const reason = `lease acquisition failed: ${e instanceof Error ? e.message : String(e)}`;
-    emitEvent({ kind: 'inconclusive', runId, reason });
-    return { kind: 'inconclusive', runId, reason };
+    emitEvent({ kind: 'inconclusive', runId, reason: 'resource-conflict', detail: reason });
+    emitEvent({ kind: 'run-completed', runId, resultKind: 'inconclusive' });
+    return { kind: 'inconclusive', runId, modelId: '', ollamaTag: '', reason: 'resource-conflict', detail: reason };
   }
 
-  if (lease === 'busy') {
-    const reason = 'model-work lease busy';
-    emitEvent({ kind: 'inconclusive', runId, reason });
-    return { kind: 'inconclusive', runId, reason };
+  if (leaseResult.kind === 'busy') {
+    emitEvent({ kind: 'inconclusive', runId, reason: 'resource-conflict', detail: leaseResult.reason });
+    emitEvent({ kind: 'run-completed', runId, resultKind: 'inconclusive' });
+    return { kind: 'inconclusive', runId, modelId: '', ollamaTag: '', reason: 'resource-conflict', detail: leaseResult.reason };
   }
 
-  const activeLease: ModelWorkLease = lease;
+  if (leaseResult.kind === 'inconclusive') {
+    emitEvent({ kind: 'inconclusive', runId, reason: 'resource-conflict', detail: leaseResult.reason });
+    emitEvent({ kind: 'run-completed', runId, resultKind: 'inconclusive' });
+    return { kind: 'inconclusive', runId, modelId: '', ollamaTag: '', reason: 'resource-conflict', detail: leaseResult.reason };
+  }
+
+  const activeLease = leaseResult.lease;
   let released = false;
   function releaseLease() {
     if (released) return;
@@ -327,39 +667,66 @@ export async function runRuntimeValidation(
   }
 
   try {
-    const postLockCancel = cancelCheck();
-    if (postLockCancel) return postLockCancel;
+    const afterLockCancel = isCancelled();
+    if (afterLockCancel.cancelled) {
+      emitEvent({ kind: 'cancelled-stale', runId, reason: afterLockCancel.reason });
+      emitEvent({ kind: 'run-completed', runId, resultKind: 'cancelled-stale' });
+      return { kind: 'cancelled-stale', runId, reason: afterLockCancel.reason };
+    }
 
     emitEvent({ kind: 'lock-acquired', runId });
 
     const initialResult = deps.selectCertifiedModel({
-      registry: input.registry,
+      registry: [...input.registry] as CertifiedModelProfile[],
       runtime: input.runtime,
       platform: input.platform,
       runtimeValidationEvidence: {},
     });
 
-    if (
-      initialResult.kind === 'no-certified-profiles' ||
-      initialResult.kind === 'no-compatible-certified' ||
-      initialResult.kind === 'runtime-validation-failed' ||
-      initialResult.kind === 'invalid-input'
-    ) {
-      emitEvent({ kind: 'run-completed', runId, resultKind: initialResult.kind });
-      return { ...initialResult, runId };
+    switch (initialResult.kind) {
+      case 'no-certified-profiles':
+      case 'no-compatible-certified':
+        emitEvent({ kind: 'run-completed', runId, resultKind: initialResult.kind });
+        return { ...initialResult, runId };
+      case 'runtime-validation-failed':
+        emitEvent({ kind: 'run-completed', runId, resultKind: 'runtime-validation-failed' });
+        return {
+          kind: 'runtime-validation-failed',
+          runId,
+          dispositions: initialResult.dispositions,
+          reason: initialResult.reason,
+          validationOrder: [],
+          remainingValidationOrder: [],
+        };
+      case 'invalid-input':
+        emitEvent({ kind: 'run-completed', runId, resultKind: 'invalid-input' });
+        return { ...initialResult, runId };
+      case 'selected': {
+        // A selected result with no evidence cannot be produced by the signed-off
+        // selector, but we defensively treat it as terminal.
+        const fullOrder = [initialResult.selected, ...initialResult.validationOrder];
+        const ctx = makeResultContext(fullOrder, {}, 0);
+        emitEvent({ kind: 'candidate-selected', runId, modelId: initialResult.selected.modelId });
+        emitEvent({ kind: 'run-completed', runId, resultKind: 'selected' });
+        return {
+          kind: 'selected',
+          runId,
+          selected: initialResult.selected,
+          fallbackOrder: initialResult.fallbackOrder,
+          ...ctx,
+          dispositions: initialResult.dispositions,
+          reason: initialResult.reason,
+        };
+      }
     }
 
-    // selected cannot occur with no evidence; validation-required is the only
-    // expected starting state.
-    const validationOrder: CertifiedModelProfile[] =
-      initialResult.kind === 'selected'
-        ? [initialResult.selected, ...initialResult.validationOrder]
-        : initialResult.validationOrder;
+    const validationOrder: readonly CertifiedModelProfile[] = initialResult.validationOrder;
 
     emitEvent({
       kind: 'validation-order-resolved',
       runId,
       validationOrder: validationOrder.map((p) => p.modelId),
+      remainingValidationOrder: validationOrder.map((p) => p.modelId),
     });
 
     const evidenceById: Record<string, RuntimeValidationEvidence> = {};
@@ -367,77 +734,220 @@ export async function runRuntimeValidation(
     for (let i = 0; i < validationOrder.length; i++) {
       const candidate = validationOrder[i];
 
-      const beforeCandidateCancel = cancelCheck(candidate.modelId);
-      if (beforeCandidateCancel) return beforeCandidateCancel;
+      const beforeCandidateCancel = isCancelled();
+      if (beforeCandidateCancel.cancelled) {
+        const ctx = makeRemainingContext(validationOrder, evidenceById, i);
+        emitEvent({
+          kind: 'cancelled-stale',
+          runId,
+          modelId: candidate.modelId,
+          reason: beforeCandidateCancel.reason,
+        });
+        emitEvent({ kind: 'run-completed', runId, resultKind: 'cancelled-stale', modelId: candidate.modelId });
+        return {
+          kind: 'cancelled-stale',
+          runId,
+          reason: beforeCandidateCancel.reason,
+          modelId: candidate.modelId,
+          ollamaTag: candidate.ollamaTag,
+          ...ctx,
+        };
+      }
 
       emitEvent({ kind: 'candidate-started', runId, modelId: candidate.modelId });
 
       let attempt: RuntimeValidationAttempt;
       try {
-        attempt = await deps.validateCandidate(candidate, input, deps.isCurrent);
+        const candidateInput = makeCandidateInput(input, candidate);
+        attempt = await deps.validateCandidate(candidateInput, deps.isCurrent);
       } catch (e) {
-        attempt = {
+        const detail = `validator exception: ${e instanceof Error ? e.message : String(e)}`;
+        const ctx = makeRemainingContext(validationOrder, evidenceById, i);
+        emitEvent({
           kind: 'inconclusive',
-          reason: `validator exception: ${e instanceof Error ? e.message : String(e)}`,
-          diagnostics: {
-            modelId: candidate.modelId,
-            ollamaTag: candidate.ollamaTag,
-            runId,
-            error: e instanceof Error ? e.message : String(e),
-          },
+          runId,
+          modelId: candidate.modelId,
+          reason: 'validator-exception',
+          detail,
+        });
+        emitEvent({ kind: 'run-completed', runId, resultKind: 'inconclusive', modelId: candidate.modelId });
+        return {
+          kind: 'inconclusive',
+          runId,
+          modelId: candidate.modelId,
+          ollamaTag: candidate.ollamaTag,
+          reason: 'validator-exception',
+          detail,
+          ...ctx,
         };
       }
 
-      const afterValidationCancel = cancelCheck(candidate.modelId);
-      if (afterValidationCancel) return afterValidationCancel;
+      const afterValidationCancel = isCancelled();
+      if (afterValidationCancel.cancelled) {
+        const ctx = makeRemainingContext(validationOrder, evidenceById, i);
+        emitEvent({
+          kind: 'cancelled-stale',
+          runId,
+          modelId: candidate.modelId,
+          reason: afterValidationCancel.reason,
+        });
+        emitEvent({ kind: 'run-completed', runId, resultKind: 'cancelled-stale', modelId: candidate.modelId });
+        return {
+          kind: 'cancelled-stale',
+          runId,
+          reason: afterValidationCancel.reason,
+          modelId: candidate.modelId,
+          ollamaTag: candidate.ollamaTag,
+          ...ctx,
+        };
+      }
+
+      if (!attemptIdentifiesCandidate(candidate, attempt)) {
+        const ctx = makeRemainingContext(validationOrder, evidenceById, i);
+        emitEvent({
+          kind: 'inconclusive',
+          runId,
+          modelId: candidate.modelId,
+          reason: 'incomplete-observation',
+          detail: `attempt identity does not match candidate ${candidate.modelId}`,
+        });
+        emitEvent({ kind: 'run-completed', runId, resultKind: 'inconclusive', modelId: candidate.modelId });
+        return {
+          kind: 'inconclusive',
+          runId,
+          modelId: candidate.modelId,
+          ollamaTag: candidate.ollamaTag,
+          reason: 'incomplete-observation',
+          detail: `attempt identity does not match candidate ${candidate.modelId}`,
+          ...ctx,
+        };
+      }
 
       if (attempt.kind === 'action-required') {
+        const ctx = makeRemainingContext(validationOrder, evidenceById, i);
         emitEvent({
           kind: 'action-required',
           runId,
           modelId: candidate.modelId,
           reason: attempt.reason,
         });
+        emitEvent({ kind: 'run-completed', runId, resultKind: 'action-required', modelId: candidate.modelId });
         return {
           kind: 'action-required',
           runId,
           modelId: candidate.modelId,
+          ollamaTag: candidate.ollamaTag,
           reason: attempt.reason,
           action: mapActionRequiredReason(attempt.reason),
+          ...ctx,
         };
       }
 
       if (attempt.kind === 'inconclusive') {
+        const ctx = makeRemainingContext(validationOrder, evidenceById, i);
         emitEvent({
           kind: 'inconclusive',
           runId,
           modelId: candidate.modelId,
           reason: attempt.reason,
+          detail: attempt.detail,
         });
-        return { kind: 'inconclusive', runId, reason: attempt.reason };
+        emitEvent({ kind: 'run-completed', runId, resultKind: 'inconclusive', modelId: candidate.modelId });
+        return {
+          kind: 'inconclusive',
+          runId,
+          modelId: candidate.modelId,
+          ollamaTag: candidate.ollamaTag,
+          reason: attempt.reason,
+          detail: attempt.detail,
+          ...ctx,
+        };
       }
 
       if (attempt.kind === 'cancelled') {
-        const reason = attempt.reason || 'aborted';
-        emitEvent({ kind: 'cancelled-stale', runId, modelId: candidate.modelId, reason });
-        return { kind: 'cancelled-stale', runId, reason };
+        const ctx = makeRemainingContext(validationOrder, evidenceById, i);
+        emitEvent({
+          kind: 'cancelled-stale',
+          runId,
+          modelId: candidate.modelId,
+          reason: attempt.reason,
+        });
+        emitEvent({ kind: 'run-completed', runId, resultKind: 'cancelled-stale', modelId: candidate.modelId });
+        return {
+          kind: 'cancelled-stale',
+          runId,
+          reason: attempt.reason,
+          modelId: candidate.modelId,
+          ollamaTag: candidate.ollamaTag,
+          ...ctx,
+        };
       }
 
-      const preConversionCancel = cancelCheck(candidate.modelId);
-      if (preConversionCancel) return preConversionCancel;
+      const preConversionCancel = isCancelled();
+      if (preConversionCancel.cancelled) {
+        const ctx = makeRemainingContext(validationOrder, evidenceById, i);
+        emitEvent({
+          kind: 'cancelled-stale',
+          runId,
+          modelId: candidate.modelId,
+          reason: preConversionCancel.reason,
+        });
+        emitEvent({ kind: 'run-completed', runId, resultKind: 'cancelled-stale', modelId: candidate.modelId });
+        return {
+          kind: 'cancelled-stale',
+          runId,
+          reason: preConversionCancel.reason,
+          modelId: candidate.modelId,
+          ollamaTag: candidate.ollamaTag,
+          ...ctx,
+        };
+      }
 
-      const verified = verifyEvidenceForProfile(candidate, attempt);
+      const verified = verifyCompleteObservation(candidate, attempt);
       if (!verified.ok) {
+        const ctx = makeRemainingContext(validationOrder, evidenceById, i);
         emitEvent({
           kind: 'inconclusive',
           runId,
           modelId: candidate.modelId,
           reason: verified.reason,
+          detail: verified.detail,
         });
-        return { kind: 'inconclusive', runId, reason: verified.reason };
+        emitEvent({ kind: 'run-completed', runId, resultKind: 'inconclusive', modelId: candidate.modelId });
+        return {
+          kind: 'inconclusive',
+          runId,
+          modelId: candidate.modelId,
+          ollamaTag: candidate.ollamaTag,
+          reason: verified.reason,
+          detail: verified.detail,
+          ...ctx,
+        };
       }
 
-      evidenceById[candidate.modelId] = attempt.evidence;
+      const evidence = toRuntimeValidationEvidence(input, candidate, attempt.observation);
+
+      const preEvidenceCancel = isCancelled();
+      if (preEvidenceCancel.cancelled) {
+        const ctx = makeRemainingContext(validationOrder, evidenceById, i);
+        emitEvent({
+          kind: 'cancelled-stale',
+          runId,
+          modelId: candidate.modelId,
+          reason: preEvidenceCancel.reason,
+        });
+        emitEvent({ kind: 'run-completed', runId, resultKind: 'cancelled-stale', modelId: candidate.modelId });
+        return {
+          kind: 'cancelled-stale',
+          runId,
+          reason: preEvidenceCancel.reason,
+          modelId: candidate.modelId,
+          ollamaTag: candidate.ollamaTag,
+          ...ctx,
+        };
+      }
+
+      evidenceById[candidate.modelId] = evidence;
 
       emitEvent({
         kind: 'candidate-completed',
@@ -446,27 +956,70 @@ export async function runRuntimeValidation(
         attemptKind: attempt.kind,
       });
 
-      const preSelectorCancel = cancelCheck(candidate.modelId);
-      if (preSelectorCancel) return preSelectorCancel;
+      const preSelectorCancel = isCancelled();
+      if (preSelectorCancel.cancelled) {
+        const ctx = makeResultContext(validationOrder, evidenceById, i);
+        emitEvent({
+          kind: 'cancelled-stale',
+          runId,
+          modelId: candidate.modelId,
+          reason: preSelectorCancel.reason,
+        });
+        emitEvent({ kind: 'run-completed', runId, resultKind: 'cancelled-stale', modelId: candidate.modelId });
+        return {
+          kind: 'cancelled-stale',
+          runId,
+          reason: preSelectorCancel.reason,
+          modelId: candidate.modelId,
+          ollamaTag: candidate.ollamaTag,
+          ...ctx,
+        };
+      }
 
       const selectorResult = deps.selectCertifiedModel({
-        registry: input.registry,
+        registry: [...input.registry] as CertifiedModelProfile[],
         runtime: input.runtime,
         platform: input.platform,
         runtimeValidationEvidence: evidenceById,
       });
 
-      const preReturnCancel = cancelCheck(candidate.modelId);
-      if (preReturnCancel) return preReturnCancel;
+      const preReturnCancel = isCancelled();
+      if (preReturnCancel.cancelled) {
+        const ctx = makeResultContext(validationOrder, evidenceById, i);
+        emitEvent({
+          kind: 'cancelled-stale',
+          runId,
+          modelId: candidate.modelId,
+          reason: preReturnCancel.reason,
+        });
+        emitEvent({ kind: 'run-completed', runId, resultKind: 'cancelled-stale', modelId: candidate.modelId });
+        return {
+          kind: 'cancelled-stale',
+          runId,
+          reason: preReturnCancel.reason,
+          modelId: candidate.modelId,
+          ollamaTag: candidate.ollamaTag,
+          ...ctx,
+        };
+      }
 
       if (selectorResult.kind === 'selected') {
+        const ctx = makeResultContext(validationOrder, evidenceById, i);
         emitEvent({
           kind: 'candidate-selected',
           runId,
           modelId: selectorResult.selected.modelId,
         });
-        emitEvent({ kind: 'run-completed', runId, resultKind: 'selected' });
-        return { ...selectorResult, runId };
+        emitEvent({ kind: 'run-completed', runId, resultKind: 'selected', modelId: selectorResult.selected.modelId });
+        return {
+          kind: 'selected',
+          runId,
+          selected: selectorResult.selected,
+          fallbackOrder: selectorResult.fallbackOrder,
+          ...ctx,
+          dispositions: selectorResult.dispositions,
+          reason: selectorResult.reason,
+        };
       }
 
       if (selectorResult.kind === 'runtime-validation-failed') {
@@ -476,39 +1029,114 @@ export async function runRuntimeValidation(
           modelId: candidate.modelId,
           resultKind: 'runtime-validation-failed',
         });
-        emitEvent({ kind: 'run-completed', runId, resultKind: 'runtime-validation-failed' });
-        return { ...selectorResult, runId };
+        emitEvent({ kind: 'run-completed', runId, resultKind: 'runtime-validation-failed', modelId: candidate.modelId });
+        return {
+          kind: 'runtime-validation-failed',
+          runId,
+          dispositions: selectorResult.dispositions,
+          reason: selectorResult.reason,
+          validationOrder,
+          remainingValidationOrder: [],
+        };
       }
 
       if (selectorResult.kind === 'validation-required') {
-        // Continue with the next candidate in the original order. The original
-        // order is preserved; the selector only adds/removes evidence.
+        // Continue with the next candidate in the original order.
         continue;
       }
 
-      // no-certified-profiles, no-compatible-certified, invalid-input are
-      // terminal after evidence has been added.
+      // Terminal selector result with remaining evidence already added.
       emitEvent({ kind: 'run-completed', runId, resultKind: selectorResult.kind });
       return { ...selectorResult, runId };
     }
 
-    // All candidates attempted without a positive selection. Final selector call
-    // is the authoritative result.
-    const preFinalCancel = cancelCheck();
-    if (preFinalCancel) return preFinalCancel;
+    // All candidates attempted without a positive selection.
+    const preFinalCancel = isCancelled();
+    if (preFinalCancel.cancelled) {
+      emitEvent({
+        kind: 'cancelled-stale',
+        runId,
+        reason: preFinalCancel.reason,
+      });
+      emitEvent({ kind: 'run-completed', runId, resultKind: 'cancelled-stale' });
+      return { kind: 'cancelled-stale', runId, reason: preFinalCancel.reason };
+    }
 
     const finalResult = deps.selectCertifiedModel({
-      registry: input.registry,
+      registry: [...input.registry] as CertifiedModelProfile[],
       runtime: input.runtime,
       platform: input.platform,
       runtimeValidationEvidence: evidenceById,
     });
 
-    const finalCancel = cancelCheck();
-    if (finalCancel) return finalCancel;
+    const finalCancel = isCancelled();
+    if (finalCancel.cancelled) {
+      emitEvent({
+        kind: 'cancelled-stale',
+        runId,
+        reason: finalCancel.reason,
+      });
+      emitEvent({ kind: 'run-completed', runId, resultKind: 'cancelled-stale' });
+      return { kind: 'cancelled-stale', runId, reason: finalCancel.reason };
+    }
 
-    emitEvent({ kind: 'run-completed', runId, resultKind: finalResult.kind });
-    return { ...finalResult, runId };
+    if (finalResult.kind === 'selected') {
+      const ctx = makeResultContext(validationOrder, evidenceById, validationOrder.length - 1);
+      emitEvent({
+        kind: 'candidate-selected',
+        runId,
+        modelId: finalResult.selected.modelId,
+      });
+      emitEvent({ kind: 'run-completed', runId, resultKind: 'selected', modelId: finalResult.selected.modelId });
+      return {
+        kind: 'selected',
+        runId,
+        selected: finalResult.selected,
+        fallbackOrder: finalResult.fallbackOrder,
+        ...ctx,
+        dispositions: finalResult.dispositions,
+        reason: finalResult.reason,
+      };
+    }
+
+    if (finalResult.kind === 'runtime-validation-failed') {
+      emitEvent({
+        kind: 'candidate-rejected-by-selector',
+        runId,
+        modelId: validationOrder[validationOrder.length - 1].modelId,
+        resultKind: 'runtime-validation-failed',
+      });
+      emitEvent({ kind: 'run-completed', runId, resultKind: 'runtime-validation-failed' });
+      return {
+        kind: 'runtime-validation-failed',
+        runId,
+        dispositions: finalResult.dispositions,
+        reason: finalResult.reason,
+        validationOrder,
+        remainingValidationOrder: [],
+      };
+    }
+
+    // After the loop, only selected or runtime-validation-failed are expected
+    // from the signed-off selector. Any other result is a selector contract
+    // violation and is reported as inconclusive.
+    emitEvent({
+      kind: 'inconclusive',
+      runId,
+      reason: 'incomplete-observation',
+      detail: `final selector returned unexpected kind: ${finalResult.kind}`,
+    });
+    emitEvent({ kind: 'run-completed', runId, resultKind: 'inconclusive' });
+    return {
+      kind: 'inconclusive',
+      runId,
+      modelId: '',
+      ollamaTag: '',
+      reason: 'incomplete-observation',
+      detail: `final selector returned unexpected kind: ${finalResult.kind}`,
+      validationOrder,
+      remainingValidationOrder: [],
+    };
   } finally {
     releaseLease();
   }

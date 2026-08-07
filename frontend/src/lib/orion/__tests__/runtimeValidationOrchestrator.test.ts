@@ -1,13 +1,15 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
   runRuntimeValidation,
+  APPROVED_WARM_SMOOTHNESS_POLICY,
   type RuntimeValidationRunInput,
   type RuntimeValidationDependencies,
   type RuntimeValidationAttempt,
-  type RuntimeValidationAttemptValidated,
-  type RuntimeValidationAttemptFailed,
+  type RuntimeValidationObservation,
   type RuntimeValidationProgressEvent,
   type SmoothnessPolicy,
+  type LeaseAcquisition,
+  type RuntimeValidationCandidateInput,
 } from '../runtimeValidationOrchestrator';
 import {
   selectCertifiedModel,
@@ -20,12 +22,6 @@ import type { CertifiedModelProfile, CertificationIdentity, HardwareProfile } fr
 const DEFAULT_RUNTIME = 'ollama';
 const DEFAULT_PLATFORM = 'win32';
 const DEFAULT_RUN_ID = 'orion-2b-run-001';
-
-const DEFAULT_SMOOTHNESS: SmoothnessPolicy = {
-  warmSampleCount: 5,
-  maxP95TrueTTFTMs: 400,
-  maxP95WallClockMs: 1800,
-};
 
 const DEFAULT_CERTIFICATION_IDENTITY: CertificationIdentity = {
   modelTag: 'qwen3:8b',
@@ -111,21 +107,14 @@ function makeHardwareProfile(overrides: Partial<HardwareProfile> = {}): Hardware
   } as HardwareProfile;
 }
 
-function makeEvidence(
+function makeObservation(
   profile: CertifiedModelProfile,
-  overrides: Partial<RuntimeValidationEvidence> = {}
-): RuntimeValidationEvidence {
+  overrides: Partial<RuntimeValidationObservation> = {}
+): RuntimeValidationObservation {
   return {
     modelId: profile.modelId,
     ollamaTag: profile.ollamaTag,
-    certificationVersion: profile.certificationVersion,
-    benchmarkSuiteVersion: profile.benchmarkSuiteVersion,
-    controlledContextSize: profile.controlledContextSize,
-    thinking: profile.thinking,
-    keepAlive: profile.keepAlive,
-    runtime: DEFAULT_RUNTIME,
-    platform: DEFAULT_PLATFORM,
-    comparisonGroupId: DEFAULT_RUN_ID,
+    certificationIdentity: profile.certificationIdentity as CertificationIdentity,
     loadSuccess: true,
     oom: false,
     cpuOffload: false,
@@ -137,23 +126,27 @@ function makeEvidence(
 
 function makeValidatedAttempt(
   profile: CertifiedModelProfile,
-  overrides: { evidence?: Partial<RuntimeValidationEvidence>; certificationIdentity?: CertificationIdentity } = {}
-): RuntimeValidationAttemptValidated {
+  overrides: { observation?: Partial<RuntimeValidationObservation>; certificationIdentity?: CertificationIdentity } = {}
+): Extract<RuntimeValidationAttempt, { kind: 'validated' }> {
+  const observation = makeObservation(profile, overrides.observation);
   return {
     kind: 'validated',
-    evidence: makeEvidence(profile, overrides.evidence),
-    certificationIdentity: overrides.certificationIdentity ?? (profile.certificationIdentity as CertificationIdentity),
+    observation: overrides.certificationIdentity
+      ? { ...observation, certificationIdentity: overrides.certificationIdentity }
+      : observation,
   };
 }
 
 function makeFailedAttempt(
   profile: CertifiedModelProfile,
-  overrides: { evidence?: Partial<RuntimeValidationEvidence>; certificationIdentity?: CertificationIdentity } = {}
-): RuntimeValidationAttemptFailed {
+  overrides: { observation?: Partial<RuntimeValidationObservation>; certificationIdentity?: CertificationIdentity } = {}
+): Extract<RuntimeValidationAttempt, { kind: 'failed' }> {
+  const observation = makeObservation(profile, { smoothnessOk: false, ...overrides.observation });
   return {
     kind: 'failed',
-    evidence: makeEvidence(profile, { smoothnessOk: false, ...overrides.evidence }),
-    certificationIdentity: overrides.certificationIdentity ?? (profile.certificationIdentity as CertificationIdentity),
+    observation: overrides.certificationIdentity
+      ? { ...observation, certificationIdentity: overrides.certificationIdentity }
+      : observation,
   };
 }
 
@@ -165,17 +158,21 @@ function makeRunInput(overrides: Partial<RuntimeValidationRunInput> = {}): Runti
     hardwareProfile: makeHardwareProfile(),
     runtime: DEFAULT_RUNTIME,
     platform: DEFAULT_PLATFORM,
-    smoothnessPolicy: DEFAULT_SMOOTHNESS,
+    smoothnessPolicy: APPROVED_WARM_SMOOTHNESS_POLICY,
     signal: controller.signal,
     ...overrides,
   };
+}
+
+function makeLease(release: () => void = vi.fn()): LeaseAcquisition {
+  return { kind: 'acquired', lease: { release } };
 }
 
 function makeDependencies(overrides: Partial<RuntimeValidationDependencies> = {}): RuntimeValidationDependencies {
   return {
     selectCertifiedModel,
     validateCandidate: vi.fn().mockRejectedValue(new Error('no validator configured')),
-    acquireLease: vi.fn().mockResolvedValue({ release: vi.fn() }),
+    acquireLease: vi.fn().mockResolvedValue(makeLease()),
     isCurrent: () => true,
     ...overrides,
   } as unknown as RuntimeValidationDependencies;
@@ -192,43 +189,339 @@ function createDeferred<T>(): { promise: Promise<T>; resolve: (value: T) => void
 }
 
 describe('runRuntimeValidation', () => {
-  it('invokes the selector with no fabricated evidence to determine the validation order', async () => {
-    const a = makeProfile({ modelId: 'qwen3:8b', fallbackPriority: 0 });
-    const b = makeProfile({ modelId: 'qwen3:second', fallbackPriority: 1 });
+  it('validator returns a raw complete observation, not RuntimeValidationEvidence', async () => {
+    const profile = makeProfile();
+    const observation = makeObservation(profile);
+    const attempt: RuntimeValidationAttempt = { kind: 'validated', observation };
 
+    const deps = makeDependencies({
+      validateCandidate: vi.fn().mockResolvedValue(attempt),
+    });
+
+    const result = await runRuntimeValidation(makeRunInput({ registry: [profile] }), deps);
+
+    expect(result.kind).toBe('selected');
+    // The attempt must be an observation; it must not carry selector-owned
+    // evidence fields or context that the orchestrator adds later.
+    expect(attempt).not.toHaveProperty('evidence');
+    expect(observation).not.toHaveProperty('runtime');
+    expect(observation).not.toHaveProperty('platform');
+    expect(observation).not.toHaveProperty('comparisonGroupId');
+    expect(observation).not.toHaveProperty('certificationVersion');
+    expect(observation).not.toHaveProperty('benchmarkSuiteVersion');
+    expect(observation).not.toHaveProperty('controlledContextSize');
+    expect(observation).not.toHaveProperty('thinking');
+    expect(observation).not.toHaveProperty('keepAlive');
+  });
+
+  it('orchestrator constructs selector evidence from registry and run inputs', async () => {
+    const profile = makeProfile();
     const selectSpy = vi.fn(selectCertifiedModel);
 
     const deps = makeDependencies({
       selectCertifiedModel: selectSpy,
-      validateCandidate: vi.fn().mockImplementation(async (profile) => makeValidatedAttempt(profile)),
+      validateCandidate: vi.fn().mockResolvedValue(makeValidatedAttempt(profile)),
     });
 
-    const input = makeRunInput({ registry: [a, b] });
-    const result = await runRuntimeValidation(input, deps);
-
-    expect(result.kind).toBe('selected');
-    expect(selectSpy).toHaveBeenCalledTimes(2);
-    expect(selectSpy.mock.calls[0][0]).toEqual(
-      expect.objectContaining({ runtimeValidationEvidence: {} })
+    await runRuntimeValidation(
+      makeRunInput({
+        registry: [profile],
+        runtime: DEFAULT_RUNTIME,
+        platform: DEFAULT_PLATFORM,
+        runId: DEFAULT_RUN_ID,
+      }),
+      deps
     );
-    if (result.kind === 'selected') {
-      expect(result.selected.modelId).toBe('qwen3:8b');
-      expect(result.validationOrder.map((p) => p.modelId)).toEqual(['qwen3:second']);
-    }
+
+    expect(selectSpy).toHaveBeenCalledTimes(2);
+    const secondCall = selectSpy.mock.calls[1][0];
+    const evidence = secondCall.runtimeValidationEvidence[profile.modelId] as RuntimeValidationEvidence;
+
+    expect(evidence).toEqual({
+      modelId: profile.modelId,
+      ollamaTag: profile.ollamaTag,
+      certificationVersion: profile.certificationVersion,
+      benchmarkSuiteVersion: profile.benchmarkSuiteVersion,
+      controlledContextSize: profile.controlledContextSize,
+      thinking: profile.thinking,
+      keepAlive: profile.keepAlive,
+      runtime: DEFAULT_RUNTIME,
+      platform: DEFAULT_PLATFORM,
+      comparisonGroupId: DEFAULT_RUN_ID,
+      loadSuccess: true,
+      loadFailureReason: undefined,
+      oom: false,
+      cpuOffload: false,
+      evicted: false,
+      measuredWholeAppPeakMemoryMiB: undefined,
+      avgTokensPerSecond: undefined,
+      p95WallClockMs: undefined,
+      p95TrueTTFTMs: undefined,
+      smoothnessOk: true,
+    });
   });
 
-  it('attempts candidates only in the signed-off selector validation order', async () => {
+  it('comparisonGroupId always equals the current runId', async () => {
+    const runId = 'custom-run-42';
+    const profile = makeProfile();
+    const selectSpy = vi.fn(selectCertifiedModel);
+
+    const deps = makeDependencies({
+      selectCertifiedModel: selectSpy,
+      validateCandidate: vi.fn().mockResolvedValue(makeValidatedAttempt(profile)),
+    });
+
+    await runRuntimeValidation(makeRunInput({ registry: [profile], runId }), deps);
+
+    const secondCall = selectSpy.mock.calls[1][0];
+    expect(secondCall.runtimeValidationEvidence[profile.modelId].comparisonGroupId).toBe(runId);
+  });
+
+  it('does not let validator override runtime, platform or profile identity', async () => {
+    const profile = makeProfile();
+    const selectSpy = vi.fn(selectCertifiedModel);
+    const observation = makeObservation(profile);
+
+    const deps = makeDependencies({
+      selectCertifiedModel: selectSpy,
+      validateCandidate: vi.fn().mockResolvedValue({ kind: 'validated', observation }),
+    });
+
+    await runRuntimeValidation(
+      makeRunInput({
+        registry: [profile],
+        runtime: 'ollama',
+        platform: 'win32',
+      }),
+      deps
+    );
+
+    const secondCall = selectSpy.mock.calls[1][0];
+    const evidence = secondCall.runtimeValidationEvidence[profile.modelId];
+    expect(evidence.runtime).toBe('ollama');
+    expect(evidence.platform).toBe('win32');
+    expect(evidence.modelId).toBe(profile.modelId);
+    expect(evidence.certificationVersion).toBe(profile.certificationVersion);
+  });
+
+  it('rejects mismatched observed candidate identity as inconclusive before a second selector call', async () => {
+    const profile = makeProfile();
+    const selectSpy = vi.fn(selectCertifiedModel);
+
+    const attempt = makeValidatedAttempt(profile, {
+      observation: { modelId: 'impostor', ollamaTag: 'impostor' },
+    });
+
+    const deps = makeDependencies({
+      selectCertifiedModel: selectSpy,
+      validateCandidate: vi.fn().mockResolvedValue(attempt),
+    });
+
+    const result = await runRuntimeValidation(makeRunInput({ registry: [profile] }), deps);
+
+    expect(result.kind).toBe('inconclusive');
+    expect(selectSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects mismatched certification identity as inconclusive before a second selector call', async () => {
+    const profile = makeProfile();
+    const selectSpy = vi.fn(selectCertifiedModel);
+
+    const attempt = makeValidatedAttempt(profile, {
+      certificationIdentity: makeCertificationIdentity({ ollamaVersion: '0.99.9' }),
+    });
+
+    const deps = makeDependencies({
+      selectCertifiedModel: selectSpy,
+      validateCandidate: vi.fn().mockResolvedValue(attempt),
+    });
+
+    const result = await runRuntimeValidation(makeRunInput({ registry: [profile] }), deps);
+
+    expect(result.kind).toBe('inconclusive');
+    expect(selectSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('turns wrong-model action-required attempts into inconclusive and emits no user action', async () => {
+    const profile = makeProfile();
+    const selectSpy = vi.fn(selectCertifiedModel);
+
+    const attempt: RuntimeValidationAttempt = {
+      kind: 'action-required',
+      reason: 'not-installed',
+      modelId: 'wrong-model',
+      ollamaTag: 'wrong-tag',
+    };
+
+    const deps = makeDependencies({
+      selectCertifiedModel: selectSpy,
+      validateCandidate: vi.fn().mockResolvedValue(attempt),
+    });
+
+    const result = await runRuntimeValidation(makeRunInput({ registry: [profile] }), deps);
+
+    expect(result.kind).toBe('inconclusive');
+    if (result.kind === 'inconclusive') {
+      expect(result.reason).toBe('incomplete-observation');
+    }
+    expect(selectSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not let contradictory complete observations reach the selector', async () => {
+    const profile = makeProfile();
+    const selectSpy = vi.fn(selectCertifiedModel);
+
+    // A 'validated' attempt with smoothnessOk=false is contradictory.
+    const attempt = makeValidatedAttempt(profile, {
+      observation: { smoothnessOk: false },
+    });
+
+    const deps = makeDependencies({
+      selectCertifiedModel: selectSpy,
+      validateCandidate: vi.fn().mockResolvedValue(attempt),
+    });
+
+    const result = await runRuntimeValidation(makeRunInput({ registry: [profile] }), deps);
+
+    expect(result.kind).toBe('inconclusive');
+    expect(selectSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not let partial observations reach the selector', async () => {
+    const profile = makeProfile();
+    const selectSpy = vi.fn(selectCertifiedModel);
+
+    const attempt = makeValidatedAttempt(profile, {
+      observation: { smoothnessOk: undefined as any },
+    });
+
+    const deps = makeDependencies({
+      selectCertifiedModel: selectSpy,
+      validateCandidate: vi.fn().mockResolvedValue(attempt),
+    });
+
+    const result = await runRuntimeValidation(makeRunInput({ registry: [profile] }), deps);
+
+    expect(result.kind).toBe('inconclusive');
+    expect(selectSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('lets complete authoritative negative evidence reach the selector', async () => {
+    const profile = makeProfile();
+    const selectSpy = vi.fn(selectCertifiedModel);
+
+    const deps = makeDependencies({
+      selectCertifiedModel: selectSpy,
+      validateCandidate: vi.fn().mockResolvedValue(makeFailedAttempt(profile)),
+    });
+
+    const result = await runRuntimeValidation(makeRunInput({ registry: [profile] }), deps);
+
+    expect(result.kind).toBe('runtime-validation-failed');
+    expect(selectSpy).toHaveBeenCalledTimes(2);
+    const secondCall = selectSpy.mock.calls[1][0];
+    expect(secondCall.runtimeValidationEvidence[profile.modelId].smoothnessOk).toBe(false);
+  });
+
+  it.each([
+    ['not-installed' as const, 'install-consent'],
+    ['wrong-digest' as const, 're-pull-consent'],
+    ['certified-digest-unavailable' as const, 'registry-identity-missing'],
+    ['unsupported-ollama-version' as const, 'update-ollama'],
+  ])(
+    'action-required %s produces no evidence and maps to %s',
+    async (reason, action) => {
+      const profile = makeProfile();
+      const selectSpy = vi.fn(selectCertifiedModel);
+
+      const attempt: RuntimeValidationAttempt = {
+        kind: 'action-required',
+        reason,
+        modelId: profile.modelId,
+        ollamaTag: profile.ollamaTag,
+      };
+
+      const deps = makeDependencies({
+        selectCertifiedModel: selectSpy,
+        validateCandidate: vi.fn().mockResolvedValue(attempt),
+      });
+
+      const result = await runRuntimeValidation(makeRunInput({ registry: [profile] }), deps);
+
+      expect(result.kind).toBe('action-required');
+      if (result.kind === 'action-required') {
+        expect(result.action).toBe(action);
+        expect(result.reason).toBe(reason);
+      }
+      expect(selectSpy).toHaveBeenCalledTimes(1);
+    }
+  );
+
+  it('rejects arbitrary smoothness-policy values before lease, selector or validator work', async () => {
+    const profile = makeProfile();
+    const selectSpy = vi.fn(selectCertifiedModel);
+    const validateSpy = vi.fn();
+    const acquireSpy = vi.fn();
+
+    const badPolicy: SmoothnessPolicy = {
+      warmSampleCount: 99,
+      maxP95TrueTTFTMs: 999,
+      maxP95WallClockMs: 999,
+    };
+
+    const deps = makeDependencies({
+      selectCertifiedModel: selectSpy,
+      validateCandidate: validateSpy,
+      acquireLease: acquireSpy,
+    });
+
+    const result = await runRuntimeValidation(makeRunInput({ registry: [profile], smoothnessPolicy: badPolicy }), deps);
+
+    expect(result.kind).toBe('invalid-input');
+    expect(acquireSpy).not.toHaveBeenCalled();
+    expect(selectSpy).not.toHaveBeenCalled();
+    expect(validateSpy).not.toHaveBeenCalled();
+  });
+
+  it('gives the validator a candidate input without registry, progress observer or orchestration state', async () => {
+    const profile = makeProfile();
+    const validateSpy = vi.fn().mockResolvedValue(makeValidatedAttempt(profile));
+
+    const deps = makeDependencies({ validateCandidate: validateSpy });
+    const input = makeRunInput({ registry: [profile], onProgress: vi.fn() });
+
+    await runRuntimeValidation(input, deps);
+
+    const candidateInput = validateSpy.mock.calls[0][0] as RuntimeValidationCandidateInput;
+
+    expect(candidateInput.runId).toBe(input.runId);
+    expect(candidateInput.profile.modelId).toBe(profile.modelId);
+    expect(candidateInput.certificationIdentity).toEqual(profile.certificationIdentity);
+    expect(candidateInput.hardwareProfile).toEqual(input.hardwareProfile);
+    expect(candidateInput.runtime).toBe(input.runtime);
+    expect(candidateInput.platform).toBe(input.platform);
+    expect(candidateInput.smoothnessPolicy).toEqual(APPROVED_WARM_SMOOTHNESS_POLICY);
+    expect(candidateInput.signal).toBe(input.signal);
+
+    expect(candidateInput).not.toHaveProperty('registry');
+    expect(candidateInput).not.toHaveProperty('onProgress');
+    expect(candidateInput).not.toHaveProperty('selectCertifiedModel');
+    expect(candidateInput).not.toHaveProperty('acquireLease');
+    expect(candidateInput).not.toHaveProperty('validateCandidate');
+  });
+
+  it('preserves the original selector validation order', async () => {
     const a = makeProfile({ modelId: 'model-a', fallbackPriority: 0 });
     const b = makeProfile({ modelId: 'model-b', fallbackPriority: 1 });
     const order: string[] = [];
 
     const deps = makeDependencies({
-      validateCandidate: vi.fn().mockImplementation(async (profile) => {
-        order.push(profile.modelId);
-        if (profile.modelId === 'model-a') {
-          return makeFailedAttempt(profile); // fail first, continue to second
+      validateCandidate: vi.fn().mockImplementation(async (candidateInput) => {
+        order.push(candidateInput.profile.modelId);
+        if (candidateInput.profile.modelId === 'model-a') {
+          return makeFailedAttempt(candidateInput.profile);
         }
-        return makeValidatedAttempt(profile);
+        return makeValidatedAttempt(candidateInput.profile);
       }),
     });
 
@@ -236,306 +529,64 @@ describe('runRuntimeValidation', () => {
     const result = await runRuntimeValidation(input, deps);
 
     expect(result.kind).toBe('selected');
-    expect(order).toEqual(['model-a', 'model-b']); // selector orders by fallbackPriority
+    expect(order).toEqual(['model-a', 'model-b']);
     if (result.kind === 'selected') {
       expect(result.selected.modelId).toBe('model-b');
+      expect(result.validationOrder.map((p) => p.modelId)).toEqual(['model-a', 'model-b']);
     }
   });
 
-  it('stops after the first positively selected candidate', async () => {
-    const a = makeProfile({ modelId: 'qwen3:8b', fallbackPriority: 0 });
-    const b = makeProfile({ modelId: 'qwen3:second', fallbackPriority: 1 });
-
-    const deps = makeDependencies({
-      validateCandidate: vi.fn().mockImplementation(async (profile) => {
-        return makeValidatedAttempt(profile);
-      }),
-    });
-
-    const input = makeRunInput({ registry: [a, b] });
-    const result = await runRuntimeValidation(input, deps);
-
-    expect(result.kind).toBe('selected');
-    if (result.kind === 'selected') {
-      expect(result.selected.modelId).toBe('qwen3:8b');
-      expect(result.fallbackOrder).toHaveLength(0);
-      expect(result.validationOrder.map((p) => p.modelId)).toEqual(['qwen3:second']);
-    }
-    expect(deps.validateCandidate).toHaveBeenCalledTimes(1);
-  });
-
-  it('preserves the remaining validation order without mislabeling it', async () => {
+  it('exposes remainingValidationOrder as the untouched suffix after selection', async () => {
     const a = makeProfile({ modelId: 'qwen3:8b', fallbackPriority: 0 });
     const b = makeProfile({ modelId: 'qwen3:second', fallbackPriority: 1 });
     const c = makeProfile({ modelId: 'qwen3:third', fallbackPriority: 2 });
 
     const deps = makeDependencies({
-      validateCandidate: vi.fn().mockImplementation(async (profile) => makeValidatedAttempt(profile)),
+      validateCandidate: vi.fn().mockImplementation(async (candidateInput) => {
+        return makeValidatedAttempt(candidateInput.profile);
+      }),
     });
 
-    const input = makeRunInput({ registry: [c, b, a] });
-    const result = await runRuntimeValidation(input, deps);
-
-    expect(result.kind).toBe('selected');
-    if (result.kind === 'selected') {
-      expect(result.validationOrder.map((p) => p.modelId)).toEqual(['qwen3:second', 'qwen3:third']);
-    }
-  });
-
-  it('returns action-required for a missing installed model and produces no evidence', async () => {
-    const profile = makeProfile();
-    const selectSpy = vi.fn(selectCertifiedModel);
-
-    const deps = makeDependencies({
-      selectCertifiedModel: selectSpy,
-      validateCandidate: vi.fn().mockResolvedValue({
-        kind: 'action-required',
-        reason: 'not-installed',
-        diagnostics: { modelId: profile.modelId, ollamaTag: profile.ollamaTag, runId: DEFAULT_RUN_ID },
-      } as RuntimeValidationAttempt),
-    });
-
-    const input = makeRunInput({ registry: [profile] });
-    const result = await runRuntimeValidation(input, deps);
-
-    expect(result.kind).toBe('action-required');
-    if (result.kind === 'action-required') {
-      expect(result.modelId).toBe('qwen3:8b');
-      expect(result.reason).toBe('not-installed');
-      expect(result.action).toBe('install-consent');
-    }
-
-    expect(selectSpy).toHaveBeenCalledTimes(1);
-    expect(selectSpy).toHaveBeenLastCalledWith(
-      expect.objectContaining({ runtimeValidationEvidence: {} })
-    );
-  });
-
-  it('returns action-required for wrong digest and produces no evidence', async () => {
-    const profile = makeProfile();
-    const selectSpy = vi.fn(selectCertifiedModel);
-
-    const deps = makeDependencies({
-      selectCertifiedModel: selectSpy,
-      validateCandidate: vi.fn().mockResolvedValue({
-        kind: 'action-required',
-        reason: 'wrong-digest',
-        diagnostics: { modelId: profile.modelId, ollamaTag: profile.ollamaTag, runId: DEFAULT_RUN_ID },
-      } as RuntimeValidationAttempt),
-    });
-
-    const result = await runRuntimeValidation(makeRunInput({ registry: [profile] }), deps);
-
-    expect(result.kind).toBe('action-required');
-    if (result.kind === 'action-required') {
-      expect(result.action).toBe('re-pull-consent');
-    }
-    expect(selectSpy).toHaveBeenLastCalledWith(
-      expect.objectContaining({ runtimeValidationEvidence: {} })
-    );
-  });
-
-  it('returns action-required for unsupported/unverified Ollama version and produces no evidence', async () => {
-    const profile = makeProfile();
-
-    const deps = makeDependencies({
-      validateCandidate: vi.fn().mockResolvedValue({
-        kind: 'action-required',
-        reason: 'unsupported-ollama-version',
-        diagnostics: { modelId: profile.modelId, ollamaTag: profile.ollamaTag, runId: DEFAULT_RUN_ID },
-      } as RuntimeValidationAttempt),
-    });
-
-    const result = await runRuntimeValidation(makeRunInput({ registry: [profile] }), deps);
-
-    expect(result.kind).toBe('action-required');
-    if (result.kind === 'action-required') {
-      expect(result.action).toBe('update-ollama');
-    }
-  });
-
-  it('returns inconclusive for generic ambiguous failure and makes no OOM claim', async () => {
-    const profile = makeProfile();
-    const selectSpy = vi.fn(selectCertifiedModel);
-
-    const deps = makeDependencies({
-      selectCertifiedModel: selectSpy,
-      validateCandidate: vi.fn().mockResolvedValue({
-        kind: 'inconclusive',
-        reason: 'ambiguous engine failure: HTTP 500',
-        diagnostics: { modelId: profile.modelId, ollamaTag: profile.ollamaTag, runId: DEFAULT_RUN_ID },
-      } as RuntimeValidationAttempt),
-    });
-
-    const result = await runRuntimeValidation(makeRunInput({ registry: [profile] }), deps);
-
-    expect(result.kind).toBe('inconclusive');
-    if (result.kind === 'inconclusive') {
-      expect(result.reason).toContain('ambiguous engine failure');
-    }
-    expect(selectSpy).toHaveBeenLastCalledWith(
-      expect.objectContaining({ runtimeValidationEvidence: {} })
-    );
-  });
-
-  it('returns inconclusive for unavailable or malformed residency observation', async () => {
-    const profile = makeProfile();
-
-    const deps = makeDependencies({
-      validateCandidate: vi.fn().mockResolvedValue({
-        kind: 'inconclusive',
-        reason: '/api/ps unavailable; cannot determine residency',
-        diagnostics: { modelId: profile.modelId, ollamaTag: profile.ollamaTag, runId: DEFAULT_RUN_ID },
-      } as RuntimeValidationAttempt),
-    });
-
-    const result = await runRuntimeValidation(makeRunInput({ registry: [profile] }), deps);
-
-    expect(result.kind).toBe('inconclusive');
-    expect(result).toEqual(expect.objectContaining({ reason: expect.stringContaining('/api/ps unavailable') }));
-  });
-
-  it('does not let partial diagnostics enter selector evidence', async () => {
-    const profile = makeProfile();
-    const selectSpy = vi.fn(selectCertifiedModel);
-
-    const deps = makeDependencies({
-      selectCertifiedModel: selectSpy,
-      validateCandidate: vi.fn().mockResolvedValue({
-        kind: 'inconclusive',
-        reason: 'incomplete observation',
-        diagnostics: {
-          modelId: profile.modelId,
-          ollamaTag: profile.ollamaTag,
-          runId: DEFAULT_RUN_ID,
-          stages: ['started'],
-          error: 'partial',
-        },
-      } as RuntimeValidationAttempt),
-    });
-
-    await runRuntimeValidation(makeRunInput({ registry: [profile] }), deps);
-
-    expect(selectSpy).toHaveBeenCalledTimes(1);
-    const lastCall = selectSpy.mock.calls[selectSpy.mock.calls.length - 1][0];
-    expect(Object.keys(lastCall.runtimeValidationEvidence ?? {})).toHaveLength(0);
-  });
-
-  it('only passes complete identity-bound evidence to the selector', async () => {
-    const profile = makeProfile();
-    const selectSpy = vi.fn(selectCertifiedModel);
-
-    const deps = makeDependencies({
-      selectCertifiedModel: selectSpy,
-      validateCandidate: vi.fn().mockImplementation(async (p) => makeValidatedAttempt(p)),
-    });
-
-    const result = await runRuntimeValidation(makeRunInput({ registry: [profile] }), deps);
-
-    expect(result.kind).toBe('selected');
-    expect(selectSpy).toHaveBeenCalledTimes(2);
-    const secondCall = selectSpy.mock.calls[1][0];
-    expect(secondCall.runtimeValidationEvidence[profile.modelId]).toEqual(
-      expect.objectContaining({
-        modelId: profile.modelId,
-        ollamaTag: profile.ollamaTag,
-        comparisonGroupId: DEFAULT_RUN_ID,
-        smoothnessOk: true,
-      })
-    );
-  });
-
-  it('rejects mismatched candidate identity as inconclusive', async () => {
-    const profile = makeProfile();
-
-    const attempt = makeValidatedAttempt(profile, {
-      evidence: { modelId: 'impostor', ollamaTag: 'impostor' },
-    });
-
-    const deps = makeDependencies({
-      validateCandidate: vi.fn().mockResolvedValue(attempt),
-    });
-
-    const result = await runRuntimeValidation(makeRunInput({ registry: [profile] }), deps);
-
-    expect(result.kind).toBe('inconclusive');
-    if (result.kind === 'inconclusive') {
-      expect(result.reason).toContain('modelId mismatch');
-    }
-  });
-
-  it('rejects mismatched certification identity as inconclusive', async () => {
-    const profile = makeProfile();
-
-    const attempt = makeValidatedAttempt(profile, {
-      certificationIdentity: makeCertificationIdentity({ ollamaVersion: '0.99.9' }),
-    });
-
-    const deps = makeDependencies({
-      validateCandidate: vi.fn().mockResolvedValue(attempt),
-    });
-
-    const result = await runRuntimeValidation(makeRunInput({ registry: [profile] }), deps);
-
-    expect(result.kind).toBe('inconclusive');
-    if (result.kind === 'inconclusive') {
-      expect(result.reason).toContain('certificationIdentity tuple mismatch');
-    }
-  });
-
-  it('allows complete smoothness failure to become authoritative negative evidence', async () => {
-    const profile = makeProfile();
-
-    const deps = makeDependencies({
-      validateCandidate: vi.fn().mockImplementation(async (p) => makeFailedAttempt(p)),
-    });
-
-    const result = await runRuntimeValidation(makeRunInput({ registry: [profile] }), deps);
-
-    expect(result.kind).toBe('runtime-validation-failed');
-  });
-
-  it('permits optional whole-app memory to be absent from evidence', async () => {
-    const profile = makeProfile();
-
-    const attempt = makeValidatedAttempt(profile, {
-      evidence: { measuredWholeAppPeakMemoryMiB: undefined },
-    });
-
-    const deps = makeDependencies({
-      validateCandidate: vi.fn().mockResolvedValue(attempt),
-    });
-
-    const result = await runRuntimeValidation(makeRunInput({ registry: [profile] }), deps);
+    const result = await runRuntimeValidation(makeRunInput({ registry: [c, b, a] }), deps);
 
     expect(result.kind).toBe('selected');
     if (result.kind === 'selected') {
       expect(result.selected.modelId).toBe('qwen3:8b');
+      expect(result.validationOrder.map((p) => p.modelId)).toEqual(['qwen3:8b', 'qwen3:second', 'qwen3:third']);
+      expect(result.remainingValidationOrder.map((p) => p.modelId)).toEqual(['qwen3:second', 'qwen3:third']);
     }
   });
 
-  it('cancels before acquisition and calls neither selector nor validator', async () => {
-    const controller = new AbortController();
-    controller.abort();
-
-    const selectSpy = vi.fn(selectCertifiedModel);
-    const validateSpy = vi.fn();
+  it('returns no selection and releases once when stale after lease acquisition but before validation', async () => {
+    const profile = makeProfile();
+    const release = vi.fn();
+    const deferredLease = createDeferred<LeaseAcquisition>();
+    let current = true;
 
     const deps = makeDependencies({
-      selectCertifiedModel: selectSpy,
-      validateCandidate: validateSpy,
+      isCurrent: () => current,
+      acquireLease: vi.fn().mockReturnValue(deferredLease.promise),
+      validateCandidate: vi.fn(),
     });
 
-    const result = await runRuntimeValidation(makeRunInput({ signal: controller.signal }), deps);
+    const run = runRuntimeValidation(makeRunInput({ registry: [profile] }), deps);
+
+    await Promise.resolve();
+    current = false;
+    deferredLease.resolve(makeLease(release));
+
+    const result = await run;
 
     expect(result.kind).toBe('cancelled-stale');
-    expect(selectSpy).not.toHaveBeenCalled();
-    expect(validateSpy).not.toHaveBeenCalled();
+    expect(result).toEqual(expect.objectContaining({ reason: 'stale' }));
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(deps.validateCandidate).not.toHaveBeenCalled();
   });
 
-  it('returns no authoritative selection when cancelled while validation is pending', async () => {
+  it('returns no selection and releases once when cancelled while validation is pending', async () => {
     const controller = new AbortController();
     const deferredValidate = createDeferred<RuntimeValidationAttempt>();
+    const release = vi.fn();
     const profile = makeProfile();
 
     const validateSpy = vi.fn().mockReturnValue(deferredValidate.promise);
@@ -544,11 +595,11 @@ describe('runRuntimeValidation', () => {
     const deps = makeDependencies({
       selectCertifiedModel: selectSpy,
       validateCandidate: validateSpy,
+      acquireLease: vi.fn().mockResolvedValue(makeLease(release)),
     });
 
     const run = runRuntimeValidation(makeRunInput({ signal: controller.signal, registry: [profile] }), deps);
 
-    // Let the orchestrator reach the validator's pending promise.
     await Promise.resolve();
 
     controller.abort();
@@ -557,64 +608,45 @@ describe('runRuntimeValidation', () => {
     const result = await run;
 
     expect(result.kind).toBe('cancelled-stale');
-    expect(selectSpy).toHaveBeenCalledTimes(1); // initial call only
+    expect(selectSpy).toHaveBeenCalledTimes(1);
     expect(validateSpy).toHaveBeenCalledTimes(1);
+    expect(release).toHaveBeenCalledTimes(1);
   });
 
-  it('returns no authoritative selection when stale before validation', async () => {
-    const deps = makeDependencies({
-      isCurrent: () => false,
-    });
-
-    const result = await runRuntimeValidation(makeRunInput(), deps);
-
-    expect(result.kind).toBe('cancelled-stale');
-    expect(result).toEqual(expect.objectContaining({ reason: 'stale' }));
-  });
-
-  it('returns no authoritative selection when stale after a complete attempt', async () => {
-    const profile = makeProfile();
-    let stale = false;
-
-    const deps = makeDependencies({
-      isCurrent: () => !stale,
-      validateCandidate: vi.fn().mockImplementation(async (p) => {
-        stale = true;
-        return makeValidatedAttempt(p);
-      }),
-    });
-
-    const result = await runRuntimeValidation(makeRunInput({ registry: [profile] }), deps);
-
-    expect(result.kind).toBe('cancelled-stale');
-    expect(result).toEqual(expect.objectContaining({ reason: 'stale' }));
-  });
-
-  it('returns inconclusive when the model-work lease is busy', async () => {
+  it.each([
+    { kind: 'busy' as const, reason: 'lease busy' },
+    { kind: 'inconclusive' as const, reason: 'lock acquisition failed' },
+  ])('typed lease %s performs no validation', async (leaseKind) => {
     const selectSpy = vi.fn(selectCertifiedModel);
     const validateSpy = vi.fn();
+    const release = vi.fn();
+
+    const lease: LeaseAcquisition =
+      leaseKind === 'busy'
+        ? { kind: 'busy', reason: 'another run holds the model-work lease' }
+        : { kind: 'inconclusive', reason: 'lock acquisition failed' };
 
     const deps = makeDependencies({
       selectCertifiedModel: selectSpy,
       validateCandidate: validateSpy,
-      acquireLease: vi.fn().mockResolvedValue('busy'),
+      acquireLease: vi.fn().mockResolvedValue(lease),
     });
 
     const result = await runRuntimeValidation(makeRunInput(), deps);
 
     expect(result.kind).toBe('inconclusive');
-    expect(result).toEqual(expect.objectContaining({ reason: expect.stringContaining('lease busy') }));
     expect(selectSpy).not.toHaveBeenCalled();
     expect(validateSpy).not.toHaveBeenCalled();
+    expect(release).not.toHaveBeenCalled();
   });
 
-  it('releases the lease exactly once after success', async () => {
+  it('releases the lease once after success', async () => {
     const profile = makeProfile();
     const release = vi.fn();
 
     const deps = makeDependencies({
-      acquireLease: vi.fn().mockResolvedValue({ release }),
-      validateCandidate: vi.fn().mockImplementation(async (p) => makeValidatedAttempt(p)),
+      acquireLease: vi.fn().mockResolvedValue(makeLease(release)),
+      validateCandidate: vi.fn().mockResolvedValue(makeValidatedAttempt(profile)),
     });
 
     await runRuntimeValidation(makeRunInput({ registry: [profile] }), deps);
@@ -622,17 +654,20 @@ describe('runRuntimeValidation', () => {
     expect(release).toHaveBeenCalledTimes(1);
   });
 
-  it('releases the lease exactly once after action-required', async () => {
+  it('releases the lease once after action-required', async () => {
     const profile = makeProfile();
     const release = vi.fn();
 
+    const attempt: RuntimeValidationAttempt = {
+      kind: 'action-required',
+      reason: 'not-installed',
+      modelId: profile.modelId,
+      ollamaTag: profile.ollamaTag,
+    };
+
     const deps = makeDependencies({
-      acquireLease: vi.fn().mockResolvedValue({ release }),
-      validateCandidate: vi.fn().mockResolvedValue({
-        kind: 'action-required',
-        reason: 'not-installed',
-        diagnostics: { modelId: profile.modelId, ollamaTag: profile.ollamaTag, runId: DEFAULT_RUN_ID },
-      } as RuntimeValidationAttempt),
+      acquireLease: vi.fn().mockResolvedValue(makeLease(release)),
+      validateCandidate: vi.fn().mockResolvedValue(attempt),
     });
 
     await runRuntimeValidation(makeRunInput({ registry: [profile] }), deps);
@@ -640,17 +675,21 @@ describe('runRuntimeValidation', () => {
     expect(release).toHaveBeenCalledTimes(1);
   });
 
-  it('releases the lease exactly once after inconclusive', async () => {
+  it('releases the lease once after inconclusive', async () => {
     const profile = makeProfile();
     const release = vi.fn();
 
+    const attempt: RuntimeValidationAttempt = {
+      kind: 'inconclusive',
+      reason: 'ambiguous-engine-failure',
+      modelId: profile.modelId,
+      ollamaTag: profile.ollamaTag,
+      detail: 'HTTP 500',
+    };
+
     const deps = makeDependencies({
-      acquireLease: vi.fn().mockResolvedValue({ release }),
-      validateCandidate: vi.fn().mockResolvedValue({
-        kind: 'inconclusive',
-        reason: 'oops',
-        diagnostics: { modelId: profile.modelId, ollamaTag: profile.ollamaTag, runId: DEFAULT_RUN_ID },
-      } as RuntimeValidationAttempt),
+      acquireLease: vi.fn().mockResolvedValue(makeLease(release)),
+      validateCandidate: vi.fn().mockResolvedValue(attempt),
     });
 
     await runRuntimeValidation(makeRunInput({ registry: [profile] }), deps);
@@ -658,9 +697,26 @@ describe('runRuntimeValidation', () => {
     expect(release).toHaveBeenCalledTimes(1);
   });
 
-  it('releases the lease exactly once after cancellation', async () => {
+  it('does not acquire or release a lease when cancelled before acquisition', async () => {
     const controller = new AbortController();
-    const deferredLease = createDeferred<import('../runtimeValidationOrchestrator').ModelWorkLease>();
+    controller.abort();
+    const release = vi.fn();
+    const acquireSpy = vi.fn();
+
+    const deps = makeDependencies({
+      acquireLease: acquireSpy,
+    });
+
+    const result = await runRuntimeValidation(makeRunInput({ signal: controller.signal }), deps);
+
+    expect(result.kind).toBe('cancelled-stale');
+    expect(acquireSpy).not.toHaveBeenCalled();
+    expect(release).not.toHaveBeenCalled();
+  });
+
+  it('releases the lease once after cancellation after lock acquisition', async () => {
+    const controller = new AbortController();
+    const deferredLease = createDeferred<LeaseAcquisition>();
     const deferredValidate = createDeferred<RuntimeValidationAttempt>();
     const release = vi.fn();
 
@@ -671,11 +727,9 @@ describe('runRuntimeValidation', () => {
 
     const run = runRuntimeValidation(makeRunInput({ signal: controller.signal }), deps);
 
-    // Let the orchestrator reach the validator's pending promise.
     await Promise.resolve();
-
     controller.abort();
-    deferredLease.resolve({ release });
+    deferredLease.resolve(makeLease(release));
     deferredValidate.resolve(makeValidatedAttempt(makeProfile()));
 
     await run;
@@ -683,11 +737,11 @@ describe('runRuntimeValidation', () => {
     expect(release).toHaveBeenCalledTimes(1);
   });
 
-  it('releases the lease exactly once when a dependency throws', async () => {
+  it('releases the lease once after validator exception', async () => {
     const release = vi.fn();
 
     const deps = makeDependencies({
-      acquireLease: vi.fn().mockResolvedValue({ release }),
+      acquireLease: vi.fn().mockResolvedValue(makeLease(release)),
       validateCandidate: vi.fn().mockRejectedValue(new Error('validator boom')),
     });
 
@@ -696,20 +750,78 @@ describe('runRuntimeValidation', () => {
     expect(release).toHaveBeenCalledTimes(1);
   });
 
-  it('emits progress events in the actual state transition order', async () => {
+  it('emits exactly one run-completed for every terminal path', async () => {
+    const cases: { deps: RuntimeValidationDependencies; expectedResult: string }[] = [
+      {
+        deps: makeDependencies({
+          validateCandidate: vi.fn().mockResolvedValue(makeValidatedAttempt(makeProfile())),
+        }),
+        expectedResult: 'selected',
+      },
+      {
+        deps: makeDependencies({
+          validateCandidate: vi.fn().mockResolvedValue(makeFailedAttempt(makeProfile())),
+        }),
+        expectedResult: 'runtime-validation-failed',
+      },
+      {
+        deps: makeDependencies({
+          validateCandidate: vi.fn().mockResolvedValue({
+            kind: 'action-required',
+            reason: 'not-installed',
+            modelId: 'qwen3:8b',
+            ollamaTag: 'qwen3:8b',
+          } as RuntimeValidationAttempt),
+        }),
+        expectedResult: 'action-required',
+      },
+      {
+        deps: makeDependencies({
+          validateCandidate: vi.fn().mockResolvedValue({
+            kind: 'inconclusive',
+            reason: 'ambiguous-engine-failure',
+            modelId: 'qwen3:8b',
+            ollamaTag: 'qwen3:8b',
+          } as RuntimeValidationAttempt),
+        }),
+        expectedResult: 'inconclusive',
+      },
+      {
+        deps: makeDependencies({
+          acquireLease: vi.fn().mockResolvedValue({ kind: 'busy', reason: 'busy' } as LeaseAcquisition),
+        }),
+        expectedResult: 'inconclusive',
+      },
+      {
+        deps: makeDependencies({
+          isCurrent: () => false,
+        }),
+        expectedResult: 'cancelled-stale',
+      },
+    ];
+
+    for (const { deps, expectedResult } of cases) {
+      const events: RuntimeValidationProgressEvent[] = [];
+      const input = makeRunInput({ onProgress: (e) => events.push(e) });
+
+      await runRuntimeValidation(input, deps);
+
+      const completed = events.filter((e) => e.kind === 'run-completed');
+      expect(completed).toHaveLength(1);
+      expect(completed[0].resultKind).toBe(expectedResult);
+      expect(events[events.length - 1].kind).toBe('run-completed');
+    }
+  });
+
+  it('success progress order is correct', async () => {
     const profile = makeProfile();
     const events: RuntimeValidationProgressEvent[] = [];
 
     const deps = makeDependencies({
-      validateCandidate: vi.fn().mockImplementation(async (p) => makeValidatedAttempt(p)),
+      validateCandidate: vi.fn().mockResolvedValue(makeValidatedAttempt(profile)),
     });
 
-    const input = makeRunInput({
-      registry: [profile],
-      onProgress: (e) => events.push(e),
-    });
-
-    await runRuntimeValidation(input, deps);
+    await runRuntimeValidation(makeRunInput({ registry: [profile], onProgress: (e) => events.push(e) }), deps);
 
     const kinds = events.map((e) => e.kind);
     expect(kinds).toEqual([
@@ -723,20 +835,94 @@ describe('runRuntimeValidation', () => {
     ]);
   });
 
-  it('does not expose pull, persist, switch or unload dependencies', () => {
-    const deps = makeDependencies();
-    expect(deps).not.toHaveProperty('pullModel');
-    expect(deps).not.toHaveProperty('persistModel');
-    expect(deps).not.toHaveProperty('switchModel');
-    expect(deps).not.toHaveProperty('releaseModel');
-    expect(deps).not.toHaveProperty('unloadModel');
+  it('action-required progress order is correct', async () => {
+    const profile = makeProfile();
+    const events: RuntimeValidationProgressEvent[] = [];
+
+    const attempt: RuntimeValidationAttempt = {
+      kind: 'action-required',
+      reason: 'not-installed',
+      modelId: profile.modelId,
+      ollamaTag: profile.ollamaTag,
+    };
+
+    const deps = makeDependencies({
+      validateCandidate: vi.fn().mockResolvedValue(attempt),
+    });
+
+    await runRuntimeValidation(makeRunInput({ registry: [profile], onProgress: (e) => events.push(e) }), deps);
+
+    const kinds = events.map((e) => e.kind);
+    expect(kinds).toEqual([
+      'run-started',
+      'lock-acquired',
+      'validation-order-resolved',
+      'candidate-started',
+      'action-required',
+      'run-completed',
+    ]);
+  });
+
+  it('inconclusive progress order is correct', async () => {
+    const profile = makeProfile();
+    const events: RuntimeValidationProgressEvent[] = [];
+
+    const attempt: RuntimeValidationAttempt = {
+      kind: 'inconclusive',
+      reason: 'ambiguous-engine-failure',
+      modelId: profile.modelId,
+      ollamaTag: profile.ollamaTag,
+      detail: 'HTTP 500',
+    };
+
+    const deps = makeDependencies({
+      validateCandidate: vi.fn().mockResolvedValue(attempt),
+    });
+
+    await runRuntimeValidation(makeRunInput({ registry: [profile], onProgress: (e) => events.push(e) }), deps);
+
+    const kinds = events.map((e) => e.kind);
+    expect(kinds).toEqual([
+      'run-started',
+      'lock-acquired',
+      'validation-order-resolved',
+      'candidate-started',
+      'inconclusive',
+      'run-completed',
+    ]);
+  });
+
+  it('busy lease progress order is correct', async () => {
+    const events: RuntimeValidationProgressEvent[] = [];
+
+    const deps = makeDependencies({
+      acquireLease: vi.fn().mockResolvedValue({ kind: 'busy', reason: 'busy' } as LeaseAcquisition),
+    });
+
+    await runRuntimeValidation(makeRunInput({ onProgress: (e) => events.push(e) }), deps);
+
+    const kinds = events.map((e) => e.kind);
+    expect(kinds).toEqual(['run-started', 'inconclusive', 'run-completed']);
+  });
+
+  it('cancelled progress order is correct', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const events: RuntimeValidationProgressEvent[] = [];
+
+    const deps = makeDependencies({});
+
+    await runRuntimeValidation(makeRunInput({ signal: controller.signal, onProgress: (e) => events.push(e) }), deps);
+
+    const kinds = events.map((e) => e.kind);
+    expect(kinds).toEqual(['run-started', 'cancelled-stale', 'run-completed']);
   });
 
   it('selects the single current certified candidate without speculative fallback behavior', async () => {
     const profile = makeProfile();
 
     const deps = makeDependencies({
-      validateCandidate: vi.fn().mockImplementation(async (p) => makeValidatedAttempt(p)),
+      validateCandidate: vi.fn().mockResolvedValue(makeValidatedAttempt(profile)),
     });
 
     const result = await runRuntimeValidation(makeRunInput({ registry: [profile] }), deps);
@@ -745,42 +931,28 @@ describe('runRuntimeValidation', () => {
     if (result.kind === 'selected') {
       expect(result.selected.modelId).toBe('qwen3:8b');
       expect(result.fallbackOrder).toHaveLength(0);
-      expect(result.validationOrder).toHaveLength(0);
+      expect(result.validationOrder.map((p) => p.modelId)).toEqual(['qwen3:8b']);
+      expect(result.remainingValidationOrder).toHaveLength(0);
     }
     expect(deps.validateCandidate).toHaveBeenCalledTimes(1);
   });
 
-  it('uses the approved warm smoothness policy from the run input', async () => {
-    const profile = makeProfile();
-    const validateSpy = vi.fn().mockImplementation(async (p, runInput) => {
-      expect(runInput.smoothnessPolicy.warmSampleCount).toBe(5);
-      expect(runInput.smoothnessPolicy.maxP95TrueTTFTMs).toBe(400);
-      expect(runInput.smoothnessPolicy.maxP95WallClockMs).toBe(1800);
-      return makeValidatedAttempt(p);
-    });
+  it('rejects the dependency interface at compile time when model lifecycle methods are added', () => {
+    const deps = makeDependencies();
 
-    const deps = makeDependencies({ validateCandidate: validateSpy });
-    const result = await runRuntimeValidation(makeRunInput({ registry: [profile] }), deps);
+    // TypeScript must reject this; the test only compiles if the error is expected.
+    // @ts-expect-error pullModel must not exist on RuntimeValidationDependencies
+    const _badDeps: RuntimeValidationDependencies = { ...deps, pullModel: vi.fn() };
 
-    expect(result.kind).toBe('selected');
+    // @ts-expect-error persistModel must not exist on RuntimeValidationDependencies
+    const _badDeps2: RuntimeValidationDependencies = { ...deps, persistModel: vi.fn() };
+
+    // @ts-expect-error switchModel must not exist on RuntimeValidationDependencies
+    const _badDeps3: RuntimeValidationDependencies = { ...deps, switchModel: vi.fn() };
+
+    // @ts-expect-error unloadModel must not exist on RuntimeValidationDependencies
+    const _badDeps4: RuntimeValidationDependencies = { ...deps, unloadModel: vi.fn() };
+
+    expect(deps).toBeDefined();
   });
-
-  it('rejects incomplete evidence with missing mandatory fields as inconclusive', async () => {
-    const profile = makeProfile();
-    const attempt = makeValidatedAttempt(profile, {
-      evidence: { smoothnessOk: undefined as any },
-    });
-
-    const deps = makeDependencies({
-      validateCandidate: vi.fn().mockResolvedValue(attempt),
-    });
-
-    const result = await runRuntimeValidation(makeRunInput({ registry: [profile] }), deps);
-
-    expect(result.kind).toBe('inconclusive');
-    if (result.kind === 'inconclusive') {
-      expect(result.reason).toContain('smoothnessOk');
-    }
-  });
-
 });
