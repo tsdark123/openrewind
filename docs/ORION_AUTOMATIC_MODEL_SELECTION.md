@@ -87,122 +87,149 @@ Certification rules:
 
 ---
 
-## B. Local hardware / runtime probe
+## B. Local hardware probe and runtime validation evidence
 
-The installer uses a local probe. The following values are **inputs** to the
-selection algorithm. This section defines them, but does not implement them.
+Chapter 2B.1 (`hardware.rs`) produces a read-only `HardwareProfile` that
+contains CPU, RAM and NVIDIA GPU facts. This profile is **not an input to the
+2B.2 selector** because the current registry contains no evidence-backed,
+machine-readable universal hardware requirements.
+
+Instead, a separate **runtime-validation orchestrator** consumes the
+`HardwareProfile` and, when it chooses to run a validation, produces
+precomputed `RuntimeValidationEvidence`.
 
 ```ts
-interface HardwareProfile {
-  // GPU
-  hasGpu: boolean;
-  gpuVendor?: string;       // e.g. "NVIDIA"
-  gpuModel?: string;        // e.g. "NVIDIA GeForce RTX 3070 Ti"
-  totalVramMiB?: number;
-  availableVramMiB?: number; // At install time, not after loading
-
-  // System
-  totalRamMiB?: number;
-  availableRamMiB?: number;
-  cpuCapability?: 'low' | 'mid' | 'high' | string;
-
-  // Runtime environment
-  ollamaVersion?: string;
-  cudaVersion?: string;
-  rocmVersion?: string;
-  metalVersion?: string;
-}
-
-interface RuntimeHealthResult {
+interface RuntimeValidationEvidence {
+  // Identity binding: must match the certified profile and selector call.
   modelId: string;
+  ollamaTag: string;
+  certificationVersion: string;
+  benchmarkSuiteVersion: string;
+  controlledContextSize: number;
+  thinking: boolean;
+  keepAlive: string;
+  runtime: string;
+  platform: string;
+  comparisonGroupId: string; // Nonblank identifier of the local validation run
+
+  // Validation result.
   loadSuccess: boolean;
   loadFailureReason?: string;
   oom: boolean;
-  cpuOffload: boolean;      // Did Ollama partially run on CPU?
-  evicted: boolean;         // Was the model repeatedly evicted?
-  measuredContextAllocationMiB?: number;
-  measuredWholeAppPeakMemoryMiB?: number; // True peak with engine + app
+  cpuOffload: boolean;
+  evicted: boolean;
+  measuredWholeAppPeakMemoryMiB?: number;
   avgTokensPerSecond?: number;
   p95WallClockMs?: number;
   p95TrueTTFTMs?: number;
-  smoothnessOk: boolean;    // Latency does not cause visible stalls
+  smoothnessOk: boolean;
 }
 ```
 
-Probe behavior:
+A `comparisonGroupId` ties measurements to one controlled local validation
+environment. It is not proof of certification and does not affect eligibility.
 
-- Measure **total and currently available VRAM** before any model is loaded.
-- After loading, measure **whole-application peak memory**, not just the model
-  size from `ollama ps`.
-- Record whether the model loads fully on GPU, partially on CPU, or not at all.
-- Run a short local load + latency health check and record TTFT and total
-  latency.
-- The probe runs locally; nothing is uploaded.
+Memory and latency metrics may only be used for ranking when **all** candidates
+in a correctness-score tie have the same nonblank `comparisonGroupId` and the
+same metric.
 
 ---
 
-## C. Selection algorithm
+## C. Selection algorithm (pure selector)
 
-The algorithm must follow this order exactly. It is presented as pseudocode,
-not production code.
+Chapter 2B.2 is implemented by `selectCertifiedModel`, a synchronous,
+I/O-free pure function.
+
+Architecture:
+
+```text
+Chapter 2B.1 hardware observation
+  → later runtime-validation orchestrator
+  → RuntimeValidationEvidence
+  → Chapter 2B.2 pure selector
+  → explicit ModelSelectionResult
+  → Chapter 2C persistence / switching
+```
 
 ```ts
-function selectBestCertifiedModel(
-  certifiedProfiles: CertifiedModelProfile[],
-  hardware: HardwareProfile,
-  healthCheck: (profile: CertifiedModelProfile) => Promise<RuntimeHealthResult>
-): Promise<ModelSelectionResult>
+function selectCertifiedModel(input: {
+  registry: CertifiedModelProfile[];
+  runtime: string;
+  platform: string;
+  runtimeValidationEvidence?: Record<string, RuntimeValidationEvidence>;
+}): ModelSelectionResult
 ```
 
 Pseudocode:
 
-1. **Exclude non-certified models.**
+1. **Fail closed on malformed input.**
+   Validate registry structure, evidence structure, evidence identity binding,
+   and the certified ranking metrics. Any error returns `invalid-input` with
+   machine-readable issues and dispositions for safely identifiable profiles.
+2. **Exclude non-certified models.**
    ```
    candidates = profiles where p.certified === true
    ```
-2. **Exclude incompatible platforms / runtime formats.**
+3. **Exclude incompatible platforms / runtime formats.**
    ```
    candidates = candidates where
-     p.supportedRuntings includes 'ollama' and
-     p.supportedOperatingSystems includes currentOS
+     p.supportedRuntimes includes runtime and
+     p.supportedOperatingSystems includes platform
    ```
-3. **Exclude models without conservative whole-app memory headroom.**
-   ```
-   candidates = candidates where
-     healthCheck(p).measuredWholeAppPeakMemoryMiB < hardware.availableVramMiB * safetyMargin
-   ```
-   The `safetyMargin` is a tuned constant (e.g. 0.8) chosen so the app does not
-   run at the absolute VRAM limit. The exact value must be set from packaged
-   production profiling, not from a single workstation.
-4. **Exclude models that fail the local load / latency health check.**
-   ```
-   candidates = candidates where
-     healthCheck(p).loadSuccess === true and
-     healthCheck(p).oom === false and
-     healthCheck(p).smoothnessOk === true
-   ```
-5. **Choose the highest-correctness remaining model.**
-   ```
-   primaryScore(p) = weighted(0.5 * primaryPromptPassRate,
-                              0.25 * safetyClassificationAccuracy,
-                              0.15 * rawFieldAccuracy,
-                              0.10 * pipelineFieldAccuracy)
-   selected = maxBy(candidates, primaryScore)
-   ```
-6. **When correctness is effectively tied**, prefer lower latency and lower
-   measured whole-app memory.
-7. **Fall back deterministically** if the selected model fails. The fallback
-   list is the remaining candidates sorted by `fallbackPriority` then by the
-   same score above.
-8. **Persist the successful selection** locally and re-evaluate only after a
-   meaningful change to the registry, certification data or hardware.
+4. **Categorize eligible candidates by evidence.**
+   - **Positively validated**: evidence exists, `loadSuccess === true`,
+     `oom === false`, `evicted === false` and `smoothnessOk === true`.
+   - **Pending validation**: no evidence exists.
+   - **Runtime-validation failed**: evidence exists but the run failed.
+5. **If one or more candidates are positively validated, select the highest-ranked
+   validated candidate.**
+6. **If no candidate is validated but pending candidates exist, return
+   `validation-required`** with a `validationOrder` of ranked pending candidates.
+7. **If every compatible candidate failed validation, return
+   `runtime-validation-failed`**.
+
+Ranking:
+
+- Primary score (higher is better):
+  ```
+  0.50 * primaryPromptPassRate +
+  0.25 * safetyClassificationAccuracy +
+  0.15 * rawFieldAccuracy +
+  0.10 * pipelineFieldAccuracy
+  ```
+- For an exact correctness-score tie, use lower local whole-app peak memory
+  only if every candidate in the tied group has the same nonblank
+  `comparisonGroupId` and the metric. Otherwise skip memory for the entire
+  group and try `p95WallClockMs`, then `p95TrueTTFTMs`, with the same rule.
+- Break remaining ties by `fallbackPriority` (lower first) and then a stable
+  ordinal `modelId` comparison (not `localeCompare`).
+
+Output `ModelSelectionResult` kinds:
+
+- `selected` — a positively validated, compatible certified candidate is chosen.
+  `fallbackOrder` contains only other positively validated candidates.
+  `validationOrder` contains pending candidates (if any).
+- `validation-required` — compatible certified candidates exist but none have
+  been validated. `validationOrder` is the ranked list to validate; no candidate
+  appears in `fallbackOrder`.
+- `no-certified-profiles` — the registry contains no `certified: true` entries.
+- `no-compatible-certified` — certified profiles exist but none support the
+  requested `runtime` and `platform`.
+- `runtime-validation-failed` — every compatible certified candidate has failed
+  validation.
+- `invalid-input` — registry, evidence or call arguments are malformed.
 
 Important constraints:
 
-- Do **not** use "largest model that loads" as the rule. Correctness comes
-  first; memory and latency are filters and tie-breakers.
-- The local probe is the source of truth for memory and latency, not the
-  reference measurements in the registry.
+- The selector does **not** invoke Tauri, Ollama, hardware probes, `nvidia-smi`,
+  `fetch`, environment variables or persistence.
+- The selector does **not** statically disqualify candidates by raw hardware.
+  OOM, load failure, eviction and failed smoothness are runtime-validation
+  failures, not proof of insufficient hardware.
+- Uncertified, pending, failed and incompatible candidates never appear in
+  `fallbackOrder`.
+- No minimum-VRAM threshold is implemented; `qwen3:8b` is not claimed to be
+  universally compatible with every 8 GB system.
 
 ---
 
@@ -227,10 +254,9 @@ No minimum-VRAM threshold should be derived from this single machine.
 
 ---
 
-## E. Smallest future interface
+## E. Smallest public interface
 
-These are the public surface and supporting types. Implementation is left to a
-later phase.
+These are the public surface and supporting types implemented by Chapter 2B.2.
 
 ```ts
 // ---------------------------------------------------------------------------
@@ -240,59 +266,46 @@ later phase.
 interface CertifiedModelProfile {
   modelId: string;
   ollamaTag: string;
-  immutableDigest?: string;
   certificationVersion: string;
   benchmarkSuiteVersion: string;
   certified: boolean;
   certificationDate: string;
   reasonWhenNotCertified?: string;
   controlledContextSize: number;
-  thinking: boolean | 'default';
-  primaryRepetitionPassRate: number;
+  thinking: boolean;
   primaryPromptPassRate: number;
-  safetyExecutionRate: number;
   safetyClassificationAccuracy: number;
-  preconditionPassRate: number;
   rawFieldAccuracy: number;
   pipelineFieldAccuracy: number;
-  avgHallucinationRate: number;
-  measuredModelSizeBytes?: number;
   measuredModelSizeHuman?: string;
   supportedRuntimes: string[];
   supportedOperatingSystems: string[];
   measuredWholeRuntimeMemoryMiB?: number;
-  processorSplit?: string;
   avgTokensPerSecond?: number;
   p95WallClockMs?: number;
   p95TrueTTFTMs?: number;
   conservativeRecommendedHardware?: string;
   measuredHardwareReferences: string[];
-  fallbackPriority: number;
+  fallbackPriority?: number;
 }
 
-interface HardwareProfile {
-  hasGpu: boolean;
-  gpuVendor?: string;
-  gpuModel?: string;
-  totalVramMiB?: number;
-  availableVramMiB?: number;
-  totalRamMiB?: number;
-  availableRamMiB?: number;
-  cpuCapability?: string;
-  ollamaVersion?: string;
-  cudaVersion?: string;
-  rocmVersion?: string;
-  metalVersion?: string;
-}
-
-interface RuntimeHealthResult {
+interface RuntimeValidationEvidence {
   modelId: string;
+  ollamaTag: string;
+  certificationVersion: string;
+  benchmarkSuiteVersion: string;
+  controlledContextSize: number;
+  thinking: boolean;
+  keepAlive: string;
+  runtime: string;
+  platform: string;
+  comparisonGroupId: string;
+
   loadSuccess: boolean;
   loadFailureReason?: string;
   oom: boolean;
   cpuOffload: boolean;
   evicted: boolean;
-  measuredContextAllocationMiB?: number;
   measuredWholeAppPeakMemoryMiB?: number;
   avgTokensPerSecond?: number;
   p95WallClockMs?: number;
@@ -300,64 +313,70 @@ interface RuntimeHealthResult {
   smoothnessOk: boolean;
 }
 
-interface ModelSelectionResult {
-  selected: CertifiedModelProfile | null;
-  fallbackOrder: CertifiedModelProfile[];
-  healthResults: Record<string, RuntimeHealthResult>;
-  reason: string;
+type CandidateDispositionCode =
+  | 'uncertified'
+  | 'runtime-incompatible'
+  | 'platform-incompatible'
+  | 'validation-pending'
+  | 'validation-passed'
+  | 'load-failed'
+  | 'oom'
+  | 'evicted'
+  | 'smoothness-failed'
+  | 'invalid-evidence';
+
+interface CandidateDisposition {
+  modelId: string;
+  ollamaTag: string;
+  codes: CandidateDispositionCode[];
+  explanation: string;
 }
 
+type ModelSelectionResult =
+  | { kind: 'selected'; selected: CertifiedModelProfile; fallbackOrder: CertifiedModelProfile[]; validationOrder: CertifiedModelProfile[]; dispositions: CandidateDisposition[]; reason: string }
+  | { kind: 'validation-required'; validationOrder: CertifiedModelProfile[]; fallbackOrder: CertifiedModelProfile[]; dispositions: CandidateDisposition[]; reason: string }
+  | { kind: 'no-certified-profiles'; dispositions: CandidateDisposition[]; reason: string }
+  | { kind: 'no-compatible-certified'; dispositions: CandidateDisposition[]; reason: string }
+  | { kind: 'runtime-validation-failed'; dispositions: CandidateDisposition[]; reason: string }
+  | { kind: 'invalid-input'; reason: string; issues: string[]; dispositions: CandidateDisposition[] };
+
 // ---------------------------------------------------------------------------
-// Public functions
+// Public function
 // ---------------------------------------------------------------------------
 
-/**
- * Select the best certified model for the local machine.
- *
- * 1. Filter to certified profiles.
- * 2. Filter by OS/runtime compatibility.
- * 3. Filter by conservative whole-app memory headroom (local probe).
- * 4. Filter by successful load + latency health check.
- * 5. Pick the highest-correctness remaining profile.
- * 6. Break ties by lower latency and memory.
- * 7. Return a deterministic fallback list.
- */
-declare function selectBestCertifiedModel(
-  profiles: CertifiedModelProfile[],
-  hardware: HardwareProfile,
-  healthCheck: (profile: CertifiedModelProfile) => Promise<RuntimeHealthResult>,
-  memoryHeadroomSafetyMargin?: number
-): Promise<ModelSelectionResult>;
-
-/**
- * Validate that a previously selected model still passes the health check on
- * the current machine and that the registry has not changed.
- */
-declare function validateSelectedModel(
-  selected: CertifiedModelProfile,
-  previousSelection: { modelId: string; certifiedAt: string },
-  hardware: HardwareProfile,
-  healthCheck: (profile: CertifiedModelProfile) => Promise<RuntimeHealthResult>
-): Promise<RuntimeHealthResult>;
+declare function selectCertifiedModel(input: {
+  registry: CertifiedModelProfile[];
+  runtime: string;
+  platform: string;
+  runtimeValidationEvidence?: Record<string, RuntimeValidationEvidence>;
+}): ModelSelectionResult;
 ```
 
 ---
 
 ## Open questions
 
-- What is the right `memoryHeadroomSafetyMargin` constant? It must come from
-  packaged production-runtime profiling across several GPUs, not from the
-  single RTX 3070 Ti 8 GB measurement.
+- When the registry gains evidence-backed machine-readable minimum hardware
+  requirements, how should the pure selector incorporate them without
+  reintroducing ad-hoc thresholds derived from a single workstation?
 - Should the registry ship inside the app bundle or be fetched from a
   pinned, signed update endpoint? Design decision for a later phase.
 - How do we define "smoothness"? A concrete latency budget (e.g. p95 TTFT
-  < 250 ms and p95 wall-clock < 1200 ms) should be set after profiling.
+  < 250 ms and p95 wall-clock < 1200 ms) should be set after profiling, then
+  represented as validated `smoothnessOk` evidence.
 
 ---
 
 ## Notes
 
 - This document does **not** create active production configuration.
+- `selectCertifiedModel` is pure and I/O-free; it does not download, warm,
+  persist or switch models. Those operations belong to later 2B integration and
+  Chapter 2C.
+- No static VRAM/headroom threshold is implemented. Selection is based on
+  declared runtime/platform compatibility and precomputed runtime validation.
+- No certified lighter fallback tier currently exists. `qwen3:4b-instruct` is
+  measured but not certified and must not be automatically selected.
 - The optional `orion-certified-models.example.json` file contains only the
   values directly supported by the completed measurements.
 - No SQLite, database files or telemetry upload are introduced by this design.
