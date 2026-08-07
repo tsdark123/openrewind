@@ -1,0 +1,2 @@
+.gitattributes text eol=lf
+frontend/benchmark/orion/output/qwen3-hardcoding-audit.md text eol=lf
