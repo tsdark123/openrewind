@@ -482,6 +482,51 @@ pub async fn probe_hardware() -> HardwareProfile {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::{self, File};
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::SystemTime;
+
+    fn unique_temp_path(prefix: &str) -> PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let t = SystemTime::UNIX_EPOCH.elapsed().unwrap().as_nanos();
+        std::env::temp_dir().join(format!("{prefix}_{t}_{n}"))
+    }
+
+    struct TempFile(PathBuf);
+    impl TempFile {
+        fn new() -> Self {
+            let path = unique_temp_path("orion_hw_file");
+            File::create(&path).expect("failed to create temp file");
+            Self(path)
+        }
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+    impl Drop for TempFile {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.0);
+        }
+    }
+
+    struct TempDir(PathBuf);
+    impl TempDir {
+        fn new() -> Self {
+            let path = unique_temp_path("orion_hw_dir");
+            fs::create_dir_all(&path).expect("failed to create temp dir");
+            Self(path)
+        }
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
 
     #[test]
     fn parse_one_valid_gpu() {
@@ -573,33 +618,40 @@ mod tests {
     }
 
     #[test]
-    fn resolve_nvidia_smi_prefers_existing_file_over_path_name() {
-        // Production candidate list puts explicit Windows paths first and the
-        // bare "nvidia-smi" PATH fallback last.  The resolver must select the
-        // first existing file, not the bare name.
-        let candidates = nvidia_smi_candidates();
-        assert_eq!(candidates.first().cloned().as_deref(), Some(r"C:\Windows\System32\nvidia-smi.exe"));
-        assert_eq!(candidates.last().cloned().as_deref(), Some("nvidia-smi"));
-
-        // Synthetic list where only the System32 path exists and "nvidia-smi"
-        // is present as a fallback.
-        let synthetic = vec![
-            "does_not_exist.exe".into(),
-            r"C:\Windows\System32\nvidia-smi.exe".into(),
+    fn resolve_nvidia_smi_prefers_existing_file() {
+        // A controlled temporary file is used so the test does not depend on
+        // the host having NVIDIA drivers, Windows, or any particular layout.
+        let existing = TempFile::new();
+        let missing = unique_temp_path("orion_hw_missing").to_string_lossy().to_string();
+        let candidates = vec![
+            missing,
+            existing.path().to_string_lossy().to_string(),
             "nvidia-smi".into(),
         ];
-        let resolved = resolve_nvidia_smi_path(&synthetic);
-        assert_eq!(resolved.as_deref(), Some(r"C:\Windows\System32\nvidia-smi.exe"));
+        let resolved = resolve_nvidia_smi_path(&candidates);
+        assert_eq!(resolved.as_deref(), existing.path().to_str());
+    }
+
+    #[test]
+    fn resolve_nvidia_smi_skips_directory() {
+        let dir = TempDir::new();
+        let candidates = vec![
+            dir.path().to_string_lossy().to_string(),
+            "nvidia-smi".into(),
+        ];
+        let resolved = resolve_nvidia_smi_path(&candidates);
+        assert_eq!(resolved.as_deref(), Some("nvidia-smi"));
     }
 
     #[test]
     fn resolve_nvidia_smi_falls_back_to_path_name_when_no_explicit_file_exists() {
-        let synthetic = vec![
+        let missing = unique_temp_path("orion_hw_missing").to_string_lossy().to_string();
+        let candidates = vec![
+            missing,
             "does_not_exist.exe".into(),
-            "also_missing.exe".into(),
             "nvidia-smi".into(),
         ];
-        let resolved = resolve_nvidia_smi_path(&synthetic);
+        let resolved = resolve_nvidia_smi_path(&candidates);
         assert_eq!(resolved.as_deref(), Some("nvidia-smi"));
     }
 
@@ -607,6 +659,22 @@ mod tests {
     fn resolve_nvidia_smi_returns_none_when_no_candidates_available() {
         let resolved = resolve_nvidia_smi_path(&[]);
         assert!(resolved.is_none());
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn nvidia_smi_candidates_order_on_windows() {
+        let candidates = nvidia_smi_candidates();
+        assert_eq!(candidates.first().cloned().as_deref(), Some(r"C:\Windows\System32\nvidia-smi.exe"));
+        assert_eq!(candidates.last().cloned().as_deref(), Some("nvidia-smi"));
+        assert!(candidates.len() >= 4);
+    }
+
+    #[test]
+    #[cfg(not(target_os = "windows"))]
+    fn nvidia_smi_candidates_on_non_windows_is_path_fallback_only() {
+        let candidates = nvidia_smi_candidates();
+        assert_eq!(candidates, vec!["nvidia-smi".to_string()]);
     }
 
     #[test]
