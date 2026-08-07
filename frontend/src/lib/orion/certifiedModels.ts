@@ -12,6 +12,21 @@
 export type SupportedRuntime = 'ollama' | string;
 export type SupportedOperatingSystem = 'win32' | 'darwin' | 'linux' | string;
 
+/**
+ * Immutable Chapter 2A certification identity. Required whenever
+ * `certified === true` on a `CertifiedModelProfile`.
+ */
+export interface CertificationIdentity {
+  modelTag: string;
+  modelDigest: string;
+  ollamaVersion: string;
+  productionHead: string;
+  certificationContractVersion: string;
+  promptSuiteVersion: string;
+  scorerVersion: string;
+  schemaVersion: string;
+}
+
 export interface CertifiedModelProfile {
   // Identity
   modelId: string;
@@ -23,6 +38,12 @@ export interface CertifiedModelProfile {
   certified: boolean;
   certificationDate: string;
   reasonWhenNotCertified?: string;
+
+  /**
+   * Required identity when `certified === true`.
+   * The full tuple is bound to the committed Chapter 2A control artifact.
+   */
+  certificationIdentity?: Readonly<CertificationIdentity>;
 
   // Runtime configuration used during certification.
   // These are the authoritative values for every semantic Orion call.
@@ -73,10 +94,21 @@ export const CERTIFIED_MODEL_REGISTRY: CertifiedModelProfile[] = [
   {
     modelId: 'qwen3:8b',
     ollamaTag: 'qwen3:8b',
-    certificationVersion: 'orion-runtime-validation-2026-08-04',
-    benchmarkSuiteVersion: 'frontend/benchmark/orion @ 9b8206d5fdfb16fb02fc8d8ad2b9e288b97b7cca',
+    certificationVersion: 'v2.1.1-semantic',
+    benchmarkSuiteVersion: 'v2.1.0-22-prompts',
     certified: true,
-    certificationDate: '2026-08-04',
+    certificationDate: '2026-08-07',
+    certificationIdentity: {
+      modelTag: 'qwen3:8b',
+      modelDigest:
+        '500a1f067a9f782620b40bee6f7b0c89e17ae61f686b92c24933e4ca4b2b8b41',
+      ollamaVersion: '0.32.6',
+      productionHead: 'aa4553522065229f62ed5cf85c13a9cdb8740739',
+      certificationContractVersion: 'v2.1.1-semantic',
+      promptSuiteVersion: 'v2.1.0-22-prompts',
+      scorerVersion: 'v2.0.1',
+      schemaVersion: 'v2.0.0',
+    },
     controlledContextSize: 4096,
     thinking: false,
     keepAlive: '10m',
